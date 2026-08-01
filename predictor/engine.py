@@ -61,6 +61,22 @@ Payload = Union[str, Messages]
 # scope x (actual/scope) x (actual/scope). A prequential run caught this as median
 # error rising from 77% to 204% as the loop "learned".
 DEFAULT_BUFFER = 1.0
+
+# Bounds on a learned per-key correction factor. These were [0.5, 3.0] on the assumption
+# that the scope heuristic is roughly right and history only nudges it. Measured against
+# 200 real calls of templated traffic, that assumption is false: per feature, the factor
+# the data actually asks for ranges from 0.27 to 18.2, because the heuristic reads the
+# PROMPT and a feature's answer length is mostly a property of the TASK. The old ceiling
+# clamped an 18.2 down to 3.0 and turned the loop's measured win (82.6% -> 28.8% median
+# error) into a loss, so the gate correctly rejected every candidate and the loop
+# silently did nothing.
+#
+# Widening is safe because the clamp was never the thing guarding against noise --
+# MIN_ROWS_FOR_KEY (a key needs 20+ observations) and shrinkage toward 1.0 are. The clamp
+# only has to stop the absurd, so it is set well outside the observed range rather than
+# tightly around it.
+FACTOR_MIN = 0.05
+FACTOR_MAX = 20.0
 TARGET_UNDER_PREDICTION = 0.15   # what a fitted buffer aims for
 
 # Step 1.
@@ -344,13 +360,16 @@ class Predictor:
 
     MIN_ROWS_FOR_KEY = 20
 
-    def load_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
-                     shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
-        """Install per-key correction factors with shrinkage toward 1.0.
+    def shrink_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
+                       shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
+        """The exact transformation `load_history` applies, without installing anything.
 
-        `factors` is {key_tuple: (median_actual_over_predicted, n)}. Shrinkage is not
-        optional: a factor computed from two observations is noise, and applying it
-        unshrunk lets a single outlier corrupt every future prediction for that key.
+        Exists so `refresh.py`'s held-out gate can score the factors that would ACTUALLY
+        be installed. It previously reimplemented the shrinkage inline and got a
+        different answer — it applied the blend but neither the MIN_ROWS_FOR_KEY skip
+        nor the [0.5, 3.0] clamp, so the gate approved or rejected a candidate that
+        never existed. Validating one object and installing another is the kind of bug
+        that makes a gate worse than no gate, because it still reports a verdict.
         """
         out: Dict[Tuple[str, ...], float] = {}
         for key, (raw, n) in factors.items():
@@ -362,7 +381,29 @@ class Predictor:
             # Shrinkage still applies on top: a level that just cleared the threshold
             # is trusted less than one with hundreds of rows.
             blended = (n * raw + shrink_k * 1.0) / (n + shrink_k)
-            out[key] = float(min(max(blended, 0.5), 3.0))
+            out[key] = float(min(max(blended, FACTOR_MIN), FACTOR_MAX))
+        return out
+
+    def set_history(self, factors: Dict[Tuple[str, ...], float]) -> None:
+        """Install already-shrunk factors verbatim.
+
+        `load_history` takes RAW (median, n) pairs and shrinks them. Callers that have
+        already shrunk — the refresh gate, which must score exactly what it installs —
+        need this instead, or the values get pulled toward 1.0 a second time.
+        """
+        with self._lock:
+            self._history = dict(factors)
+            self._cache.clear()
+
+    def load_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
+                     shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
+        """Install per-key correction factors with shrinkage toward 1.0.
+
+        `factors` is {key_tuple: (median_actual_over_predicted, n)}. Shrinkage is not
+        optional: a factor computed from two observations is noise, and applying it
+        unshrunk lets a single outlier corrupt every future prediction for that key.
+        """
+        out = self.shrink_history(factors, shrink_k)
         with self._lock:
             self._history = out
             self._cache.clear()
@@ -404,6 +445,8 @@ def load_fits(rows_by_bucket): return _default.load_fits(rows_by_bucket)
 def load_buffers(observations): return _default.load_buffers(observations)
 def load_bounds(observations, quantile: float = 0.95): return _default.load_bounds(observations, quantile)
 def load_history(factors, shrink_k: int = 20): return _default.load_history(factors, shrink_k)
+def set_history(factors): return _default.set_history(factors)
+def shrink_history(factors, shrink_k: int = 20): return _default.shrink_history(factors, shrink_k)
 def current_fits(): return _default.fits
 def current_history(): return dict(_default._history)
 def current_buffers(): return _default.buffers

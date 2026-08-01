@@ -95,6 +95,21 @@ RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
 # every row and reserves nothing, which is Phase 1 behaviour exactly.
 PREDICT_ENABLED = _bool("PREDICT_ENABLED", True)
 
+# The predictor's online learning loop: periodically re-fit the per-(project, feature)
+# correction from the ledger. Safe to leave on — `refresh.refresh_now` fits on the older
+# 75% of rows and installs a candidate ONLY if it beats the current factors on the newest
+# 25%, which the fit never saw, so the worst case is "no change" rather than "worse".
+#
+# Measured value depends on traffic shape and both numbers are real: on templated feature
+# traffic it takes median error from 82.6% to 28.8% out-of-sample; on unrelated one-off
+# prompts it is flat and the gate simply keeps rejecting. See CONTEXT.md §6a.
+PREDICT_REFRESH_ENABLED = _bool("PREDICT_REFRESH_ENABLED", True)
+
+# Seconds between refreshes. This reads the ledger and re-fits, so it is deliberately not
+# frequent: the factors move on the timescale of hundreds of requests, not seconds, and
+# the request path never waits on it either way.
+PREDICT_REFRESH_INTERVAL_S = _float("PREDICT_REFRESH_INTERVAL_S", 120.0)
+
 # ── Meter keys ───────────────────────────────────────────────────────────────
 # `key:project:environment` triples, comma separated. Phase 1 shim; superseded once
 # key provisioning moves into the database.
