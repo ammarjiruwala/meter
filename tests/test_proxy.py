@@ -124,11 +124,37 @@ def test_pricing() -> None:
     cost, _, _ = price(Usage(input_tokens=1_000_000), "gpt-4o-2024-11-20")
     check("dated snapshots resolve to their base model", cost == 2.50, f"got {cost}")
 
+    # Sonnet 5 is on introductory pricing ($2/$10) until 2026-08-31, so its cache
+    # tiers are 0.1x and 1.25x of $2, not of the standard $3.
     cost, _, _ = price(Usage(cache_read_tokens=1_000_000), "claude-sonnet-5")
-    check("anthropic cache reads priced at 0.1x input", cost == 0.30, f"got {cost}")
+    check("anthropic cache reads priced at 0.1x input", cost == 0.20, f"got {cost}")
 
     cost, _, _ = price(Usage(cache_write_tokens=1_000_000), "claude-sonnet-5")
-    check("anthropic cache writes priced at 1.25x input", cost == 3.75, f"got {cost}")
+    check("anthropic cache writes priced at 1.25x input", cost == 2.50, f"got {cost}")
+
+    # Sonnet 4.6 keeps the standard $3 base, so it is the check that the two Sonnet
+    # entries stayed distinct rather than one prefix-matching the other.
+    cost, _, _ = price(Usage(cache_read_tokens=1_000_000), "claude-sonnet-4-6")
+    check("sonnet 4.6 is not matched by the sonnet 5 entry", cost == 0.30, f"got {cost}")
+
+    # OpenAI publishes no separate cache-write rate, so a cache write must fall back to
+    # the plain input rate — NOT to zero, which would make every write look free.
+    cost, _, _ = price(Usage(cache_write_tokens=1_000_000), "gpt-4o")
+    check("openai cache writes fall back to the input rate", cost == 2.50, f"got {cost}")
+
+    # Longest-prefix regressions that would misprice by 5x-25x if matching went shortest
+    # -first. Every one of these pairs shares a prefix with the other.
+    for model, expected in [
+        ("gpt-5", 1.25), ("gpt-5-mini", 0.25), ("gpt-5-nano", 0.05),
+        ("gpt-5.5", 5.00), ("gpt-5.5-pro", 30.00),
+        ("gpt-5.4", 2.50), ("gpt-5.4-mini", 0.75), ("gpt-5.4-nano", 0.20),
+        ("claude-opus-5", 5.00), ("claude-opus-4-1", 15.00),
+        ("claude-haiku-4-5-20251001", 1.00),
+        ("claude-fable-5", 10.00),
+    ]:
+        cost, _, estimated = price(Usage(input_tokens=1_000_000), model)
+        check(f"{model} prices at ${expected}", cost == expected, f"got {cost}")
+        check(f"{model} is a known model", estimated is False)
 
     # An unpriced model must not silently cost $0 and hide real spend.
     cost, _, estimated = price(Usage(input_tokens=1_000_000), "totally-unknown-model")

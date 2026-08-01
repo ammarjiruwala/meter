@@ -109,13 +109,16 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 
 *   **Dashboard:** Not started. Tanay can read `meter.db` directly today — WAL mode is on, so reading while the proxy writes is safe.
 
+*   **Resolved since kickoff:**
+    1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)
+    2.  ✅ **Redis: not in the 48-hour build — Shubh, Phase 2.** Reservations still get built, in-process. Redis is not what makes authorize/capture correct; serialization is, and with one proxy process an `asyncio.Lock` is an identical guarantee for none of the operational cost. Redis becomes load-bearing at proxy replica #2. (`PROPOSALS.md` A5)
+    3.  ✅ **Budget enforcement is now owned — Shubh, Phase 2.** `meter.yaml` loader plus a pre-flight ceiling check in the request path. (`PROPOSALS.md` B7)
+
 *   **Open blockers/decisions:**
-    1.  **Pricing rates are unverified and this blocks the demo.** `pricing/2026-08-01.yaml` was written from memory. Every dollar Meter displays comes from it, and a wrong list price is checkable from the audience. ~30 min for someone to diff against the providers' pricing pages. (`PROPOSALS.md` C1)
-    2.  **Redis has no owner and no phase slot**, but `ARCHITECTURE.md` §2 builds reservations on it. Phase 1 shipped without it and writes `reservation_id` NULL. Decide whether Redis is in the 48-hour build. (`PROPOSALS.md` A5)
-    3.  **Two different circuit-breaker detectors are specified** — flat $20/5min here in §5C, ratio-vs-7-day-baseline in `ARCHITECTURE.md` §6. Shipped the flat one. (`PROPOSALS.md` A1)
-    4.  **Budget enforcement — one of the three pillars — is assigned to nobody** in any `PLAN.md` phase. (`PROPOSALS.md` B7)
-    5.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** (`PROPOSALS.md` B9, B10)
-    6.  **The Visa VIC track has no architectural surface.** We are entered in a track nothing in the build targets. (`PROPOSALS.md` B14)
+    1.  **Two different circuit-breaker detectors are specified** — flat $20/5min here in §5C, ratio-vs-7-day-baseline in `ARCHITECTURE.md` §6. Shipped the flat one. Google's SRE Workbook says the answer is neither: pair a short and a long window and require both to trip. ~10 lines. (`PROPOSALS.md` A1)
+    2.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** The first is what turns a cost tool into a margin tool and is ~40 lines; the second is the first command in our own quickstart. (`PROPOSALS.md` B9, B10)
+    3.  **The Visa VIC track has no architectural surface.** We are entered in a track nothing in the build targets. (`PROPOSALS.md` B14)
+    4.  **Anthropic's OpenAI-compatibility path is unverified** — a `claude-*` model sent to `/v1/chat/completions` is forwarded to it and nobody has confirmed it exists. One live call with a real key settles it. (`PROPOSALS.md` B1, C2)
 
 *   **`PROPOSALS.md`** collects all 20 open items from a full architecture read. Nothing in it has been applied to this file, `README.md`, or `ARCHITECTURE.md` — they need decisions first.
 
