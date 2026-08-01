@@ -185,8 +185,16 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   ⚠ **Two settings before any live run**, both read at import so uvicorn must restart:
         `TREASURER_DRY_RUN=false`, and `PRAVA_MANDATE_ID` still points at the `one_time` mandate
         (only affects the bare `/charge` and `/report` endpoints — `/topup` reads the table).
-    *   ✅ **Resolved:** recurring mandates are a **pool that renews per cycle**, not one charge per
-        cycle — `renewsAt` is on the mandate object. The earlier open question is closed.
+    *   🛑 **ONE PURCHASE PER PAYMENT CYCLE — confirmed live, 2026-08-01.** A second charge against
+        the monthly mandate was declined by Visa:
+        *"Purchase already made in the current payment cycle for transaction: tli_…"*.
+        `remaining` and `renewsAt` make a recurring mandate *look* like a renewing pool; it is not.
+        The evidence was visible all along — the monthly mandate reads `45.00/50.00`, meaning
+        exactly one $5 charge ever landed despite several attempts.
+        **This breaks repeat top-ups against a single mandate**, which the demo narrative assumes.
+        Options: mint a fresh mandate per top-up (which is what §4/§5B's original "one-time scoped
+        card" wording actually described), keep a pool of pre-approved mandates and consume one per
+        save, or demo a single save. **Unresolved — needs a decision before the demo.**
     *   ⚠ **`remaining`, not `approvedAmount`, is the enforced cap.** The demo mandate has $45 of
         $50 left, so a $50 top-up is refused. A fresh $500 monthly mandate is created but
         **awaiting Shivam's passkey approval**.
