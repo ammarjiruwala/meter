@@ -89,13 +89,35 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — project kickoff, no components built yet.
-*   **Proxy:** Not started.
-*   **Predictive Engine:** Not started.
+*   **Last updated:** 2026-08-01 — Shubh's Phase 1 proxy work merged.
+
+*   **Proxy: WORKING.** `proxy/` — FastAPI, run with `uvicorn proxy.app:app --port 8080`. Full detail in `proxy/README.md`.
+    *   `POST /v1/chat/completions` (OpenAI-shaped) and `POST /v1/messages` (Anthropic-native); provider chosen by model prefix, overridable with `X-Meter-Provider`.
+    *   Caller sends a **Meter** key; the proxy substitutes the master provider key upstream.
+    *   SSE streaming with real usage extraction for both provider shapes (pulled forward from Phase 2). Non-streamed calls too.
+    *   Attribution rungs 0–2 (`X-Meter-Feature` / `-Actor` / `-Trace`) recorded on every row.
+    *   Measured overhead: **p50 +1.49 ms** wall-clock against a local fake upstream. Loopback, no TLS — a floor, not a production number.
+    *   Not yet done: reservations (needs Redis — see below), per-project daily ceilings, `POST /v1/annotate`.
+
+*   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
+
+*   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are NOT wired** — `breaker.notify()` is a log-only seam waiting on Tanay.
+
+*   **Predictive Engine:** Not started. The proxy prices *actual* usage after the fact; the predicted-vs-actual variance column arrives with Ammar's engine.
+
 *   **Treasurer Agent / Prava:** Not started.
-*   **Circuit Breaker / Poke:** Not started.
-*   **Dashboard:** Not started.
-*   **Open blockers/decisions:** None yet.
+
+*   **Dashboard:** Not started. Tanay can read `meter.db` directly today — WAL mode is on, so reading while the proxy writes is safe.
+
+*   **Open blockers/decisions:**
+    1.  **Pricing rates are unverified and this blocks the demo.** `pricing/2026-08-01.yaml` was written from memory. Every dollar Meter displays comes from it, and a wrong list price is checkable from the audience. ~30 min for someone to diff against the providers' pricing pages. (`PROPOSALS.md` C1)
+    2.  **Redis has no owner and no phase slot**, but `ARCHITECTURE.md` §2 builds reservations on it. Phase 1 shipped without it and writes `reservation_id` NULL. Decide whether Redis is in the 48-hour build. (`PROPOSALS.md` A5)
+    3.  **Two different circuit-breaker detectors are specified** — flat $20/5min here in §5C, ratio-vs-7-day-baseline in `ARCHITECTURE.md` §6. Shipped the flat one. (`PROPOSALS.md` A1)
+    4.  **Budget enforcement — one of the three pillars — is assigned to nobody** in any `PLAN.md` phase. (`PROPOSALS.md` B7)
+    5.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** (`PROPOSALS.md` B9, B10)
+    6.  **The Visa VIC track has no architectural surface.** We are entered in a track nothing in the build targets. (`PROPOSALS.md` B14)
+
+*   **`PROPOSALS.md`** collects all 20 open items from a full architecture read. Nothing in it has been applied to this file, `README.md`, or `ARCHITECTURE.md` — they need decisions first.
 
 ---
 

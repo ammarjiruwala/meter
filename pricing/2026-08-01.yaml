@@ -1,0 +1,101 @@
+# Meter pricing table — version 2026-08-01
+#
+# ARCHITECTURE.md §3: rates live here, not in code, and every ledger row stores the
+# `pricing_version` it was priced with. That is what keeps historical rows reproducible
+# after a provider changes its rate card — repricing history in place would silently
+# rewrite the only priced record of a company's spend.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠  VERIFY BEFORE THE DEMO
+# ─────────────────────────────────────────────────────────────────────────────
+# These rates were written from memory and have NOT been checked against live provider
+# pricing pages. A cost tool that is visibly wrong about published list prices loses the
+# room instantly. Someone must diff every line below against the provider's own pricing
+# page and bump the version filename before anyone demos this. See PROPOSALS.md item C1.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Units and semantics
+# ─────────────────────────────────────────────────────────────────────────────
+# All rates are USD per 1,000,000 tokens.
+#
+#   input        standard uncached input tokens
+#   output       generated tokens
+#   cache_write  tokens written into the provider's prompt cache
+#                (Anthropic: 1.25x input. OpenAI does not bill cache writes separately,
+#                 so it is omitted and falls back to the input rate.)
+#   cache_read   tokens served from the provider's prompt cache
+#                (Anthropic: 0.1x input. OpenAI: 0.5x input.)
+#
+# Pricing on total tokens rather than on these four buckets would make Meter visibly
+# wrong on heavy-cache and batch workloads — which are exactly the workloads a cost tool
+# exists to explain. Getting this wrong is worse than not shipping the feature.
+#
+# `batch_discount` is applied multiplicatively when a request is flagged as a batch job.
+# Not wired into the Phase 1 proxy (batch endpoints are not proxied yet); it is here so
+# the schema does not change when they are.
+
+version: "2026-08-01"
+currency: USD
+batch_discount: 0.5
+
+# Matched longest-prefix-first against the model string the caller sent, so a dated
+# snapshot like `gpt-4o-2024-11-20` resolves to the `gpt-4o` entry without needing a
+# row per snapshot. Add a more specific key only when a snapshot is priced differently.
+models:
+  # ── OpenAI ────────────────────────────────────────────────────────────────
+  gpt-4o-mini:
+    input: 0.15
+    output: 0.60
+    cache_read: 0.075
+  gpt-4o:
+    input: 2.50
+    output: 10.00
+    cache_read: 1.25
+  gpt-4.1-mini:
+    input: 0.40
+    output: 1.60
+    cache_read: 0.10
+  gpt-4.1:
+    input: 2.00
+    output: 8.00
+    cache_read: 0.50
+  o3-mini:
+    input: 1.10
+    output: 4.40
+    cache_read: 0.55
+
+  # ── Anthropic ─────────────────────────────────────────────────────────────
+  claude-haiku:
+    input: 0.80
+    output: 4.00
+    cache_write: 1.00
+    cache_read: 0.08
+  claude-3-5-haiku:
+    input: 0.80
+    output: 4.00
+    cache_write: 1.00
+    cache_read: 0.08
+  claude-sonnet:
+    input: 3.00
+    output: 15.00
+    cache_write: 3.75
+    cache_read: 0.30
+  claude-3-5-sonnet:
+    input: 3.00
+    output: 15.00
+    cache_write: 3.75
+    cache_read: 0.30
+  claude-opus:
+    input: 15.00
+    output: 75.00
+    cache_write: 18.75
+    cache_read: 1.50
+
+# Used when no prefix matches. Deliberately NOT zero: a model we have never seen must
+# not silently price at $0 and hide real spend from the ledger. Rows priced this way are
+# flagged `estimated = true` so the dashboard can show them as approximate rather than
+# quietly folding a guess into a number someone will put in a board deck.
+default:
+  input: 1.00
+  output: 5.00
+  cache_read: 0.10

@@ -50,6 +50,44 @@ describe current reality, not a changelog. If you want a changelog, that's what 
   between "rehearsing a top-up" and "actually spending money" in the Prava sandbox.
 - Keep secrets (Prava keys, provider keys) out of anything committed. `.env` stays local.
 
+## Running what exists
+
+The proxy (`proxy/`) is the only component built so far. Owner: Shubh.
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env                              # add provider keys
+uvicorn proxy.app:app --port 8080 --reload        # run it
+python tests/test_proxy.py                        # 78 assertions, no framework, ~1s
+```
+
+Run the self-check before you commit anything under `proxy/`. It is plain asserts, so it
+needs no pytest and no fixtures — if you add non-trivial logic, add an assertion to it
+rather than starting a second test system.
+
+`proxy/README.md` documents the module map, the request lifecycle, and — importantly — the
+list of things deliberately *not* implemented in Phase 1 and why. Read that before
+concluding something is missing by accident.
+
+## Proposals go in PROPOSALS.md, not into the source-of-truth docs
+
+`PROPOSALS.md` collects contradictions between `README.md` / `CONTEXT.md` /
+`ARCHITECTURE.md`, plus gaps those documents leave undefined. It is a staging area: items
+land there, a human decides, and only then does anyone edit the three source-of-truth files.
+
+If you find a new contradiction or gap, **add it to `PROPOSALS.md` and raise it — do not
+silently resolve it by editing one of the three documents to match the other.** Whichever
+one you "fixed" may have been the correct one, and quietly picking a side destroys the
+record that there was ever a disagreement. Updating §6a of `CONTEXT.md` with current
+*status* is different and is still required (see above).
+
+## Branching
+
+Work on a branch named `<yourname>/<what>` (e.g. `shubh/phase1-proxy`), then merge to
+`main` when the piece works and its self-check passes. Four people on a 48-hour build means
+`main` should always be demoable.
+
 ## Commits and repo content
 
 Do not add any AI/assistant attribution anywhere in this repo — no `Co-Authored-By` trailers naming
