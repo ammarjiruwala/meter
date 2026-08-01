@@ -35,8 +35,24 @@ log = logging.getLogger("meter.treasury.prava")
 # alternative is abandoning a charge that may already have been accepted.
 _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
+# Reads get a much shorter leash, and the reason is a measured quirk of the sandbox
+# rather than caution in the abstract:
+#
+#   valid key                    -> 200 in ~1s
+#   MALFORMED key                -> 401 AUTH_1001 in ~1s
+#   no key                       -> 401 AUTH_1002 in ~1s
+#   well-formed but WRONG key    -> hangs; read times out after 20s+
+#
+# So a revoked or rotated key does not fail fast, it stalls. On a write that ambiguity is
+# unavoidable and we hold the event `pending` because the charge may have landed. On a
+# read there is nothing to be ambiguous about — no side effect can have occurred — so a
+# read that stalls should give up quickly and let the caller move on rather than wedging
+# a 30-second loop.
+_TIMEOUT_READ = httpx.Timeout(8.0, connect=5.0)
 
-async def _request(method: str, path: str, json_body: dict | None = None) -> dict:
+
+async def _request(method: str, path: str, json_body: dict | None = None,
+                   timeout: httpx.Timeout | None = None) -> dict:
     """Every Prava call goes through here, and none of them raise.
 
     A Treasurer that dies on a socket error stops topping up, and the balance runs out
@@ -54,7 +70,7 @@ async def _request(method: str, path: str, json_body: dict | None = None) -> dic
     """
     url = f"{PRAVA_API_BASE}{path}"
     try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout or _TIMEOUT) as client:
             r = await client.request(method, url, headers=HEADERS, json=json_body)
     except httpx.TimeoutException as exc:
         log.warning("prava timeout on %s %s: %s", method, path, exc)
@@ -207,4 +223,34 @@ async def list_mandates():
     than assume the list is there — a sync that raises would take the whole status
     endpoint down every time Prava hiccups.
     """
-    return await _request("GET", "/v1/mandates")
+    return await _request("GET", "/v1/mandates", timeout=_TIMEOUT_READ)
+
+
+async def verify_credentials() -> dict:
+    """Prove the key works, at boot, before anything depends on it.
+
+    A revoked key does not announce itself — it stalls (see `_TIMEOUT_READ`). Without
+    this the first sign of trouble is a top-up hanging at 3am, or on stage. One cheap
+    read at startup turns that into a line in the log before anyone is watching.
+
+    Never raises and never blocks startup: it reports, and the operator decides.
+    """
+    if not PRAVA_LIVE_MODE:
+        return {"_ok": True, "simulated": True,
+                "detail": "PRAVA_LIVE_MODE is off; no credentials needed"}
+
+    result = await _request("GET", "/v1/mandates", timeout=_TIMEOUT_READ)
+    if result.get("_ok"):
+        log.info("prava credentials OK — %d mandate(s) visible",
+                 len(result.get("mandates", [])))
+    elif result.get("_error") == "timeout":
+        # The specific shape of a bad key on this sandbox. Worth naming, because
+        # "timeout" on its own sends you looking at the network instead of the key.
+        log.error("PRAVA CREDENTIALS: request stalled. On this sandbox a well-formed "
+                  "but INVALID secret key hangs rather than returning 401 — check "
+                  "PRAVA_API_KEY before assuming a network problem.")
+    else:
+        log.error("PRAVA CREDENTIALS FAILED: %s (HTTP %s, response-id %s)",
+                  result.get("_error"), result.get("_http_status"),
+                  result.get("_response_id"))
+    return result

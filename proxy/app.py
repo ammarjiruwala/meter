@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from treasury import db as treasury_db
 from treasury import mock_provider
+from treasury import prava as treasury_prava
 from treasury import routes as treasury_routes
 from treasury import treasurer
 
@@ -81,6 +82,11 @@ async def lifespan(app: FastAPI):
     # money unless TREASURER_DRY_RUN is also off — two switches, because a process that
     # charges a card on a timer should not start by accident.
     treasurer.start()
+
+    # Prove the payment rail's credentials at boot. A revoked Prava key does not return
+    # 401 on this sandbox — it stalls — so the first symptom would otherwise be a top-up
+    # hanging at 3am. Never fatal: it logs and the operator decides.
+    await treasury_prava.verify_credentials()
 
     if not config.OPENAI_API_KEY and not config.ANTHROPIC_API_KEY:
         log.warning("no provider keys configured — every upstream call will 401")

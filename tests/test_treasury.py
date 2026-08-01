@@ -40,7 +40,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from proxy import db as ledger  # noqa: E402
 from proxy.app import app  # noqa: E402
-from treasury import config, db, topup, treasurer  # noqa: E402
+from treasury import config, db, prava, topup, treasurer  # noqa: E402
 
 PASSED = 0
 CLIENT: TestClient
@@ -470,6 +470,22 @@ def test_alert_noise() -> None:
         treasurer.notify = real_notify
 
 
+def test_credential_preflight() -> None:
+    """A revoked key stalls rather than 401-ing, so it is checked at boot.
+
+    Measured on the sandbox: a valid key answers in ~1s, a malformed key and a missing
+    key both 401 in ~1s, but a well-formed-but-wrong key hangs past 20s. That is why
+    reads carry a shorter timeout than writes, and why this check exists at all.
+    """
+    print("\ncredential preflight")
+    result = asyncio.run(prava.verify_credentials())
+    check("preflight is a no-op when not live", result["_ok"] is True)
+    check("and says why", result.get("simulated") is True)
+    check("reads use a shorter timeout than writes",
+          prava._TIMEOUT_READ.read < prava._TIMEOUT.read,
+          f"{prava._TIMEOUT_READ.read}s vs {prava._TIMEOUT.read}s")
+
+
 def test_pending_mandates() -> None:
     """Phase 2: a mandate does not exist on Prava's side until it is approved."""
     print("\npending mandate approvals")
@@ -849,6 +865,7 @@ def main() -> int:
             test_failure_handling,
             test_loop_resilience,
             test_alert_noise,
+            test_credential_preflight,
             test_pending_mandates,
             test_event_ledger,
             test_migration_from_old_schema,
