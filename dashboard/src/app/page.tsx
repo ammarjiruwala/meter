@@ -1,3 +1,5 @@
+import { TopNav } from "@/components/TopNav";
+import { SpendHero } from "@/components/SpendHero";
 import { TeamSpendTable } from "@/components/TeamSpendTable";
 import { ProviderBalancesCard } from "@/components/ProviderBalancesCard";
 import { LiveLogsTable } from "@/components/LiveLogsTable";
@@ -5,6 +7,7 @@ import {
   getTeamSpend,
   getLiveLogs,
   getProviderBalances,
+  getSpendSummary,
   isLedgerAvailable,
 } from "@/lib/db";
 
@@ -15,30 +18,32 @@ export const dynamic = "force-dynamic";
 
 export default function Home() {
   const ledgerAvailable = isLedgerAvailable();
+  const summary = getSpendSummary();
   const spend = getTeamSpend();
   const wallets = getProviderBalances();
   const liveLogs = getLiveLogs();
 
   return (
-    <div className="flex flex-1 flex-col bg-zinc-50 dark:bg-black">
-      <header className="border-b border-zinc-200 px-6 py-4 dark:border-zinc-800">
-        <h1 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100">
-          Meter
-        </h1>
-        <p className="text-sm text-zinc-500">Budget, analyze, and transact.</p>
-      </header>
+    <div className="flex flex-1 flex-col bg-obsidian">
+      <TopNav />
+      <SpendHero summary={summary} />
 
-      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-6 py-8">
+      <main className="mx-auto w-full max-w-[1200px] flex-1 px-[24px] pb-[120px]">
         {!ledgerAvailable && (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-            Ledger not found yet — start the proxy (see{" "}
-            <code>proxy/README.md</code>) to begin logging requests.
+          <div className="mb-[80px] rounded-[16px] bg-iron p-[24px] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset]">
+            <p className="t-body text-paper">
+              Ledger not found — start the proxy (see{" "}
+              <span className="t-readout">proxy/README.md</span>) to begin
+              logging requests.
+            </p>
           </div>
         )}
 
-        <ProviderBalancesCard wallets={wallets} />
-        <LiveLogsTable initialRows={liveLogs} />
-        <TeamSpendTable rows={spend} />
+        <div className="flex flex-col gap-[80px]">
+          <ProviderBalancesCard wallets={wallets} />
+          <LiveLogsTable initialRows={liveLogs} />
+          <TeamSpendTable rows={spend} />
+        </div>
       </main>
     </div>
   );

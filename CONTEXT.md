@@ -102,7 +102,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 *   **Last updated:** 2026-08-01 — Shivam's treasury schema (`wallets`, `mandates`, `treasury_events`)
     and mock provider billing landed, then folded into the proxy app: one process, one port.
     `proxy/README.md` refreshed to match (routes, the shared-writer note, boot-time table
-    creation) — done with Shubh's sign-off.
+    creation) — done with Shubh's sign-off. Dashboard restyled onto a dark control-room visual
+    system (Tanay); Phase 4's "finalize UI" is effectively done ahead of schedule.
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -166,10 +167,26 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         run put several charges through a monthly mandate. Unresolved, and the demo's repeat-top-up
         narrative depends on it.
 
-*   **Dashboard: LAYOUT + LIVE LOGS WORKING.** `dashboard/` — Next.js (App Router) + Tailwind,
-    `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
+*   **Dashboard: LAYOUT + LIVE LOGS WORKING, RESTYLED.** `dashboard/` — Next.js (App Router) +
+    Tailwind, `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
     (`dashboard/src/lib/db.ts`), WAL mode makes concurrent reads with the proxy's writer safe.
-    *   "Team Spend" table (grouped by project/actor/feature from `requests`).
+    *   **Visual system (2026-08-01):** a "mission-control darkroom" — pitch-black canvas, a
+        five-level surface stack (obsidian → carbon → graphite → iron → steel), elevation by inset
+        white hairline rather than shadow, and one accent blue reserved for the active nav
+        indicator and the live-polling dot. Type is Inter at weight 400 throughout with a negative
+        tracking ladder (-0.064em at 86px down to -0.005em at 12px); IBM Plex Mono handles
+        readouts — costs, model ids, timestamps. Tokens and the type ladder live in
+        `dashboard/src/app/globals.css`; shared pieces in `dashboard/src/components/ui/`.
+    *   **Status colors are a deliberate exception to that monochrome system** and should survive
+        any future restyle. Green/amber/red for 2xx / 429 / 5xx, because catching a failure by
+        color beats reading a number on a dashboard watched during a live demo. The specific hex
+        values were chosen against the colorblind case, not by eye: the obvious green/amber pair
+        collapses to ΔE 5.1 under protanopia. The shipped ramp clears ΔE 10.6, stays separable
+        from the accent blue, and all three clear AA on the badge surface. Reasoning is kept in a
+        comment beside the tokens.
+    *   "Team Spend" table (grouped by project/actor/feature from `requests`), with a neutral
+        proportion bar per row — share-of-total is what that table answers and length reads faster
+        than a column of figures.
     *   "Provider Balances" card — **now reading the real `wallets` table** (`treasury/db.py`,
         same `meter.db`). Ordering mirrors `treasury.db.list_wallets()` so the card and
         `GET /treasury/wallets` cannot disagree. Each row shows how stale the balance is, because
@@ -177,6 +194,9 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         shown only when more than one project has wallets, so it stays out of the way in the
         single-project demo. Seed with `POST /treasury/wallets/seed` (defaults to `$4.00`, the
         demo's "too low" state). The old `dashboard/src/lib/wallets.ts` placeholder is deleted.
+    *   Hero: total metered spend at display size, with floating readout pills carrying live
+        ledger counts. It is the one number the product exists to answer, and a single figure is
+        a stat rather than a chart.
     *   "Live Logs" table (`User | Model | Predicted Cost | Actual Cost | Status`), polling
         `GET /api/live-logs` every 3s. **Predicted Cost is always blank** — the ledger has no
         `predicted_output_tokens`/`bucket` columns yet; wire it for real once Shubh's predictor
