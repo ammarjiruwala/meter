@@ -36,8 +36,10 @@ projects:
 # Two things README.md shows in this file are NOT implemented yet, and are ignored
 # rather than silently half-enforced:
 #
-#   features.<name>.models  — an allowlist of models a feature may call. Not built; a
-#                             feature can currently call any model the project can.
 #   treasury:               — topup_when_hours_remaining / topup_amount_usd. The
 #                             Treasurer loop reads TREASURER_* from .env instead
 #                             (Shivam, Phase 3).
+#
+# `features.<name>.models` IS enforced: a request whose model is not on the feature's
+# list is refused with 403 model_not_allowed before any estimate or reservation
+# (built 2026-08-01). Omit the key to allow any model.

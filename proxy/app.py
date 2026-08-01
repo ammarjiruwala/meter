@@ -37,6 +37,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from treasury import db as treasury_db
+from treasury import loop as treasurer_loop
 from treasury import mock_provider
 from treasury import routes as treasury_routes
 
@@ -120,8 +121,10 @@ async def lifespan(app: FastAPI):
                 "ceiling implied by BREAKER_WINDOW_S=%ds inside "
                 "BREAKER_BASELINE_WINDOW_S=%ds. Lower the ratio, widen the baseline, or "
                 "set BREAKER_BURST_RATIO=0 to use the flat floor alone.",
-                config.BREAKER_BURST_RATIO, ceiling,
-                config.BREAKER_WINDOW_S, config.BREAKER_BASELINE_WINDOW_S,
+                config.BREAKER_BURST_RATIO,
+                ceiling,
+                config.BREAKER_WINDOW_S,
+                config.BREAKER_BASELINE_WINDOW_S,
             )
 
     # Load the tokenizer vocabularies now rather than on the first request. tiktoken
@@ -149,9 +152,23 @@ async def lifespan(app: FastAPI):
         limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
         follow_redirects=False,
     )
+
+    # Start the Treasurer Agent loop (Phase 3). Watches burn rate, projects runway, and
+    # autonomously tops up wallets when balance drops below the threshold. This is "the 3am
+    # save" from the pitch narrative — production never dies on a drained wallet.
+    treasurer_task = asyncio.create_task(treasurer_loop.treasurer_loop())
+    log.info("treasurer agent started")
+
     try:
         yield
     finally:
+        # Cancel the treasurer loop cleanly on shutdown.
+        treasurer_task.cancel()
+        try:
+            await treasurer_task
+        except asyncio.CancelledError:
+            pass
+
         # Let in-flight ledger writes land before the loop closes, but never hang
         # shutdown on them.
         if _capture_tasks:
@@ -270,6 +287,7 @@ async def healthz() -> dict[str, Any]:
             "meter_yaml_found": config.METER_YAML_PATH.exists(),
             "window_s": config.BUDGET_WINDOW_S,
             "ceilings": budget.active_ceilings(),
+            "model_allowlists": budget.active_allowlists(),
             **budget.outstanding(),
         },
         "predictor": {
@@ -338,7 +356,8 @@ async def annotate(request: Request):
     trace_id = body.get("trace_id")
     if not isinstance(trace_id, str) or not trace_id.strip():
         return _error(
-            400, "`trace_id` is required and must be a non-empty string.",
+            400,
+            "`trace_id` is required and must be a non-empty string.",
             "invalid_request_error",
         )
     trace_id = trace_id.strip()
@@ -456,6 +475,42 @@ async def _proxy(request: Request, shape: str) -> Response:
     model = body.get("model") if isinstance(body.get("model"), str) else None
     streaming = providers.is_streaming(body)
 
+    # ── 2.5 MODEL ALLOWLIST ─────────────────────────────────────────────────
+    # meter.yaml can restrict a feature to a set of models (`features.<name>.models`).
+    # A request for a model outside it is refused before ESTIMATE — there is no point
+    # spending tokens or holding budget on a call that cannot go out. Refusal is 403:
+    # retrying will not help; the config file is the fix, and the header says what it
+    # would have to contain.
+    if not budget.models_allowed(key["project_id"], tags["feature"], model):
+        allowed = budget.feature_models(key["project_id"], tags["feature"])
+        response = _error(
+            403,
+            f"Feature {tags['feature']!r} may not call model {model!r}. "
+            f"Allowlisted: {', '.join(sorted(allowed)) or '(none)'}.",
+            "model_not_allowed",
+        )
+        response.headers["X-Meter-Feature"] = tags["feature"] or ""
+        response.headers["X-Meter-Allowed-Models"] = ",".join(sorted(allowed))
+        _schedule_capture(
+            _row(
+                request_id,
+                key,
+                tags,
+                provider_name="-",
+                model=model,
+                endpoint=request.url.path,
+                usage=Usage(),
+                status=403,
+                is_stream=streaming,
+                latency_ms=0.0,
+                ttft_ms=None,
+                overhead_ms=(time.perf_counter() - started) * 1000,
+                prompt_hash=providers.prompt_hash(shape, body),
+                prediction=_predict(body, model, shape, key, tags),
+            )
+        )
+        return response
+
     # ── 3. ESTIMATE ──────────────────────────────────────────────────────────
     prediction = _predict(body, model, shape, key, tags)
 
@@ -485,9 +540,17 @@ async def _proxy(request: Request, shape: str) -> Response:
         # table as everything else.
         _schedule_capture(
             _row(
-                request_id, key, tags, provider_name="-", model=model,
-                endpoint=request.url.path, usage=Usage(), status=decision.status_code,
-                is_stream=streaming, latency_ms=0.0, ttft_ms=None,
+                request_id,
+                key,
+                tags,
+                provider_name="-",
+                model=model,
+                endpoint=request.url.path,
+                usage=Usage(),
+                status=decision.status_code,
+                is_stream=streaming,
+                latency_ms=0.0,
+                ttft_ms=None,
                 overhead_ms=(time.perf_counter() - started) * 1000,
                 prompt_hash=providers.prompt_hash(shape, body),
                 prediction=prediction,
@@ -507,7 +570,8 @@ async def _proxy(request: Request, shape: str) -> Response:
     # while over-holding the bound is transient — released seconds later at CAPTURE.
     try:
         budget_decision = await budget.authorize(
-            key["project_id"], tags["feature"],
+            key["project_id"],
+            tags["feature"],
             getattr(prediction, "bound_cost_usd", None) or 0.0,
         )
     except Exception:
@@ -527,9 +591,17 @@ async def _proxy(request: Request, shape: str) -> Response:
         response.headers["Retry-After"] = str(config.BUDGET_WINDOW_S)
         _schedule_capture(
             _row(
-                request_id, key, tags, provider_name="-", model=model,
-                endpoint=request.url.path, usage=Usage(), status=429,
-                is_stream=streaming, latency_ms=0.0, ttft_ms=None,
+                request_id,
+                key,
+                tags,
+                provider_name="-",
+                model=model,
+                endpoint=request.url.path,
+                usage=Usage(),
+                status=429,
+                is_stream=streaming,
+                latency_ms=0.0,
+                ttft_ms=None,
                 overhead_ms=(time.perf_counter() - started) * 1000,
                 prompt_hash=providers.prompt_hash(shape, body),
                 prediction=prediction,
@@ -558,21 +630,31 @@ async def _proxy(request: Request, shape: str) -> Response:
         headers = providers.upstream_headers(provider, request.headers.items())
 
         common = dict(
-            request_id=request_id, key=key, tags=tags, provider_name=provider_name,
-            model=model, endpoint=request.url.path, started=started,
+            request_id=request_id,
+            key=key,
+            tags=tags,
+            provider_name=provider_name,
+            model=model,
+            endpoint=request.url.path,
+            started=started,
             prompt_hash=providers.prompt_hash(shape, body),
             prompt_chars=providers.prompt_chars(outbound),
-            prediction=prediction, reservation_id=reservation_id,
+            prediction=prediction,
+            reservation_id=reservation_id,
         )
 
         if streaming:
             # The streamed path releases inside its own generator, after the last byte.
             return await _forward_stream(
-                request.app.state.http, url, headers, outbound, shape, injected_usage, common
+                request.app.state.http,
+                url,
+                headers,
+                outbound,
+                shape,
+                injected_usage,
+                common,
             )
-        return await _forward_unary(
-            request.app.state.http, url, headers, outbound, shape, common
-        )
+        return await _forward_unary(request.app.state.http, url, headers, outbound, shape, common)
     except Exception:
         await budget.release(reservation_id)
         raise
@@ -601,19 +683,32 @@ async def _forward_unary(
         # keyed on the provider's status code.
         usage, status = Usage(), upstream.status_code
     else:
-        usage = providers.usage_from_response(shape, _safe_json(upstream.content))
+        try:
+            payload: Any = json.loads(upstream.content)
+        except (ValueError, UnicodeDecodeError):
+            payload = None
+        usage = providers.usage_from_response(shape, payload)
         status = upstream.status_code
         if not usage:
             usage = estimate_from_bytes(common["prompt_chars"], len(upstream.content))
 
     _schedule_capture(
         _row(
-            common["request_id"], common["key"], common["tags"], common["provider_name"],
-            common["model"], common["endpoint"], usage, status,
-            is_stream=False, latency_ms=latency_ms, ttft_ms=latency_ms,
+            common["request_id"],
+            common["key"],
+            common["tags"],
+            common["provider_name"],
+            common["model"],
+            common["endpoint"],
+            usage,
+            status,
+            is_stream=False,
+            latency_ms=latency_ms,
+            ttft_ms=latency_ms,
             overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
             prompt_hash=common["prompt_hash"],
-            prediction=common["prediction"], reservation_id=common["reservation_id"],
+            prediction=common["prediction"],
+            reservation_id=common["reservation_id"],
         ),
         release=common["reservation_id"],
     )
@@ -659,12 +754,21 @@ async def _forward_stream(
         latency_ms = (time.perf_counter() - upstream_started) * 1000
         _schedule_capture(
             _row(
-                common["request_id"], common["key"], common["tags"], common["provider_name"],
-                common["model"], common["endpoint"], Usage(), upstream.status_code,
-                is_stream=True, latency_ms=latency_ms, ttft_ms=None,
+                common["request_id"],
+                common["key"],
+                common["tags"],
+                common["provider_name"],
+                common["model"],
+                common["endpoint"],
+                Usage(),
+                upstream.status_code,
+                is_stream=True,
+                latency_ms=latency_ms,
+                ttft_ms=None,
                 overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
                 prompt_hash=common["prompt_hash"],
-                prediction=common["prediction"], reservation_id=common["reservation_id"],
+                prediction=common["prediction"],
+                reservation_id=common["reservation_id"],
             ),
             release=common["reservation_id"],
         )
@@ -733,9 +837,16 @@ async def _forward_stream(
             usage = tap.final_usage(common["prompt_chars"])
             _schedule_capture(
                 _row(
-                    common["request_id"], common["key"], common["tags"],
-                    common["provider_name"], common["model"], common["endpoint"],
-                    usage, state["status"], is_stream=True, latency_ms=latency_ms,
+                    common["request_id"],
+                    common["key"],
+                    common["tags"],
+                    common["provider_name"],
+                    common["model"],
+                    common["endpoint"],
+                    usage,
+                    state["status"],
+                    is_stream=True,
+                    latency_ms=latency_ms,
                     ttft_ms=state["ttft_ms"],
                     overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
                     prompt_hash=common["prompt_hash"],
@@ -757,9 +868,7 @@ async def _forward_stream(
             except BaseException:  # noqa: BLE001 - see comment above
                 pass
 
-    response_headers = {
-        k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP
-    }
+    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
     response = StreamingResponse(
         stream_body(),
         status_code=upstream.status_code,
@@ -770,37 +879,40 @@ async def _forward_stream(
     # Overhead is not final until the stream ends, so the streamed variant reports only
     # the pre-flight cost (auth + breaker + routing). That is the number the proxy
     # actually controls; everything after it is the provider's latency.
-    response.headers["X-Meter-Overhead-Ms"] = (
-        f"{(upstream_started - common['started']) * 1000:.2f}"
-    )
+    response.headers["X-Meter-Overhead-Ms"] = f"{(upstream_started - common['started']) * 1000:.2f}"
     return response
 
 
 def _upstream_failure(
-    exc: httpx.HTTPError, common: dict[str, Any], upstream_started: float, is_stream: bool
+    exc: httpx.HTTPError,
+    common: dict[str, Any],
+    upstream_started: float,
+    is_stream: bool,
 ) -> Response:
     """Upstream unreachable or timed out. Ledger it, then hand back a 502."""
     latency_ms = (time.perf_counter() - upstream_started) * 1000
     log.warning("upstream error for %s: %s", common["request_id"], exc)
     _schedule_capture(
         _row(
-            common["request_id"], common["key"], common["tags"], common["provider_name"],
-            common["model"], common["endpoint"], Usage(), 502,
-            is_stream=is_stream, latency_ms=latency_ms, ttft_ms=None,
+            common["request_id"],
+            common["key"],
+            common["tags"],
+            common["provider_name"],
+            common["model"],
+            common["endpoint"],
+            Usage(),
+            502,
+            is_stream=is_stream,
+            latency_ms=latency_ms,
+            ttft_ms=None,
             overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
             prompt_hash=common["prompt_hash"],
-            prediction=common["prediction"], reservation_id=common["reservation_id"],
+            prediction=common["prediction"],
+            reservation_id=common["reservation_id"],
         ),
         release=common["reservation_id"],
     )
     return _error(502, f"Upstream provider error: {exc}", "upstream_error")
-
-
-def _safe_json(raw: bytes) -> Any:
-    try:
-        return json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        return None
 
 
 def _stamp(response: Response, request_id: str, started: float, latency_ms: float) -> None:
@@ -815,9 +927,13 @@ def _stamp(response: Response, request_id: str, started: float, latency_ms: floa
     response.headers["X-Meter-Overhead-Ms"] = f"{max(0.0, overhead):.2f}"
 
 
-def _predict(body: dict[str, Any], model: str | None, shape: str,
-             key: dict[str, Any] | None = None,
-             tags: dict[str, str | None] | None = None) -> Any | None:
+def _predict(
+    body: dict[str, Any],
+    model: str | None,
+    shape: str,
+    key: dict[str, Any] | None = None,
+    tags: dict[str, str | None] | None = None,
+) -> Any | None:
     """ESTIMATE — what will this call cost, before we make it (ARCHITECTURE.md §2).
 
     Returns None rather than raising, always. Three reasons a prediction is absent and

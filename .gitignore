@@ -18,3 +18,6 @@ meter.db-shm
 *.db
 *.db-wal
 *.db-shm
+
+# graphify skill output cache
+/graphify-out/
