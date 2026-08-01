@@ -1,9 +1,14 @@
 import type { OutcomeRow, OutcomeCoverage } from "@/lib/db";
 import { usdColumnFormatter } from "@/lib/format";
-import { SectionLabel } from "@/components/ui/primitives";
-import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
+import { StatusBadge } from "@/components/ui/primitives";
+import {
+  Cell,
+  DataTable,
+  IdentityCell,
+  Row,
+  TableHeader,
+} from "@/components/ui/DataTable";
 
-/** An annotation with no `outcome` string still has a cost — it just has no label. */
 const UNLABELLED = "Unlabelled";
 
 export function CostPerOutcomeTable({
@@ -13,8 +18,6 @@ export function CostPerOutcomeTable({
   rows: OutcomeRow[];
   coverage: OutcomeCoverage | null;
 }) {
-  // Every dollar figure in the table shares one precision. Cost and value are read
-  // against each other to get margin, so they have to be the same shape.
   const usd = usdColumnFormatter([
     ...rows.map((r) => r.cost_usd),
     ...rows.map((r) => r.value_usd),
@@ -27,18 +30,15 @@ export function CostPerOutcomeTable({
       : 0;
 
   return (
-    <section id="outcomes" className="scroll-mt-[100px]">
-      <SectionLabel
-        trailing={
-          coverage && coverage.annotated_traces > 0 ? (
-            <span className="t-cell text-ash">
-              {(share * 100).toFixed(0)}% of traced spend
-            </span>
-          ) : undefined
+    <section id="outcomes" className="scroll-mt-[90px]">
+      <TableHeader
+        title="Cost per Outcome"
+        meta={
+          coverage && coverage.annotated_traces > 0
+            ? `${(share * 100).toFixed(0)}% coverage · ${coverage.annotated_traces} of ${coverage.traced_traces} traces annotated`
+            : undefined
         }
-      >
-        Cost per outcome
-      </SectionLabel>
+      />
 
       <DataTable
         columns={[
@@ -49,11 +49,11 @@ export function CostPerOutcomeTable({
           { label: "Margin", align: "right" },
         ]}
         empty={
-          <p className="t-cell text-ash">
+          <p className="t-cell text-text-secondary">
             No outcomes recorded. Attach one to a trace with{" "}
-            <span className="text-paper">POST /v1/annotate</span> — the proxy
-            cannot know whether a ticket was resolved, so this is how that fact
-            gets in.
+            <span className="text-text-primary">POST /v1/annotate</span> — the
+            proxy cannot know whether a ticket was resolved, so this is how that
+            fact gets in.
           </p>
         }
         rows={rows.map((row) => {
@@ -76,13 +76,11 @@ export function CostPerOutcomeTable({
                   row.request_count === 1 ? "" : "s"
                 }`}
               />
-              <Cell align="right" numeric>
-                {usd(row.cost_usd)}
-              </Cell>
-              <Cell align="right" numeric>
+              <Cell align="right">{usd(row.cost_usd)}</Cell>
+              <Cell align="right" muted>
                 {usd(row.cost_usd / row.trace_count)}
               </Cell>
-              <Cell align="right" numeric muted>
+              <Cell align="right" muted>
                 {usd(row.value_usd)}
                 {partial && (
                   <span
@@ -94,22 +92,20 @@ export function CostPerOutcomeTable({
                   </span>
                 )}
               </Cell>
-              {/* The sign is always printed, so the number carries the state
-                  without help from the color. */}
-              <Cell
-                align="right"
-                numeric
-                className={
-                  margin === null
-                    ? "!text-ash"
-                    : margin < 0
-                      ? "!text-status-bad"
-                      : "!text-status-good"
-                }
-              >
-                {margin === null
-                  ? "—"
-                  : `${margin < 0 ? "−" : "+"}${usd(Math.abs(margin))}`}
+              <Cell align="right" numeric={false}>
+                {/* The sign is always printed, so the number carries the state
+                    without help from the colour. A trace with no value shows "—",
+                    never 0 — broke-even and unknown are different facts. */}
+                {margin === null ? (
+                  <span className="t-num text-text-secondary">—</span>
+                ) : (
+                  <StatusBadge tone={margin < 0 ? "critical" : "good"}>
+                    <span className="t-num">
+                      {margin < 0 ? "−" : "+"}
+                      {usd(Math.abs(margin))}
+                    </span>
+                  </StatusBadge>
+                )}
               </Cell>
             </Row>
           );
@@ -117,9 +113,7 @@ export function CostPerOutcomeTable({
         footnote={
           coverage && rows.length > 0 ? (
             <>
-              {coverage.annotated_traces} of {coverage.traced_traces} traces
-              annotated, covering {(share * 100).toFixed(0)}% of traced spend. A
-              cost-per-outcome figure is only as representative as its coverage,
+              A cost-per-outcome figure is only as representative as its coverage,
               so it is stated rather than left to be assumed.
               {coverage.orphan_annotations > 0 && (
                 <>

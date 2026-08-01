@@ -2,13 +2,15 @@
 
 import { useEffect, useState } from "react";
 import type { LiveLogRow } from "@/lib/db";
-import { usdColumnFormatter } from "@/lib/format";
+import { usdColumnFormatter, providerLabel, relativeTime } from "@/lib/format";
+import { StatusBadge, toneForStatus } from "@/components/ui/primitives";
 import {
-  SectionLabel,
-  StatusBadge,
-  toneForStatus,
-} from "@/components/ui/primitives";
-import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
+  Cell,
+  DataTable,
+  IdentityCell,
+  Row,
+  TableHeader,
+} from "@/components/ui/DataTable";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -25,8 +27,8 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
         const data = (await res.json()) as { logs: LiveLogRow[] };
         if (!cancelled) setRows(data.logs);
       } catch {
-        // Transient fetch failure — keep showing the last good rows and retry
-        // on the next tick rather than clearing the table.
+        // Transient fetch failure — keep the last good rows and retry next tick
+        // rather than clearing the table.
       }
     }
 
@@ -37,41 +39,40 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
     };
   }, []);
 
-  // Counted across every fetched row, not the visible ones. The table collapses to
-  // its first rows by default, and a footnote that changed when you expanded it
-  // would look unreliable at the moment someone is reading it.
+  // Counted across every fetched row, not the visible ones. The table collapses by
+  // default, and a footnote that changed when you expanded it would look unreliable
+  // at the moment someone is reading it.
   const unpredicted = rows.filter((r) => r.predicted_cost_usd === null).length;
 
-  // One formatter across both cost columns. Reading predicted against actual is
-  // the entire point of the pair, and that comparison only works if the two
-  // columns share a decimal count.
   const usd = usdColumnFormatter([
     ...rows.map((r) => r.predicted_cost_usd),
     ...rows.map((r) => r.cost_usd),
   ]);
 
   return (
-    <section id="logs" className="scroll-mt-[100px]">
-      <SectionLabel
-        trailing={
-          <span className="t-cell flex items-center gap-[8px] text-ash">
-            <span className="h-[6px] w-[6px] rounded-full bg-signal-blue" />
-            Live · {POLL_INTERVAL_MS / 1000}s
+    <section id="logs" className="scroll-mt-[90px]">
+      <TableHeader
+        title="Live Requests"
+        meta={
+          <span className="flex items-center gap-[6px]">
+            <span className="live-dot h-[5px] w-[5px]" aria-hidden="true" />
+            Last {rows.length} requests · polling every{" "}
+            {POLL_INTERVAL_MS / 1000}s
           </span>
         }
-      >
-        Live logs
-      </SectionLabel>
+      />
 
       <DataTable
         columns={[
-          { label: "Request" },
+          { label: "Member" },
+          { label: "Model" },
           { label: "Predicted", align: "right" },
           { label: "Actual", align: "right" },
           { label: "Status", align: "right" },
+          { label: "Time", align: "right" },
         ]}
         empty={
-          <p className="t-cell text-ash">
+          <p className="t-cell text-text-secondary">
             No requests logged yet. Start the proxy and send a call through it.
           </p>
         }
@@ -79,18 +80,23 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
           <Row key={row.id}>
             <IdentityCell
               primary={row.actor ?? "Unattributed"}
-              secondary={row.model ?? "—"}
+              secondary={row.feature ?? "untagged"}
             />
-            <Cell align="right" numeric muted>
+            <IdentityCell
+              primary={row.model ?? "—"}
+              secondary={row.provider ? providerLabel(row.provider) : "—"}
+            />
+            <Cell align="right" muted>
               {usd(row.predicted_cost_usd)}
             </Cell>
-            <Cell align="right" numeric>
-              {usd(row.cost_usd)}
-            </Cell>
-            <Cell align="right">
+            <Cell align="right">{usd(row.cost_usd)}</Cell>
+            <Cell align="right" numeric={false}>
               <StatusBadge tone={toneForStatus(row.status)}>
                 {row.status ?? "—"}
               </StatusBadge>
+            </Cell>
+            <Cell align="right" muted>
+              {relativeTime(row.ts)}
             </Cell>
           </Row>
         ))}

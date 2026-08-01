@@ -8,6 +8,7 @@ import { CostPerOutcomeTable } from "@/components/CostPerOutcomeTable";
 import {
   getTeamSpend,
   getBudgets,
+  getBreakerState,
   getOutcomeCosts,
   getOutcomeCoverage,
   getLiveLogs,
@@ -27,34 +28,65 @@ export default function Home() {
   const spend = getTeamSpend();
   const wallets = getProviderBalances();
   const budgets = getBudgets();
+  const breaker = getBreakerState();
   const liveLogs = getLiveLogs();
   const outcomes = getOutcomeCosts();
   const outcomeCoverage = getOutcomeCoverage();
 
   return (
-    <div className="flex flex-1 flex-col bg-obsidian">
-      <TopNav />
-      <SpendHero summary={summary} />
+    <>
+      <TopNav breaker={breaker} />
 
-      <main className="mx-auto w-full max-w-[1200px] flex-1 px-[24px] pb-[120px]">
+      {/* z-10 puts the content plane above all four fixed background layers. */}
+      <main
+        id="top"
+        className="relative z-10 mx-auto w-full max-w-[1360px] px-[28px] pb-[40px] pt-[88px]"
+      >
         {!ledgerAvailable && (
-          <div className="mb-[80px] rounded-[16px] bg-iron p-[24px] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset]">
-            <p className="t-body text-paper">
+          <div className="glass mb-[20px] p-[20px]">
+            <p className="t-body text-text-primary">
               Ledger not found — start the proxy (see{" "}
-              <span className="text-paper">proxy/README.md</span>) to begin
-              logging requests.
+              <span className="text-text-primary">proxy/README.md</span>) to
+              begin logging requests.
             </p>
           </div>
         )}
 
-        <div className="flex flex-col gap-[80px]">
+        {/* Top row: the hero number beside the constraint it runs against.
+            Collapses to one column at 1024px. */}
+        {/* items-start, or the spend card stretches to the height of the budget
+            grid — with five scopes that is three rows of cards and most of the
+            card becomes empty glass. */}
+        <div className="relative mb-[20px] grid grid-cols-1 items-start gap-[20px] lg:grid-cols-[2fr_3fr]">
+          {/* Hero glow — a soft indigo bloom behind the spend card so it reads as
+              emitting light rather than sitting on the canvas. */}
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute -left-[80px] -top-[80px] -z-10 h-[380px] w-[550px]"
+            style={{
+              background:
+                "radial-gradient(ellipse, rgba(99,102,241,0.10) 0%, transparent 65%)",
+            }}
+          />
+          <SpendHero summary={summary} />
           <TeamBudgetCard scopes={budgets} />
+        </div>
+
+        <div className="mb-[20px] grid grid-cols-1 gap-[20px] lg:grid-cols-[1fr_2fr]">
           <ProviderBalancesCard wallets={wallets} />
+          <div className="animate-in delay-5">
+            <TeamSpendTable rows={spend} />
+          </div>
+        </div>
+
+        <div className="animate-in delay-6 mb-[20px]">
           <LiveLogsTable initialRows={liveLogs} />
+        </div>
+
+        <div className="animate-in delay-6">
           <CostPerOutcomeTable rows={outcomes} coverage={outcomeCoverage} />
-          <TeamSpendTable rows={spend} />
         </div>
       </main>
-    </div>
+    </>
   );
 }

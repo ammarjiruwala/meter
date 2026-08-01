@@ -95,8 +95,48 @@ export type SpendSummary = {
   request_count: number;
   actor_count: number;
   provider_count: number;
+  token_count: number;
   last_ts: string | null;
 };
+
+/**
+ * Circuit-breaker state for the nav pill, read from the same `breaker_events` rows
+ * `db.active_breaker()` uses — an open breaker is one with `closed_at IS NULL`.
+ *
+ * Real state rather than a decorative "Normal": a status pill that cannot say
+ * anything except "fine" is worse than no pill, because it reads as a check that
+ * ran and passed.
+ */
+export type BreakerState = {
+  open: boolean;
+  mode: string | null;
+  scope: string | null;
+  count: number;
+};
+
+export function getBreakerState(): BreakerState {
+  const idle: BreakerState = { open: false, mode: null, scope: null, count: 0 };
+  const conn = getDb();
+  if (!conn || !tableExists(conn, "breaker_events")) return idle;
+  const rows = conn
+    .prepare(
+      `SELECT scope, mode FROM breaker_events
+        WHERE closed_at IS NULL
+        ORDER BY id DESC`,
+    )
+    .all() as { scope: string; mode: string }[];
+  if (rows.length === 0) return idle;
+  // Revoke outranks throttle: it is the more severe of the two, and if any key is
+  // cut that is the fact the pill should be reporting.
+  const revoked = rows.find((r) => r.mode === "revoke");
+  const lead = revoked ?? rows[0];
+  return {
+    open: true,
+    mode: lead.mode,
+    scope: lead.scope,
+    count: rows.length,
+  };
+}
 
 /** The headline figure. A single number is a stat, not a chart. */
 export function getSpendSummary(): SpendSummary {
@@ -105,6 +145,7 @@ export function getSpendSummary(): SpendSummary {
     request_count: 0,
     actor_count: 0,
     provider_count: 0,
+    token_count: 0,
     last_ts: null,
   };
   const conn = getDb();
@@ -115,6 +156,7 @@ export function getSpendSummary(): SpendSummary {
               COUNT(*)                   AS request_count,
               COUNT(DISTINCT actor)      AS actor_count,
               COUNT(DISTINCT provider)   AS provider_count,
+              COALESCE(SUM(input_tokens + output_tokens), 0) AS token_count,
               MAX(ts)                    AS last_ts
          FROM requests`,
     )
@@ -183,6 +225,12 @@ export type BudgetScope = {
   feature: string | null;
   ceiling_usd: number;
   spend_usd: number;
+  /**
+   * Distinct actors who spent against this scope in the window, most-spend first.
+   * Drives the avatar stack. Real ledger attribution, not decoration — the faces
+   * on a budget card are the people who consumed it.
+   */
+  members: string[];
 };
 
 /**
@@ -259,6 +307,19 @@ export function getBudgets(): BudgetScope[] | null {
       WHERE project_id = ? AND feature = ? AND ts >= ?`,
   );
 
+  // Actors are ordered by their spend against the scope, so the avatar stack shows
+  // who is actually consuming the budget rather than whoever happens to sort first.
+  const projectMembers = conn.prepare(
+    `SELECT actor FROM requests
+      WHERE project_id = ? AND ts >= ? AND actor IS NOT NULL
+      GROUP BY actor ORDER BY SUM(cost_usd) DESC`,
+  );
+  const featureMembers = conn.prepare(
+    `SELECT actor FROM requests
+      WHERE project_id = ? AND feature = ? AND ts >= ? AND actor IS NOT NULL
+      GROUP BY actor ORDER BY SUM(cost_usd) DESC`,
+  );
+
   // Project order comes from `projects`; a project that only has feature ceilings still
   // has to appear, so it is appended in the order its features were declared.
   const order: string[] = projectCeilings.map((p) => p.project_id);
@@ -276,6 +337,9 @@ export function getBudgets(): BudgetScope[] | null {
         feature: null,
         ceiling_usd: ceiling.ceiling_usd_day,
         spend_usd: spend,
+        members: (projectMembers.all(projectId, cutoff) as { actor: string }[]).map(
+          (r) => r.actor,
+        ),
       });
     }
     for (const f of featureCeilings.filter((x) => x.project_id === projectId)) {
@@ -287,6 +351,9 @@ export function getBudgets(): BudgetScope[] | null {
         feature: f.feature,
         ceiling_usd: f.ceiling_usd_day,
         spend_usd: spend,
+        members: (
+          featureMembers.all(projectId, f.feature, cutoff) as { actor: string }[]
+        ).map((r) => r.actor),
       });
     }
   }
@@ -423,6 +490,8 @@ export type LiveLogRow = {
   id: string;
   ts: string;
   actor: string | null;
+  feature: string | null;
+  provider: string | null;
   model: string | null;
   // Written at CAPTURE by the proxy, from the prediction made before the call.
   // Null is meaningful and distinct from zero: it means the request was not
@@ -453,6 +522,8 @@ export function getLiveLogs(limit = 50): LiveLogRow[] {
       `SELECT id,
               ts,
               actor,
+              feature,
+              provider,
               model,
               ${predicted},
               ${method},

@@ -1,19 +1,16 @@
 import type { Metadata } from "next";
-import { Inter, IBM_Plex_Mono } from "next/font/google";
+import { Inter } from "next/font/google";
+import { Background } from "@/components/Background";
 import "./globals.css";
 
-// Substitutes for the brief's custom faces: Inter for Diatype REKKI (geometric
-// sans, holds up under aggressive negative tracking at display sizes), IBM Plex
-// Mono for OCD-GARRI (the instrument-label register).
+// Inter across the whole product. Weights are explicit because the design gets its
+// hierarchy from weight (600 headings against 400 body) rather than from size and
+// tracking — Next only subsets what is asked for, and a missing 600 silently
+// synthesises a faux-bold that ruins the type.
 const inter = Inter({
   variable: "--font-inter",
   subsets: ["latin"],
-});
-
-const plexMono = IBM_Plex_Mono({
-  variable: "--font-plex-mono",
-  subsets: ["latin"],
-  weight: ["400"],
+  weight: ["300", "400", "500", "600", "700"],
 });
 
 export const metadata: Metadata = {
@@ -28,11 +25,13 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="en"
-      className={`${inter.variable} ${plexMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col bg-obsidian">{children}</body>
+    <html lang="en" className={`${inter.variable} antialiased`}>
+      <body className="min-h-screen bg-canvas">
+        {/* Fixed layers live outside the content flow, mounted once so the orbs
+            keep their drift position across navigation. */}
+        <Background />
+        {children}
+      </body>
     </html>
   );
 }
