@@ -72,9 +72,21 @@ def test_input_counting() -> None:
 
     # Chat payloads cost more than their raw content: role markers, delimiters, and reply
     # priming. Ignoring the framing under-counts every single chat request.
+    #
+    # The overhead is exactly 7 for a single user message: 3 per-message + 1 role token
+    # + 3 reply priming. Pinned as an exact value because a live 15-call run showed our
+    # count was low by precisely 7 on every request when a bare string was passed while
+    # a messages list was sent upstream. Under-counting is the direction that breaks a
+    # ceiling, so this must not drift silently.
     text = "hello world"
-    check("messages include chat framing overhead",
-          count([{"role": "user", "content": text}], MODEL) > count(text, MODEL))
+    check("single-message framing overhead is exactly 7",
+          count([{"role": "user", "content": text}], MODEL) - count(text, MODEL) == 7,
+          f"got {count([{'role': 'user', 'content': text}], MODEL) - count(text, MODEL)}")
+
+    # Overhead scales per message, not once per request.
+    two = count([{"role": "user", "content": text}, {"role": "assistant", "content": text}], MODEL)
+    one = count([{"role": "user", "content": text}], MODEL)
+    check("framing is charged per message", two > one + count(text, MODEL))
 
     # A loud failure beats a silently ~10-20% wrong number in something that gates spend.
     # The reference fell back to cl100k_base for Claude, which is the wrong vocabulary.
@@ -138,16 +150,120 @@ def test_classifier() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def test_max_tokens() -> None:
     print("\nmax_tokens")
-    # max_tokens is enforced by the provider, so it is a bound rather than an estimate and
-    # dominates any heuristic. The reference ignored the field entirely.
-    r = predict("Write an exhaustive 5000 word essay on Rome. " * 20, MODEL, max_tokens=50)
+    # max_tokens CLAMPS the estimate; it must never REPLACE it. Letting it short-circuit
+    # the pipeline measured 594% MAPE against 192% when clamping, because most SDKs set
+    # a default max_tokens as a safety valve rather than as a statement of intent -- so
+    # replacing collapses every prompt to one identical number.
+    r = predict("Write an exhaustive essay on Rome. " * 20, MODEL, max_tokens=50)
     check("hard cap is applied", r.predicted_output_tokens == 50)
     check("cap is flagged", r.capped_by_max_tokens is True)
-    check("method reports capped", r.method == "capped")
+    check("method records the cap", r.method.endswith("+capped"))
 
     r2 = predict("hi", MODEL, max_tokens=100_000)
     check("non-binding cap is ignored", r2.predicted_output_tokens < 100_000)
     check("non-binding cap not flagged", r2.capped_by_max_tokens is False)
+
+    # The decisive property: a generous max_tokens must NOT flatten distinct prompts
+    # into one prediction.
+    a = predict("Say hi.", MODEL, max_tokens=4096).predicted_output_tokens
+    b = predict("Write a complete production-ready web framework.", MODEL,
+                max_tokens=4096).predicted_output_tokens
+    check("max_tokens does not flatten distinct prompts", a != b, f"both {a}")
+
+    # bound is emitted alongside, and is exact when max_tokens is set
+    r3 = predict("hi", MODEL, max_tokens=250)
+    check("bound equals max_tokens", r3.bound_output_tokens == 250)
+    check("bound cost >= predicted cost", r3.bound_cost_usd >= r3.predicted_cost_usd)
+    check("bound exists without max_tokens", predict("hi", MODEL).bound_output_tokens > 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_scope_signals() -> None:
+    """DESIGN.md steps 2-3."""
+    print("\nscope signals")
+    from predictor import estimate_scope
+    from predictor.scope import cot_scale, task_scope, verb_scale
+
+    # Step 2 -- explicit length. Coverage here is the highest-value detail in the
+    # estimator: one missed hyphenated form moved overall error 84% -> 192% MAPE.
+    for text, lo, hi in [
+        ("Give me a two-sentence overview.", 40, 60),
+        ("Summarize in two sentences.", 40, 60),
+        ("Answer in 100 words.", 120, 145),
+        ("Reply in one word.", 1, 10),
+        ("Give a yes or no answer.", 1, 10),
+    ]:
+        got = estimate_scope(text)[0]
+        check(f"{text[:32]:<34} -> {got:.0f}", lo <= got <= hi, f"want {lo}-{hi}")
+
+    # Step 3A -- additive, so a two-task prompt exceeds either task alone
+    both = task_scope("summarize this and write the code")[0]
+    check("multi-task adds", both > task_scope("summarize this")[0], f"{both}")
+    check("scope is capped", task_scope("summarize code json browse " * 40)[0] <= 1500)
+
+    # Step 3B -- the button-vs-website case
+    check("high intensity raises", verb_scale("rewrite the entire module") > 1.0)
+    check("low intensity lowers", verb_scale("fix the typo") < 1.0)
+
+    # Step 3C -- reasoning models emit CoT regardless of prompt wording
+    check("CoT cue detected", cot_scale("think step by step") == 3.0)
+    check("reasoning model detected by name", cot_scale("just say hi", "o3-mini") == 3.0)
+
+    # Word boundaries. Naive substring matching made "create" fire inside "created_at"
+    # and "code" fire inside "status codes", scoring 975% error on a JSON probe.
+    check("'create' does not match in 'created_at'",
+          verb_scale("return json with id and created_at") == 1.0)
+    check("'code' does not match in 'status codes'",
+          "code" not in task_scope("list the http status codes")[1])
+
+    # A phrase must not fire two multipliers at once.
+    from predictor.scope import qualitative_scale
+    check("'step by step' is CoT only, not also verbose",
+          qualitative_scale("analyze this step by step") == 1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_cache() -> None:
+    print("\ncache")
+    from predictor import Predictor
+    p = Predictor()
+    a = p.predict("Write a function.", MODEL)
+    b = p.predict("Write a function.", MODEL)
+    check("repeat is served identically", a == b)
+    check("cache holds the entry", p.cache_stats()["entries"] >= 1)
+    # Different max_tokens is a different request and must not collide.
+    c = p.predict("Write a function.", MODEL, max_tokens=10)
+    check("max_tokens is part of the key", c.predicted_output_tokens != a.predicted_output_tokens)
+    # Refitting invalidates, since cached values used the old coefficients.
+    p.load_buffers({"code": [(100.0, 200)] * 12})
+    check("refit clears the cache", p.cache_stats()["entries"] == 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_buffer_and_history() -> None:
+    """DESIGN.md steps 4-5."""
+    print("\nbuffer and history")
+    from predictor import Predictor
+    p = Predictor()
+
+    # Step 4 -- buffer fitted per bucket to a target under-prediction rate. Too few
+    # rows must keep the default rather than fit noise.
+    check("too few rows keeps default", p.load_buffers({"code": [(100.0, 150)] * 5}) == {})
+    fitted = p.load_buffers({"code": [(100.0, 100 + i * 10) for i in range(30)]})
+    check("fits with enough rows", "code" in fitted)
+
+    # Step 5 -- shrinkage. A factor from 2 observations must barely move; one from
+    # 200 should apply nearly in full.
+    weak = p.load_history({("proj",): (3.0, 2)})[("proj",)]
+    strong = p.load_history({("proj",): (3.0, 200)})[("proj",)]
+    check("small n is shrunk toward 1.0", weak < 1.3, f"got {weak:.2f}")
+    check("large n applies nearly in full", strong > 2.7, f"got {strong:.2f}")
+
+    # Most specific key wins.
+    p.load_history({("proj", "feat", "ammar"): (2.0, 500), ("proj",): (0.5, 500)})
+    specific = p.predict("hi", MODEL, project="proj", feature="feat", actor="ammar")
+    general = p.predict("hi", MODEL, project="proj", feature="other", actor="x")
+    check("most specific key wins", specific.history_factor > general.history_factor)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,7 +272,7 @@ def test_bias_direction() -> None:
     # Accuracy here is asymmetric: under-predicting lets a request through that should
     # have been blocked, while over-predicting holds budget released at CAPTURE seconds
     # later. So we aim high rather than accurate-on-average.
-    unbiased = Predictor(safety_margin=1.0).predict(PROMPT, MODEL).predicted_output_tokens
+    unbiased = Predictor(buffer=1.0).predict(PROMPT, MODEL).predicted_output_tokens
     biased = predict(PROMPT, MODEL).predicted_output_tokens
     check("default predictor over-predicts", biased > unbiased, f"{biased} vs {unbiased}")
 
@@ -194,14 +310,14 @@ def test_learner() -> None:
     # model that changes between runs is not auditable.
     check("fit is reproducible", fit_bucket(rows) == fit_bucket(rows))
 
-    p = Predictor(safety_margin=1.0)
+    # The estimator no longer regresses output on input length -- that feature carried
+    # R^2 = 0.009 -- so `method` now names the rule that fired (see DESIGN.md).
+    p = Predictor(buffer=1.0)
     before = p.predict(PROMPT, MODEL)
-    check("starts on priors", before.method == "prior")
-    p.load_fits({before.bucket: [(t, 5 * t + 500) for t in range(10, 800, 5)]})
-    after = p.predict(PROMPT, MODEL)
-    check("learned fit takes over", after.method == "learned")
-    check("learned fit changes the estimate",
-          after.predicted_output_tokens > before.predicted_output_tokens)
+    check("method names the rule that fired", before.method in ("stacked", "json_schema")
+          or before.method.endswith("s"), f"got {before.method!r}")
+    check("fit_all still available for per-bucket regression",
+          isinstance(p.load_fits({"code": [(t, 5 * t + 500) for t in range(10, 800, 5)]}), dict))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -230,8 +346,96 @@ def test_priors() -> None:
 
     # Every bucket must produce a positive prediction for a realistic prompt.
     for bucket in PRIORS:
-        p = Predictor(safety_margin=1.0).predict("word " * 40, MODEL)
+        p = Predictor(buffer=1.0).predict("word " * 40, MODEL)
         check(f"{bucket:<12} priors yield a positive estimate", p.predicted_output_tokens > 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_proxy_integration() -> None:
+    """The ESTIMATE seam in proxy/app.py, which must never fail a request."""
+    print("\nproxy integration")
+    import os, tempfile
+    os.environ.setdefault("METER_DB_PATH", str(Path(tempfile.mkdtemp()) / "t.db"))
+    from proxy.app import _predict
+
+    r = _predict({"messages": [{"role": "user", "content": "Write a Python function."}]},
+                 "gpt-4o", "openai")
+    check("predicts from an OpenAI messages body", r is not None and r.bucket == "code")
+
+    # Anthropic has no local tokenizer. Returning None is correct; raising would 500 a
+    # request that was going to succeed.
+    check("claude yields None rather than raising",
+          _predict({"messages": [{"role": "user", "content": "hi"}]},
+                   "claude-sonnet-5", "anthropic") is None)
+
+    check("no model -> None", _predict({"messages": []}, None, "openai") is None)
+    check("empty messages -> None", _predict({"messages": []}, "gpt-4o", "openai") is None)
+    check("malformed body -> None", _predict({"messages": "nope"}, "gpt-4o", "openai") is None)
+    check("unknown model -> None", _predict(
+        {"messages": [{"role": "user", "content": "hi"}]}, "llama-3-70b", "openai") is None)
+
+    # max_tokens must reach the predictor, since it is a hard provider-enforced bound.
+    capped = _predict({"messages": [{"role": "user", "content": "Write an essay. " * 50}],
+                       "max_tokens": 20}, "gpt-4o", "openai")
+    check("max_tokens is honoured through the seam",
+          capped is not None and capped.predicted_output_tokens == 20)
+
+    # The ledger must be able to store every field the seam produces.
+    from proxy.db import _REQUEST_COLUMNS
+    for col in ("predicted_output_tokens", "predicted_cost_usd", "bucket", "prediction_method"):
+        check(f"ledger column {col} exists", col in _REQUEST_COLUMNS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_ledger_migration() -> None:
+    """An existing meter.db from before the prediction columns must keep working.
+
+    The first version of this crashed on connect: SCHEMA created an index on
+    `bucket` while CREATE TABLE IF NOT EXISTS no-opped on the existing table, so the
+    index referenced a column that did not exist yet. That would have broken every
+    teammate the moment they pulled, and deleting their ledger is not an option --
+    it is the priced history ARCHITECTURE.md §9 calls the part that does not port.
+    """
+    print("\nledger migration")
+    import os, sqlite3, tempfile
+
+    path = Path(tempfile.mkdtemp()) / "old.db"
+    conn = sqlite3.connect(str(path))
+    # The real pre-prediction schema, so the other indexes in SCHEMA resolve too.
+    conn.executescript(
+        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, environment TEXT, actor TEXT, feature TEXT, "
+        "trace_id TEXT, provider TEXT NOT NULL, model TEXT, endpoint TEXT NOT NULL, "
+        "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
+        "cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0, "
+        "pricing_version TEXT, cost_usd REAL DEFAULT 0, latency_ms REAL, ttft_ms REAL, "
+        "overhead_ms REAL, status INTEGER, is_stream INTEGER DEFAULT 0, "
+        "estimated INTEGER DEFAULT 0, prompt_hash TEXT, reservation_id TEXT);"
+        "INSERT INTO requests (id,ts,project_id,provider,endpoint,cost_usd) "
+        "VALUES ('old','2026-01-01','p','openai','/v1/chat',0.5);"
+    )
+    conn.commit()
+    conn.close()
+
+    os.environ["METER_DB_PATH"] = str(path)
+    import importlib
+
+    from proxy import config as cfg
+    importlib.reload(cfg)
+    from proxy import db as dbmod
+    importlib.reload(dbmod)
+    dbmod.connect()
+
+    check2 = sqlite3.connect(str(path))
+    cols = {r[1] for r in check2.execute("PRAGMA table_info(requests)")}
+    for col in ("predicted_output_tokens", "predicted_cost_usd", "bucket", "prediction_method"):
+        check(f"migration added {col}", col in cols)
+    rows = check2.execute("SELECT id, cost_usd FROM requests").fetchall()
+    check("historical rows survive", rows == [("old", 0.5)], f"got {rows}")
+    idx = [r[0] for r in check2.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_requests_bucket'")]
+    check("bucket index created after the column", idx == ["idx_requests_bucket"])
+    check2.close()
 
 
 def main() -> int:
@@ -240,11 +444,16 @@ def main() -> int:
         test_input_counting,
         test_classifier,
         test_max_tokens,
+        test_scope_signals,
+        test_cache,
+        test_buffer_and_history,
         test_bias_direction,
         test_pricing_integration,
         test_learner,
         test_accuracy_report,
         test_priors,
+        test_proxy_integration,
+        test_ledger_migration,
     ):
         suite()
     print(f"\n{PASSED} checks passed")

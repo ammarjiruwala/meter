@@ -99,15 +99,18 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — **Shubh's Phase 2 landed** (branch `shubh/phase2`): the
-    predictor is wired into the request path, daily ceilings are enforced with real
-    authorize/capture reservations, and `POST /v1/annotate` exists. Three decisions were
-    taken on review the same day and are recorded below: `/v1/annotate` ratified (with its
-    `project_id` deviation approved), the feature-ceiling validation rule in
-    `ARCHITECTURE.md` §4 corrected (`PROPOSALS.md` B17), and the overhead number qualified
-    pending a Phase 4 re-measurement. Detail under Proxy below.
-    Previously: Shivam's treasury schema (`wallets`, `mandates`, `treasury_events`) and mock
-    provider billing landed, then folded into the proxy app: one process, one port.
+*   **Last updated:** 2026-08-01 — **`shubh/phase2` merged into main.** The merge reconciled two
+    independent predictor integrations: Ammar's estimator v2 (scope stacking, history correction —
+    `predictor/DESIGN.md`) wired ESTIMATE/CAPTURE on main while Shubh's branch wired
+    ESTIMATE/RESERVE/CAPTURE. **Ammar's `_predict` + estimator v2 won the ESTIMATE step; Shubh's
+    RESERVE (in-process authorize/capture, `proxy/budget.py`) now holds v2's
+    `predicted_cost_usd`.** Both sides had picked identical ledger column names, so the schema
+    merged cleanly. Shubh's branch also brought: daily ceilings from `meter.yaml`,
+    `POST /v1/annotate`, and three review decisions recorded below (B17 validation rule, B9
+    ratified, overhead number qualified). Also on main from this window: dashboard restyled onto a
+    dark control-room visual system (Tanay) — Phase 4's "finalize UI" effectively done ahead of
+    schedule; Poke/Linq breaker alerts wired (Tanay), code complete, awaiting a live token to
+    verify; treasury `/topup` + mandate-selection fixes (Shivam).
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -134,17 +137,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 *   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
     *   **Phase 2 additions to carry into the port:** four prediction columns on `requests` (`predicted_output_tokens`, `predicted_cost_usd`, `bucket`, `prediction_method`), plus two new tables — `annotations` (§4's, with a `project_id` added so one project cannot annotate another's traces) and `feature_budgets` (not in §4; §4 has ceilings only at project level, but README.md's own `meter.yaml` example sets them per feature).
 
-*   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are NOT wired** — `breaker.notify()` is a log-only seam waiting on Tanay.
+*   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are wired** — see the Alerts entry below.
 
-*   **Predictive Engine: WORKING (v1), NOW WIRED INTO THE PROXY.** `predictor/` — full detail in `predictor/README.md`, self-check `python tests/test_predictor.py` (64 checks).
-    *   `predict(payload, model, max_tokens) -> PredictionResult` — the ESTIMATE step of ARCHITECTURE.md §2. Deterministic, no I/O, **p50 0.031ms** (~0.6% of the 5ms pre-flight budget).
-    *   Exact `tiktoken` input counting including chat framing overhead. **Raises on Claude** rather than silently approximating with the wrong vocabulary — see §6b.
-    *   8-bucket prompt classifier; `max_tokens` honoured as a hard cap (a provider-enforced bound beats any heuristic).
-    *   Deliberately biased high (`SAFETY_MARGIN = 1.15`) — see §6b for why accuracy here is asymmetric.
-    *   Priced through `proxy/pricing.py`, so predictions and ledger rows cannot disagree on rates.
-    *   **Deferred, decided 2026-08-01 (Ammar):** the `translation` bucket is knowingly mis-calibrated (ratio 0.26, 331% MAPE) and **we are not fixing it during the hackathon.** Our users are engineering teams; their traffic is code/reasoning/summary and effectively none of it is translation. It is also genuinely harder than the other buckets — the ratio depends on language pair *and* direction, which one bucket cannot represent. Detail and the two fixes in `predictor/buckets.py`. Every other bucket is unaffected, and input counting is exact regardless of language.
-    *   **Known gap vs §5A:** §5A specifies a trailing-p95 cost fallback for `(project, endpoint, model)` at cold start. v1 uses static per-bucket priors instead — bucket-aware rather than project-aware, and available on request #1 rather than needing history. Not yet reconciled; **Ammar to raise in `PROPOSALS.md` rather than quietly treat §5A as satisfied.**
-    *   **Feedback loop: half closed as of 2026-08-01.** (1) ✅ Shubh wired `predict()` into the request path; `predicted_output_tokens`, `predicted_cost_usd`, `bucket` and `prediction_method` are written to the ledger at CAPTURE, so the rows `load_fits()` needs are accumulating now. (2) ⬜ **Still outstanding, Ammar:** run `python -m predictor.calibrate` to replace the inherited priors with measured ones, and call `load_fits()` on a schedule — nothing does yet, so `learner.py` remains dormant regardless of row count. **No accuracy number can be quoted until (2) is done.**
+*   **Predictive Engine: WORKING (v2), WIRED INTO THE PROXY.** `predictor/` — method in `predictor/DESIGN.md`, contract in `predictor/README.md`, self-check `python tests/test_predictor.py` (108 checks).
+    *   `predict(payload, model, max_tokens, response_format=, project=, feature=, actor=) -> PredictionResult`. Deterministic, no I/O. Called from `proxy/app.py` at ESTIMATE; the prediction is stored beside the actual at CAPTURE, so predictor accuracy is a SQL query rather than a separate pipeline.
+    *   **Returns two numbers, not one.** `predicted_*` is a forecast (dashboard, treasurer runway); `bound_*` is what the call *cannot* exceed (ceiling check). When `max_tokens` is set the bound is exact, which makes the ceiling guarantee structural rather than statistical.
+    *   Exact `tiktoken` input counting including chat framing overhead. **Raises on Claude** rather than approximating with the wrong vocabulary — see §6b.
+    *   **The v1 model was abandoned on evidence, not taste.** Regressing output on input length gave **R² = 0.009** — input length explains under 1% of output variance, and two buckets were *negatively* correlated. v2 reads *requested scope* instead: explicit length instructions, additive multi-task scopes, verb intensity, chain-of-thought, and an instruction-to-context ratio.
+    *   Measured on 15 held-out prompts: **MAPE 85% → 83%, median error 58% → 44%, under-prediction 53% → 47%.** Targets are <40% / <30% / <20%, so this is progress, not arrival.
+    *   **Do not quote these as achieved accuracy — n=15.** They rank designs; they are not results.
+    *   **Steps 4 and 5 are built but dormant.** Per-bucket fitted buffers need ≥10 rows/bucket; the per-`(project, feature, actor)` history correction needs volume. Both activate from ledger traffic and are why the constants are parameters rather than literals.
+    *   **Known failure: trivial requests are badly over-predicted.** Live, *"Fix the typo: prnt(x)"* predicted 176 against 11 actual. `BASE_SCOPE=150` is a floor short answers cannot clear and the 0.6 low-intensity multiplier is ~an order of magnitude too timid. Over-reserves, so it is an efficiency failure rather than a safety one. Detail in `DESIGN.md` §12.
+    *   **Deferred (Ammar, 2026-08-01):** the `translation` bucket is knowingly mis-calibrated and not being fixed during the hackathon — our users are engineering teams whose traffic is code/reasoning/summary. Detail in `predictor/buckets.py`.
+    *   **Known gap vs §5A:** §5A specifies a trailing-p95 fallback per `(project, endpoint, model)`. v2's Step 5 history correction is the closest equivalent but keys on `(project, feature, actor)` and corrects residuals rather than replacing the estimate. **Ammar to raise in `PROPOSALS.md` rather than quietly treat §5A as satisfied.**
+    *   **Real data captured so far** lives in `data/calibration/*.jsonl` — 20 observations across gpt-4o-mini and claude-haiku, each storing prediction, actual, and `finish_reason` so truncated rows are excluded from fitting. Next step is the ~240-call learner seed, which activates Steps 4 and 5.
+    *   **Merged with Shubh's RESERVE (2026-08-01):** `proxy/budget.py` now holds v2's `predicted_cost_usd` against the daily ceiling before forwarding, so the estimate is no longer informational — it is the amount a request reserves. The known over-prediction on trivial requests therefore over-*reserves* briefly (released at CAPTURE), still an efficiency cost, not a safety one.
 
 *   **Treasurer Agent / Prava: PAYMENT RAIL VERIFIED + TREASURY SCHEMA WORKING; AGENT LOOP NOT STARTED.**
     `treasury/` — **mounted on Shubh's proxy app**, so there is one backend process on one port:
@@ -187,10 +194,26 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         run put several charges through a monthly mandate. Unresolved, and the demo's repeat-top-up
         narrative depends on it.
 
-*   **Dashboard: LAYOUT + LIVE LOGS WORKING.** `dashboard/` — Next.js (App Router) + Tailwind,
-    `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
+*   **Dashboard: LAYOUT + LIVE LOGS WORKING, RESTYLED.** `dashboard/` — Next.js (App Router) +
+    Tailwind, `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
     (`dashboard/src/lib/db.ts`), WAL mode makes concurrent reads with the proxy's writer safe.
-    *   "Team Spend" table (grouped by project/actor/feature from `requests`).
+    *   **Visual system (2026-08-01):** a "mission-control darkroom" — pitch-black canvas, a
+        five-level surface stack (obsidian → carbon → graphite → iron → steel), elevation by inset
+        white hairline rather than shadow, and one accent blue reserved for the active nav
+        indicator and the live-polling dot. Type is Inter at weight 400 throughout with a negative
+        tracking ladder (-0.064em at 86px down to -0.005em at 12px); IBM Plex Mono handles
+        readouts — costs, model ids, timestamps. Tokens and the type ladder live in
+        `dashboard/src/app/globals.css`; shared pieces in `dashboard/src/components/ui/`.
+    *   **Status colors are a deliberate exception to that monochrome system** and should survive
+        any future restyle. Green/amber/red for 2xx / 429 / 5xx, because catching a failure by
+        color beats reading a number on a dashboard watched during a live demo. The specific hex
+        values were chosen against the colorblind case, not by eye: the obvious green/amber pair
+        collapses to ΔE 5.1 under protanopia. The shipped ramp clears ΔE 10.6, stays separable
+        from the accent blue, and all three clear AA on the badge surface. Reasoning is kept in a
+        comment beside the tokens.
+    *   "Team Spend" table (grouped by project/actor/feature from `requests`), with a neutral
+        proportion bar per row — share-of-total is what that table answers and length reads faster
+        than a column of figures.
     *   "Provider Balances" card — **now reading the real `wallets` table** (`treasury/db.py`,
         same `meter.db`). Ordering mirrors `treasury.db.list_wallets()` so the card and
         `GET /wallets` cannot disagree. Each row shows how stale the balance is, because
@@ -198,6 +221,9 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         shown only when more than one project has wallets, so it stays out of the way in the
         single-project demo. Seed with `POST /wallets/seed` (defaults to `$4.00`, the
         demo's "too low" state). The old `dashboard/src/lib/wallets.ts` placeholder is deleted.
+    *   Hero: total metered spend at display size, with floating readout pills carrying live
+        ledger counts. It is the one number the product exists to answer, and a single figure is
+        a stat rather than a chart.
     *   "Live Logs" table (`User | Model | Predicted Cost | Actual Cost | Status`), polling
         `GET /api/live-logs` every 3s. **Predicted Cost now reads the real column** (wired
         2026-08-01 once Shubh's predictor integration landed). It stays blank for Claude
@@ -212,8 +238,30 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         `requests` table, and the whole page 500'd with `no such table: requests`. Each read
         checks `sqlite_master` first and degrades to an empty state per card, so a half-built
         database shows what it has instead of nothing.
-    *   Not yet done: Poke alert wiring (Phase 3, hooks into `breaker.notify()`), Model Efficiency
-        view (Phase 3, needs Ammar's cross-model data), Agent Activity panel (Phase 3, Treasurer).
+    *   Not yet done: Model Efficiency view (Phase 3, needs Ammar's cross-model data), Agent
+        Activity panel (Phase 3, needs the Treasurer loop).
+
+*   **Alerts (Poke / Linq): WIRED, UNVERIFIED AGAINST THE LIVE API.** `alerts/` — a sibling
+    package to `treasury` and `predictor`. `proxy.breaker.notify()` still logs unconditionally
+    (that line is the record of record) and then hands off to `alerts.send_breaker_alert`.
+    *   `POST /v3/messages` on the Linq Partner API, which resolves the sending line and chat
+        itself — we own no provisioned number, and picking one would be guessing.
+    *   **Dispatched on a daemon thread, never awaited.** `notify()` runs inside the request path,
+        so an inline HTTP call would put a third party's latency in front of production traffic.
+        It also swallows every exception: an alerting failure must not become a request failure.
+    *   **Per-scope cooldown, default 300s** (`POKE_COOLDOWN_S`). A breaker half-opens and
+        re-trips while a burst continues; without a floor, one runaway feature texts somebody
+        every few seconds, which is how an alerting channel gets muted for good.
+    *   Silent without credentials, so every teammate's machine stays quiet. `POKE_ENABLED` is a
+        separate kill switch. Destination must be E.164 — validated at config time, because Linq
+        rejects anything else with error 1002 and it would otherwise surface as an unsent alert
+        mid-incident.
+    *   `python tests/test_alerts.py` — 40 checks covering payload shape, the configuration gate,
+        cooldown, failure isolation, and that a 1.5s send returns to the caller in under 0.25s.
+    *   🚨 **Still needs a real Linq bearer token.** Everything is tested against a mocked
+        transport; nobody has confirmed an actual iMessage arrives, and "the key leaks, the lead
+        gets a text" is a live demo beat. Whoever registered with Linq needs to put a token in
+        `.env` as `POKE_API_KEY`, plus a destination in `POKE_CTO_PHONE`.
 
 *   **Resolved since kickoff:**
     1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)

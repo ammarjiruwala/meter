@@ -879,51 +879,54 @@ def test_reservations() -> None:
 
 
 def test_prediction() -> None:
-    """The ESTIMATE step must degrade to 'no prediction' rather than ever failing a request."""
+    """The ESTIMATE step must degrade to 'no prediction' rather than ever failing a request.
+
+    `_predict` returns the estimator v2 `PredictionResult` or None; None is the
+    degradation path and every malformed input must land there, never in an exception.
+    """
     print("\npre-flight estimate")
-    from proxy.app import _estimate
+    from proxy.app import _predict
 
     messages = [{"role": "user", "content": "Write a python function that sorts a list."}]
-    got = _estimate(providers.SHAPE_OPENAI, {"messages": messages}, "gpt-4o")
+    got = _predict({"messages": messages}, "gpt-4o", providers.SHAPE_OPENAI)
     check("a supported model produces a token prediction",
-          isinstance(got["predicted_output_tokens"], int)
-          and got["predicted_output_tokens"] > 0, str(got))
-    # The same field is the ledger's `predicted_cost_usd` and the dollar figure reserved
-    # against the ceiling — deliberately one number, so the row and the hold cannot drift.
-    check("and a dollar figure to reserve", got["predicted_cost_usd"] > 0, str(got))
-    check("and records which bucket it classified into", bool(got["bucket"]), str(got))
-    check("and how it arrived at the number", got["prediction_method"] in
-          {"prior", "learned", "capped"}, str(got))
+          got is not None and got.predicted_output_tokens > 0, str(got))
+    check("and a forecast cost for the ledger row", got.predicted_cost_usd > 0, str(got))
+    # DESIGN.md §1: the bound is the number the ceiling check reserves — it must never
+    # be below the forecast, or the reserve would be weaker than the prediction itself.
+    check("and a bound at least as large to reserve",
+          got.bound_cost_usd >= got.predicted_cost_usd, str(got))
+    check("and records which bucket it classified into", bool(got.bucket), str(got))
 
-    capped = _estimate(
-        providers.SHAPE_OPENAI, {"messages": messages, "max_tokens": 5}, "gpt-4o")
+    capped = _predict({"messages": messages, "max_tokens": 5}, "gpt-4o",
+                      providers.SHAPE_OPENAI)
     check("a caller's max_tokens is a hard cap on the prediction",
-          capped["predicted_output_tokens"] == 5, str(capped))
+          capped.predicted_output_tokens == 5, str(capped))
+    check("and makes the bound exact — reserve equals the cap's cost",
+          capped.bound_output_tokens == 5, str(capped))
 
     # Claude has no tiktoken vocabulary and the predictor raises rather than guessing
     # (predictor/README.md). The proxy must absorb that, not 500.
-    claude = _estimate(providers.SHAPE_ANTHROPIC, {"messages": messages}, "claude-sonnet-5")
-    check("an unsupported model yields no prediction instead of raising",
-          claude["predicted_cost_usd"] is None, str(claude))
-    check("and therefore reserves nothing",
-          (claude["predicted_cost_usd"] or 0.0) == 0.0, str(claude))
+    claude = _predict({"messages": messages}, "claude-sonnet-5", providers.SHAPE_ANTHROPIC)
+    check("an unsupported model yields no prediction instead of raising", claude is None)
 
     check("a body with no messages is handled",
-          _estimate(providers.SHAPE_OPENAI, {}, "gpt-4o")["predicted_cost_usd"] is None)
+          _predict({}, "gpt-4o", providers.SHAPE_OPENAI) is None)
     check("a missing model is handled",
-          _estimate(providers.SHAPE_OPENAI, {"messages": messages}, None)
-          ["predicted_cost_usd"] is None)
-    # Non-string content blocks (multimodal) must not raise on the way to a count.
+          _predict({"messages": messages}, None, providers.SHAPE_OPENAI) is None)
+    # Non-string content blocks (multimodal) must degrade, not raise.
     blocks = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
-    check("structured message content does not crash the estimator",
-          _estimate(providers.SHAPE_OPENAI, {"messages": blocks}, "gpt-4o") is not None)
+    try:
+        _predict({"messages": blocks}, "gpt-4o", providers.SHAPE_OPENAI)
+        check("structured message content does not crash the estimator", True)
+    except Exception as exc:  # noqa: BLE001 - the assertion is "never raises"
+        check("structured message content does not crash the estimator", False, repr(exc))
 
     prev = config.PREDICT_ENABLED
     config.PREDICT_ENABLED = False
     try:
         check("PREDICT_ENABLED=false disables prediction entirely",
-              _estimate(providers.SHAPE_OPENAI, {"messages": messages}, "gpt-4o")
-              ["predicted_cost_usd"] is None)
+              _predict({"messages": messages}, "gpt-4o", providers.SHAPE_OPENAI) is None)
     finally:
         config.PREDICT_ENABLED = prev
 
@@ -1083,8 +1086,10 @@ def test_end_to_end_budget_and_prediction() -> None:
               row["predicted_output_tokens"] is not None
               and row["predicted_cost_usd"] is not None, str(dict(row)))
         check("with the bucket it classified into", bool(row["bucket"]), str(row["bucket"]))
-        check("and the method it used",
-              row["prediction_method"] in {"prior", "learned", "capped"},
+        # v2 method strings are compound ("stacked", "stacked+capped", "json_schema") —
+        # assert one was recorded rather than pinning the estimator's internal vocabulary,
+        # which belongs to predictor/ and its own suite.
+        check("and the method it used", bool(row["prediction_method"]),
               str(row["prediction_method"]))
         check("actual cost is priced from the provider's real usage, not the prediction",
               row["output_tokens"] == 50 and row["estimated"] == 0, str(dict(row)))
@@ -1146,8 +1151,9 @@ def test_ledger_migration() -> None:
     db._migrate(conn)
     conn.commit()
     columns = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
-    for column in db._ADDED_REQUEST_COLUMNS:
-        check(f"migration adds requests.{column}", column in columns)
+    for table, column, _decl in db._ADDED_COLUMNS:
+        if table == "requests":
+            check(f"migration adds requests.{column}", column in columns)
     check("the pre-existing row survives the migration",
           conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1)
     check("and its new columns read as NULL, not as a wrong number",

@@ -136,12 +136,13 @@ CREATE TABLE IF NOT EXISTS requests (
     estimated           INTEGER NOT NULL DEFAULT 0,
     prompt_hash         TEXT,
     reservation_id      TEXT,
-    -- What the predictor said before the call ran (ARCHITECTURE.md §2 step 3). Stored
-    -- next to the actuals so predicted-vs-actual variance is a subtraction rather than a
-    -- second system: it is the number that tells us whether SAFETY_MARGIN is set right,
-    -- and it is unrecoverable after the fact. NULL when the model has no supported
-    -- tokenizer (every Claude model — see predictor/README.md), which is itself worth
-    -- being able to count.
+    -- What the predictor said BEFORE the call, alongside what actually happened.
+    -- Storing both in the same row is what makes predictor accuracy a query rather
+    -- than a separate pipeline: it feeds the learner (predictor/learner.py) and is the
+    -- number that says whether the safety margin is set right. All nullable: a
+    -- prediction is best-effort and must never be able to fail a request. NULL means
+    -- "not predicted" (unsupported model — every Claude model — or predictor errored),
+    -- which is different from and must not be confused with a prediction of zero.
     predicted_output_tokens INTEGER,
     predicted_cost_usd      REAL,
     bucket                  TEXT,
@@ -171,6 +172,10 @@ CREATE INDEX IF NOT EXISTS idx_requests_project_ts ON requests(project_id, ts);
 CREATE INDEX IF NOT EXISTS idx_requests_trace     ON requests(trace_id);
 -- prompt_hash backs duplicate-call and cache-candidate detection for the Analyst.
 CREATE INDEX IF NOT EXISTS idx_requests_prompt    ON requests(prompt_hash);
+-- NOTE: the index on `bucket` is NOT here. It is created in _migrate(), after the
+-- column exists. Creating it here fails outright on a ledger that predates the
+-- column, because CREATE TABLE IF NOT EXISTS no-ops on the existing table and then
+-- the index references a column that is not there yet.
 
 CREATE TABLE IF NOT EXISTS breaker_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,33 +191,6 @@ CREATE TABLE IF NOT EXISTS breaker_events (
 -- of those at any moment even after a long run.
 CREATE INDEX IF NOT EXISTS idx_breaker_open ON breaker_events(scope) WHERE closed_at IS NULL;
 """
-
-
-# Columns added to `requests` after the table first shipped. `CREATE TABLE IF NOT EXISTS`
-# is a no-op on an existing table, so a teammate who has been running the proxy since
-# Phase 1 would keep a table without these and every INSERT would fail on the unknown
-# column — on their machine only, which is the worst place to find out. Adding them at
-# connect() keeps the upgrade to "git pull, restart".
-_ADDED_REQUEST_COLUMNS = {
-    "predicted_output_tokens": "INTEGER",
-    "predicted_cost_usd": "REAL",
-    "bucket": "TEXT",
-    "prediction_method": "TEXT",
-}
-
-
-def _migrate(conn: sqlite3.Connection) -> None:
-    """Add any `requests` column missing from an older database. Idempotent."""
-    # Indexed positionally, not by name: `PRAGMA table_info` returns
-    # (cid, name, type, notnull, dflt_value, pk), and reading `r["name"]` would make this
-    # helper depend on the caller having set `row_factory = sqlite3.Row`.
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
-    for column, sql_type in _ADDED_REQUEST_COLUMNS.items():
-        if column not in existing:
-            # No DEFAULT and no NOT NULL: SQLite backfills NULL, which is the honest
-            # value for "this row predates prediction" and needs no table rewrite.
-            conn.execute(f"ALTER TABLE requests ADD COLUMN {column} {sql_type}")
-            log.info("ledger migrated: added requests.%s", column)
 
 
 def connect() -> sqlite3.Connection:
@@ -239,6 +217,40 @@ def connect() -> sqlite3.Connection:
         conn.commit()
         _conn = conn
         return _conn
+
+
+# Columns added after the first ledgers were already created. CREATE TABLE IF NOT
+# EXISTS silently does nothing on an existing table, so without this anyone holding a
+# meter.db from before these columns landed gets "no such column" on every write.
+# Dropping their ledger instead is not an option: it is the priced history, which
+# ARCHITECTURE.md §9 calls the part that does not port.
+_ADDED_COLUMNS = (
+    ("requests", "predicted_output_tokens", "INTEGER"),
+    ("requests", "predicted_cost_usd", "REAL"),
+    ("requests", "bucket", "TEXT"),
+    ("requests", "prediction_method", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns missing from an older ledger. Idempotent, safe on a fresh DB.
+
+    Runs after the schema script, so every table exists by now. Any index that
+    references a migrated column must be created here rather than in SCHEMA, for the
+    reason noted there.
+    """
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table absent entirely; SCHEMA owns creating it
+        if column not in existing:
+            # No DEFAULT and no NOT NULL: SQLite backfills NULL, which is the honest
+            # value for "this row predates prediction" and needs no table rewrite.
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            log.info("ledger migrated: added %s.%s", table, column)
+
+    # bucket backs the learner's per-bucket refit and the accuracy-by-bucket report.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_bucket ON requests(bucket)")
 
 
 def seed_keys(spec: str) -> int:

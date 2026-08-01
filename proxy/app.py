@@ -8,11 +8,12 @@ rather than in Redis (PROPOSALS.md A5):
 
     1. AUTHENTICATE   resolve Meter key -> project, environment
     2. ATTRIBUTE      read X-Meter-Feature / X-Meter-Actor / X-Meter-Trace
-    3. ESTIMATE       predicted output tokens and cost, via predictor/
+    3. ESTIMATE       predict output tokens and cost before the call (predictor/)
     4. BREAKER CHECK  rolling-window spend for this attribution tag
     5. RESERVE        hold the estimate against the daily ceiling (proxy/budget.py)
     6. FORWARD        stream bytes to the client unbuffered while teeing for usage
-    7. CAPTURE        price actual usage, write the ledger row, release the hold
+    7. CAPTURE        price actual usage, write the ledger row, release the hold —
+                      storing the prediction beside the actual so accuracy is a query
 
 Step 7 never blocks the client. By the time it runs, the caller already has every byte.
 Steps 4 and 5 are swapped relative to ARCHITECTURE.md's numbering — see the comment at
@@ -47,11 +48,9 @@ from .pricing import Usage, estimate_from_bytes, price
 # to boot over a pre-flight estimate that is allowed to be absent. Degrade to no
 # prediction — the same state PREDICT_ENABLED=false produces — and say so once.
 try:
-    from predictor import UnsupportedModelError, predict, supports
+    from predictor import predict
 except ImportError as _exc:  # pragma: no cover - depends on the local venv
     predict = None
-    supports = None
-    UnsupportedModelError = Exception
     _PREDICTOR_IMPORT_ERROR = str(_exc)
 else:
     _PREDICTOR_IMPORT_ERROR = ""
@@ -124,6 +123,20 @@ async def lifespan(app: FastAPI):
                 config.BREAKER_BURST_RATIO, ceiling,
                 config.BREAKER_WINDOW_S, config.BREAKER_BASELINE_WINDOW_S,
             )
+
+    # Load the tokenizer vocabularies now rather than on the first request. tiktoken
+    # builds an encoder lazily, and that first build measured 124ms of overhead on the
+    # first call while every subsequent call was under 1ms. Paying it at boot keeps the
+    # published overhead number honest and stops a cold demo box from looking slow on
+    # exactly the request someone is watching.
+    try:
+        from predictor.tokenizer import warm
+
+        warmed = await asyncio.to_thread(warm)
+        log.info("tokenizer warm for %d model(s)", warmed)
+    except Exception:
+        # A cold tokenizer is a latency problem, not a correctness one.
+        log.debug("tokenizer warmup skipped", exc_info=True)
 
     # One client for the process. Connection reuse is most of the reason the proxy can
     # claim single-digit-millisecond overhead: a fresh TLS handshake per request would
@@ -410,53 +423,6 @@ async def _json_body(request: Request) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _estimate(shape: str, body: dict[str, Any], model: str | None) -> dict[str, Any]:
-    """ESTIMATE — ARCHITECTURE.md §2 step 3. Never raises, never blocks.
-
-    Returns exactly the four `predicted_*` ledger fields — `predicted_cost_usd` doubles as
-    the dollar figure to reserve, so there is no separate reserve amount that could drift
-    from what the row records. Every failure mode degrades to "no prediction" rather than
-    to an error, because a request the proxy could have served must not die over a number
-    that only informs a reservation. `predicted_cost_usd` staying NULL is itself the
-    signal, and it is countable from the ledger.
-
-    Anthropic models take this path routinely, not exceptionally: `tiktoken` has no Claude
-    vocabulary and the predictor raises rather than returning a number that is quietly
-    10-20% wrong (predictor/README.md). Those requests reserve $0, so a ceiling still
-    stops them — just one request later than it stops an OpenAI one, since there is no
-    estimate to anticipate with.
-    """
-    blank: dict[str, Any] = {
-        "predicted_output_tokens": None,
-        "predicted_cost_usd": None,
-        "bucket": None,
-        "prediction_method": None,
-    }
-    if not config.PREDICT_ENABLED or predict is None or not model:
-        return blank
-
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return blank
-
-    try:
-        if not supports(model):
-            return blank
-        result = predict(messages, model=model, max_tokens=body.get("max_tokens"))
-    except UnsupportedModelError:
-        return blank
-    except Exception:  # noqa: BLE001 - see the docstring: estimation is never fatal
-        log.exception("prediction failed for model %r; continuing without an estimate", model)
-        return blank
-
-    return {
-        "predicted_output_tokens": result.predicted_output_tokens,
-        "predicted_cost_usd": result.predicted_cost_usd,
-        "bucket": result.bucket,
-        "prediction_method": result.method,
-    }
-
-
 async def _proxy(request: Request, shape: str) -> Response:
     started = time.perf_counter()
     request_id = f"req_{uuid.uuid4().hex}"
@@ -491,7 +457,7 @@ async def _proxy(request: Request, shape: str) -> Response:
     streaming = providers.is_streaming(body)
 
     # ── 3. ESTIMATE ──────────────────────────────────────────────────────────
-    prediction = _estimate(shape, body, model)
+    prediction = _predict(body, model, shape, key, tags)
 
     # ── 4. BREAKER CHECK ─────────────────────────────────────────────────────
     # ARCHITECTURE.md §2 numbers RESERVE before BREAKER CHECK. Swapped deliberately: the
@@ -533,9 +499,16 @@ async def _proxy(request: Request, shape: str) -> Response:
     # Holds the estimate against the daily ceiling before the call goes out, so a burst
     # of concurrent requests cannot each read the same under-ceiling total and all be
     # let through (ARCHITECTURE.md §2). Free when no meter.yaml is configured.
+    #
+    # The amount held is `bound_cost_usd`, not the forecast — predictor/DESIGN.md §1
+    # assigns the bound to exactly this check: it is what the call *cannot* exceed, exact
+    # when the caller set max_tokens. Reserving the forecast instead would leak the
+    # ceiling every time the predictor under-predicts (measured at ~half of requests),
+    # while over-holding the bound is transient — released seconds later at CAPTURE.
     try:
         budget_decision = await budget.authorize(
-            key["project_id"], tags["feature"], prediction["predicted_cost_usd"] or 0.0
+            key["project_id"], tags["feature"],
+            getattr(prediction, "bound_cost_usd", None) or 0.0,
         )
     except Exception:
         # Same posture as the breaker: enforcement is degradable, availability is not.
@@ -842,6 +815,60 @@ def _stamp(response: Response, request_id: str, started: float, latency_ms: floa
     response.headers["X-Meter-Overhead-Ms"] = f"{max(0.0, overhead):.2f}"
 
 
+def _predict(body: dict[str, Any], model: str | None, shape: str,
+             key: dict[str, Any] | None = None,
+             tags: dict[str, str | None] | None = None) -> Any | None:
+    """ESTIMATE — what will this call cost, before we make it (ARCHITECTURE.md §2).
+
+    Returns None rather than raising, always. Three reasons a prediction is absent and
+    all of them are normal: the model has no local tokenizer (Anthropic — predictor
+    raises by design rather than guessing), the body is not a shape we can read, or the
+    predictor hit an unexpected error. None of those are grounds for failing a request
+    that would otherwise succeed. A missing prediction costs us one row of training
+    data; a 500 costs the customer their traffic.
+
+    Pure computation, no I/O — measured p50 0.031ms, roughly 0.6% of the 5ms pre-flight
+    budget, so this does not meaningfully move the overhead number.
+
+    `PREDICT_ENABLED=false` turns the whole step off: `predicted_*` columns stay NULL and
+    reservations hold $0, which is exactly the pre-estimate behaviour. `predict` is the
+    module-level guarded import — None when the predictor's dependencies are missing.
+    """
+    if not config.PREDICT_ENABLED or predict is None or not model:
+        return None
+    try:
+        payload = body.get("messages")
+        if not isinstance(payload, list) or not payload:
+            # Anthropic's `system` is a sibling of `messages`, and completions-style
+            # bodies use `prompt`. Fall back rather than mis-count.
+            prompt = body.get("prompt")
+            if not isinstance(prompt, str):
+                return None
+            payload = prompt
+        max_tokens = body.get("max_tokens")
+        response_format = None
+        rf = body.get("response_format")
+        if isinstance(rf, dict):
+            response_format = rf.get("type")
+        return predict(
+            payload,
+            model,
+            max_tokens if isinstance(max_tokens, int) else None,
+            response_format=response_format,
+            # Attribution keys the history correction (DESIGN.md §8), which is how the
+            # estimator learns a given team's prompting style rather than assuming one
+            # global average fits everybody.
+            project=key.get("project_id") if key else None,
+            feature=tags.get("feature") if tags else None,
+            actor=tags.get("actor") if tags else None,
+        )
+    except Exception:
+        # debug, not warning: an unsupported model is expected and would otherwise log
+        # on every single Anthropic request.
+        log.debug("prediction unavailable for model %r", model, exc_info=True)
+        return None
+
+
 def _row(
     request_id: str,
     key: dict[str, Any],
@@ -857,7 +884,7 @@ def _row(
     ttft_ms: float | None,
     overhead_ms: float,
     prompt_hash: str | None,
-    prediction: dict[str, Any] | None = None,
+    prediction: Any | None = None,
     reservation_id: str | None = None,
 ) -> dict[str, Any]:
     """Build one ledger row, priced."""
@@ -891,14 +918,16 @@ def _row(
         # Redis ARCHITECTURE.md §2 specifies (PROPOSALS.md A5), but the id is written
         # either way, so a row can be traced back to the hold that authorized it.
         "reservation_id": reservation_id,
-        # What the predictor said before the call ran. NULL is meaningful: no supported
-        # tokenizer for this model, or prediction disabled. Variance is
-        # `cost_usd - predicted_cost_usd`, computed at read time rather than stored —
-        # a derived column that can disagree with its inputs is worse than a subtraction.
-        "predicted_output_tokens": prediction.get("predicted_output_tokens"),
-        "predicted_cost_usd": prediction.get("predicted_cost_usd"),
-        "bucket": prediction.get("bucket"),
-        "prediction_method": prediction.get("prediction_method"),
+        # CAPTURE — the prediction (a PredictionResult, or None) made before the call,
+        # stored beside what actually happened. This pairing is the whole feedback loop:
+        # predictor/learner.py refits from it, and predictor accuracy becomes a query
+        # against the ledger rather than a claim in a README. NULL is meaningful — no
+        # supported tokenizer, or prediction disabled — and must not be confused with a
+        # prediction of zero.
+        "predicted_output_tokens": getattr(prediction, "predicted_output_tokens", None),
+        "predicted_cost_usd": getattr(prediction, "predicted_cost_usd", None),
+        "bucket": getattr(prediction, "bucket", None),
+        "prediction_method": getattr(prediction, "method", None),
     }
 
 

@@ -15,6 +15,7 @@ from fastapi import APIRouter
 
 from . import config, db
 from .prava import charge_mandate, list_mandates, report_charge
+from .topup import execute_topup
 
 router = APIRouter(tags=["treasury"])
 
@@ -30,14 +31,42 @@ def wallets():
 
 @router.post("/wallets/seed")
 def seed_wallet(project_id: str = "demo-project", provider: str = "openai",
-                balance_usd: float = 4.00):
+                balance_usd: float = 4.00, reset: bool = False):
     """Create a wallet at a starting balance. $4 is the demo's 'too low' state.
 
-    Idempotent: the balance applies on creation only, so re-running this never wipes a
-    top-up the Treasurer already made.
+    Idempotent by default: the balance applies on creation only, so re-running this never
+    wipes a top-up the Treasurer already made. Pass `reset=true` to force the balance —
+    that is how you put the demo back to its starting state between run-throughs.
     """
     wallet_id = db.ensure_wallet(project_id, provider, balance_usd)
+    if reset:
+        db.set_balance(wallet_id, balance_usd)
     return db.get_wallet(wallet_id)
+
+
+# ── Top-up ───────────────────────────────────────────────────────────────────
+
+
+@router.post("/topup")
+async def topup(project_id: str = "demo-project", provider: str | None = None,
+                amount_usd: float = 50.00):
+    """Charge the mandate, pay the provider, settle, credit the wallet.
+
+    The whole money-moving sequence in one call. Phase 3's loop decides *when* to fire
+    this; the endpoint exists so it can be demoed and debugged without waiting for a
+    balance to drain. Refusals return `ok: false` with a reason rather than an HTTP
+    error — a refused top-up is a normal outcome, not a fault.
+    """
+    return await execute_topup(project_id=project_id, provider=provider,
+                               amount_usd=amount_usd)
+
+
+@router.get("/treasury/events")
+def treasury_events(project_id: str = "demo-project", provider: str | None = None,
+                    limit: int = 20):
+    """Every top-up attempt for a wallet — backs the Agent Activity panel."""
+    wallet_id = db.ensure_wallet(project_id, provider or config.TREASURER_PROVIDER)
+    return db.recent_events(wallet_id, limit)
 
 
 # ── Prava ────────────────────────────────────────────────────────────────────
