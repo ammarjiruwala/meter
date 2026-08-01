@@ -86,6 +86,23 @@ def test_input_counting() -> None:
         raised = True
     check("claude raises rather than guessing", raised)
 
+    # Support is an allowlist, not "everything except Anthropic". Blocking by
+    # exclusion silently mis-counted any third-party model reachable through an
+    # OpenAI-compatible gateway (OpenRouter, Together, local vLLM).
+    for unknown in ("llama-3-70b", "mistral-large", "deepseek-chat", "command-r", ""):
+        check(f"unknown model {unknown!r} is rejected", not supports(unknown))
+
+    # tiktoken's own table is authoritative and knows more than our prefix list:
+    # it maps the gpt-oss family to o200k_harmony, so those count exactly.
+    check("gpt-oss-20b is supported via tiktoken's own mapping", supports("gpt-oss-20b"))
+
+    for known in ("gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo", "gpt-4.1"):
+        check(f"known model {known!r} is supported", supports(known))
+
+    # Longest-prefix: gpt-4o must not be swallowed by the shorter gpt-4 entry.
+    check("gpt-4o uses o200k, not cl100k",
+          count("hello world", "gpt-4o") == count("hello world", "gpt-4o-2024-11-20"))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 def test_classifier() -> None:

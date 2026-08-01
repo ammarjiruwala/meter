@@ -31,11 +31,27 @@ class UnsupportedModelError(ValueError):
     """Raised when a model has no exact tokenizer available locally."""
 
 
+# Model-name prefixes we can count exactly, used only when tiktoken has no exact
+# mapping of its own. Anything matching neither raises rather than falling back to a
+# plausible-looking guess.
+#
+# An allowlist rather than a "block Anthropic" check on purpose. The first version
+# blocked Claude by name and defaulted *everything else* to cl100k_base, so any
+# third-party model reachable through an OpenAI-compatible gateway (OpenRouter,
+# Together, a local vLLM) returned a confident, silently wrong count. Guessing by
+# exclusion always leaves that hole open; an allowlist does not.
+#
+# Note tiktoken's own table is consulted first and is authoritative -- it knows more
+# than this list does. It correctly maps `gpt-oss-*` to o200k_harmony, for instance.
+_O200K_PREFIXES = ("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4", "chatgpt-4o")
+_CL100K_PREFIXES = ("gpt-4", "gpt-3.5", "text-embedding-ada-002")
+
+
 @lru_cache(maxsize=32)
 def _encoder(model: str) -> tiktoken.Encoding:
     """Resolve and cache an encoder. Caching matters: constructing an encoder is
     the slow part (it loads a vocabulary), while encoding itself is fast."""
-    lowered = model.lower()
+    lowered = (model or "").lower().strip()
 
     if "claude" in lowered or "anthropic" in lowered:
         raise UnsupportedModelError(
@@ -44,14 +60,24 @@ def _encoder(model: str) -> tiktoken.Encoding:
             "substitute cl100k_base -- it is silently ~10-20% wrong."
         )
 
+    # An exact tiktoken mapping is authoritative; prefer it over our prefix table.
     try:
         return tiktoken.encoding_for_model(model)
     except KeyError:
-        # Unknown OpenAI model (new release, fine-tune suffix). o200k_base backs
-        # the gpt-4o family; cl100k_base backs everything older.
-        if "gpt-4o" in lowered or lowered.startswith("o1") or lowered.startswith("o3"):
-            return tiktoken.get_encoding("o200k_base")
-        return tiktoken.get_encoding("cl100k_base")
+        pass
+
+    # Longest-prefix wins, so `gpt-4o` is not swallowed by the shorter `gpt-4`.
+    for prefixes, encoding in ((_O200K_PREFIXES, "o200k_base"),
+                               (_CL100K_PREFIXES, "cl100k_base")):
+        if any(lowered.startswith(p) for p in sorted(prefixes, key=len, reverse=True)):
+            return tiktoken.get_encoding(encoding)
+
+    raise UnsupportedModelError(
+        f"{model!r}: no known tiktoken vocabulary. Counting it with a default "
+        "encoding would return a confident number that is quietly wrong, which is "
+        "worse than failing here. Add its prefix to _O200K_PREFIXES / "
+        "_CL100K_PREFIXES only once you have confirmed the vocabulary it uses."
+    )
 
 
 def supports(model: str) -> bool:
