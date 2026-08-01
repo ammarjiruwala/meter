@@ -13,7 +13,7 @@ import uuid
 
 from fastapi import APIRouter
 
-from . import db
+from . import config, db
 from .prava import charge_mandate, list_mandates, report_charge
 
 router = APIRouter(tags=["treasury"])
@@ -57,6 +57,49 @@ async def mandates():
         }
         for m in data["mandates"]
     ]
+
+
+@router.post("/mandates/sync")
+async def sync_mandates():
+    """Pull live mandates from Prava into the local `mandates` table.
+
+    Prava is the authority on a mandate's caps and lifecycle, so this reads rather than
+    invents: frequency, status, and approved amount come from the API. Meter's own rails
+    (`max_per_txn_usd`, `max_daily_usd`, `cooldown_s`) come from `TREASURER_*` config and
+    sit *inside* whatever the card network already allows.
+
+    Safe to re-run — upsert keyed on the Prava mandate id.
+    """
+    data = await list_mandates()
+    for m in data.get("mandates", []):
+        approved = m.get("approvedAmount")
+        db.upsert_mandate(
+            prava_mandate_id=m["id"],
+            provider=config.TREASURER_PROVIDER,
+            max_per_txn_usd=config.TREASURER_MAX_TOPUP_USD,
+            max_daily_usd=config.TREASURER_MAX_DAILY_USD,
+            cooldown_s=config.TREASURER_COOLDOWN_S,
+            recurring_frequency=m.get("recurringFrequency"),
+            status=m.get("status"),
+            approved_amount_usd=float(approved) if approved is not None else None,
+        )
+    return db.list_stored_mandates()
+
+
+@router.get("/mandates/stored")
+def stored_mandates():
+    """What the Treasurer will actually read. `GET /mandates` hits Prava live."""
+    return db.list_stored_mandates()
+
+
+@router.get("/mandates/chargeable")
+def chargeable():
+    """The mandate the Treasurer would pick for the configured provider.
+
+    Returns `null` when nothing qualifies — which is the answer worth seeing before a
+    demo, not during one.
+    """
+    return db.chargeable_mandate(config.TREASURER_PROVIDER)
 
 
 @router.post("/charge")

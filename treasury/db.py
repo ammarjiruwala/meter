@@ -64,14 +64,36 @@ CREATE TABLE IF NOT EXISTS wallets (
 -- `mdt_...` this maps to; the caps here are Meter's own rails, enforced in code before
 -- we ever call Prava, on top of the caps the card network enforces (ARCHITECTURE.md §5).
 CREATE TABLE IF NOT EXISTS mandates (
-    id                TEXT PRIMARY KEY,
-    provider          TEXT NOT NULL,
-    max_per_txn_usd   REAL NOT NULL,
-    max_daily_usd     REAL NOT NULL,
-    cooldown_s        INTEGER NOT NULL DEFAULT 300,
-    prava_mandate_id  TEXT,
-    active            INTEGER NOT NULL DEFAULT 1
+    id                   TEXT PRIMARY KEY,
+    provider             TEXT NOT NULL,
+    max_per_txn_usd      REAL NOT NULL,
+    max_daily_usd        REAL NOT NULL,
+    cooldown_s           INTEGER NOT NULL DEFAULT 300,
+    prava_mandate_id     TEXT UNIQUE,
+    active               INTEGER NOT NULL DEFAULT 1,
+    -- Two additions to ARCHITECTURE.md §4, both load-bearing rather than cosmetic.
+    --
+    -- `recurring_frequency`: a `one_time` mandate moves to `consumed` the moment its
+    -- charge is reported APPROVED (docs/prava/concepts/mandates.md), after which every
+    -- further charge 409s. A Treasurer that tops up repeatedly must never select one,
+    -- and §4 gives it no way to tell them apart.
+    --
+    -- `status`: Prava's own lifecycle value (pending/active/paused/consumed/cancelled/
+    -- expired). `active` is the boolean the Treasurer branches on; this keeps the reason
+    -- visible so a mandate that stopped working is diagnosable from the table.
+    recurring_frequency  TEXT,
+    status               TEXT,
+    approved_amount_usd  REAL,
+    synced_at            TEXT
 );
+
+-- Declared as an index as well as a column constraint, and this is the one that does the
+-- work. `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already exists, so
+-- anyone whose database predates the UNIQUE above would not get it, and the upsert's
+-- ON CONFLICT would fail with "does not match any PRIMARY KEY or UNIQUE constraint".
+-- A unique index is what ON CONFLICT resolves against, and it applies retroactively.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mandates_prava_id
+    ON mandates(prava_mandate_id);
 
 -- One row per top-up attempt, written BEFORE Prava is called (ARCHITECTURE.md §5).
 -- The row id becomes the Prava `reference`, which is what makes a retry after a network
@@ -116,9 +138,29 @@ def connect() -> sqlite3.Connection:
         # landing at the same moment as a burst of traffic raises "database is locked".
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
         _conn = conn
         return _conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a table already shipped.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op against an existing table, so a teammate
+    who ran an earlier build has a ``mandates`` table without the newer columns and would
+    hit "no such column" rather than anything self-explanatory. SQLite's ``ADD COLUMN``
+    is cheap and this stays correct once the tables are created fresh.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(mandates)")}
+    for column, ddl in (
+        ("recurring_frequency", "TEXT"),
+        ("status", "TEXT"),
+        ("approved_amount_usd", "REAL"),
+        ("synced_at", "TEXT"),
+    ):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE mandates ADD COLUMN {column} {ddl}")
 
 
 # ── Wallets ──────────────────────────────────────────────────────────────────
@@ -174,6 +216,76 @@ def adjust_balance(wallet_id: str, delta_usd: float) -> float | None:
             return None
     wallet = get_wallet(wallet_id)
     return wallet["balance_usd"] if wallet else None
+
+
+# ── Mandates ─────────────────────────────────────────────────────────────────
+
+
+def upsert_mandate(
+    prava_mandate_id: str,
+    provider: str,
+    max_per_txn_usd: float,
+    max_daily_usd: float,
+    cooldown_s: int,
+    recurring_frequency: str | None = None,
+    status: str | None = None,
+    approved_amount_usd: float | None = None,
+) -> str:
+    """Record (or refresh) a Prava mandate. Keyed on ``prava_mandate_id``.
+
+    ``active`` is derived from Prava's status rather than set by the caller — the card
+    network is the authority on whether a mandate can still be charged, and a local
+    boolean that disagrees with it is worse than no boolean.
+    """
+    conn = connect()
+    row_id = f"mnd_{prava_mandate_id}"
+    active = 1 if (status or "").lower() == "active" else 0
+    with _lock:
+        conn.execute(
+            "INSERT INTO mandates"
+            " (id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,"
+            "  prava_mandate_id, active, recurring_frequency, status,"
+            "  approved_amount_usd, synced_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(prava_mandate_id) DO UPDATE SET"
+            "   provider = excluded.provider,"
+            "   max_per_txn_usd = excluded.max_per_txn_usd,"
+            "   max_daily_usd = excluded.max_daily_usd,"
+            "   cooldown_s = excluded.cooldown_s,"
+            "   active = excluded.active,"
+            "   recurring_frequency = excluded.recurring_frequency,"
+            "   status = excluded.status,"
+            "   approved_amount_usd = excluded.approved_amount_usd,"
+            "   synced_at = excluded.synced_at",
+            (row_id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,
+             prava_mandate_id, active, recurring_frequency, status,
+             approved_amount_usd, now_iso()),
+        )
+        conn.commit()
+    return row_id
+
+
+def list_stored_mandates() -> list[dict[str, Any]]:
+    rows = connect().execute("SELECT * FROM mandates ORDER BY provider, id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def chargeable_mandate(provider: str) -> dict[str, Any] | None:
+    """The mandate the Treasurer should charge for ``provider``, or ``None``.
+
+    Excludes ``one_time`` mandates. One of those settles into ``consumed`` on its first
+    reported charge and then 409s forever, so selecting one would give the Treasurer
+    exactly one successful top-up and a dead rail afterwards — a failure that would not
+    show up until the second top-up, which on a demo timeline means on stage.
+    """
+    row = connect().execute(
+        "SELECT * FROM mandates"
+        " WHERE provider = ? AND active = 1"
+        "   AND (recurring_frequency IS NULL OR recurring_frequency != 'one_time')"
+        " ORDER BY approved_amount_usd DESC LIMIT 1",
+        (provider,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # ── Treasury events ──────────────────────────────────────────────────────────
