@@ -411,6 +411,10 @@ async def healthz() -> dict[str, Any]:
             "refresh_enabled": config.PREDICT_REFRESH_ENABLED,
             "learned_factors": _learned_factor_count(),
         },
+        # Whether the Treasurer has backed off the payment rail (PROPOSALS.md C3). A
+        # tripped Treasurer is not topping anything up, which is exactly the state you
+        # want visible on a liveness check rather than buried in a log line.
+        "treasurer": treasurer.trip_state(),
     }
 
 

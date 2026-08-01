@@ -224,6 +224,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
 # ── Wallets ──────────────────────────────────────────────────────────────────
 
 
+def wallet_id_for(project_id: str, provider: str) -> str:
+    """The wallet id for a (project, provider), without creating anything.
+
+    Split out for `PROPOSALS.md` M5: `treasurer.assess()` needs to *name* a wallet in
+    order to read it, and calling `ensure_wallet` for that turned a documented read-only
+    endpoint into one that inserts rows — which then silently defeated `/wallets/seed`.
+    Deriving the id is pure string work; only `ensure_wallet` should write.
+    """
+    return f"wal_{project_id}_{provider}"
+
+
 def ensure_wallet(project_id: str, provider: str, balance_usd: float = 0.0) -> str:
     """Create the wallet if absent and return its id. Idempotent.
 
@@ -231,7 +242,7 @@ def ensure_wallet(project_id: str, provider: str, balance_usd: float = 0.0) -> s
     balance the Treasurer has since moved.
     """
     conn = connect()
-    wallet_id = f"wal_{project_id}_{provider}"
+    wallet_id = wallet_id_for(project_id, provider)
     with _lock:
         conn.execute(
             "INSERT OR IGNORE INTO wallets (id, project_id, provider, balance_usd, updated_at)"

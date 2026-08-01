@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from proxy import db as ledger
@@ -45,8 +46,15 @@ def assess(project_id: str, provider: str | None = None) -> dict[str, Any]:
       anything is currently spending.
     """
     provider = provider or config.TREASURER_PROVIDER
-    wallet_id = db.ensure_wallet(project_id, provider)
-    wallet = db.get_wallet(wallet_id) or {}
+    # Look the wallet up; do NOT create it. `PROPOSALS.md` M5: this used to call
+    # `ensure_wallet`, so a *read* endpoint inserted a wallet at $0.00 — and because
+    # `POST /wallets/seed` applies its balance on creation only (correctly, so re-running
+    # it cannot wipe a top-up already made), anything that touched `GET /treasury/assess`
+    # first made the seeded "$4.00 too low" demo state silently no-op to $0.00.
+    # A project with no wallet has a balance of zero, which is exactly what reporting
+    # zero says. `tick()` only ever assesses wallets `list_wallets()` returned, so nothing
+    # depended on the creation side effect.
+    wallet = db.get_wallet(db.wallet_id_for(project_id, provider)) or {}
     balance = float(wallet.get("balance_usd") or 0.0)
 
     window_h = config.TREASURER_BURN_WINDOW_S / 3600.0
@@ -104,11 +112,43 @@ def notify(event: dict[str, Any]) -> None:
     log.info("TREASURER ALERT | %s", event)
 
 
+# Rate-limit trip (PROPOSALS.md C3). `TRIES_EXHAUSTED` means an allowance is spent, not
+# that we arrived too fast, so the correct response is to stop asking — a loop that keeps
+# charging into a 429 every TREASURER_INTERVAL_S (3s on the demo box) burns whatever the
+# sandbox is metering and turns a recoverable throttle into a dead rail. Mirrors the
+# circuit breaker: trip, cool down, try once, close or re-trip.
+_tripped_until: float = 0.0
+_TRIP_COOLDOWN_S = 300.0
+
+
+def trip_state() -> dict[str, Any]:
+    """Is the Treasurer currently backed off, and for how long. Exposed on /healthz."""
+    remaining = max(0.0, _tripped_until - time.monotonic())
+    return {"tripped": remaining > 0, "cooldown_remaining_s": round(remaining, 1)}
+
+
+def _trip(reason: str) -> None:
+    global _tripped_until
+    _tripped_until = time.monotonic() + _TRIP_COOLDOWN_S
+    log.error("TREASURER TRIPPED for %.0fs: %s", _TRIP_COOLDOWN_S, reason)
+    notify({"event": "treasurer_tripped", "reason": reason,
+            "cooldown_s": _TRIP_COOLDOWN_S})
+
+
 async def tick() -> list[dict[str, Any]]:
     """One pass over every wallet. Returns what it decided, whether or not it acted."""
+    if time.monotonic() < _tripped_until:
+        remaining = round(_tripped_until - time.monotonic(), 1)
+        log.info("treasurer tripped; skipping tick (%.1fs left)", remaining)
+        return [{"acted": False, "tripped": True, "cooldown_remaining_s": remaining}]
+
     results = []
-    for wallet in db.list_wallets():
-        decision = assess(wallet["project_id"], wallet["provider"])
+    # `list_wallets` and `assess` are blocking SQLite. This coroutine runs on the *proxy's*
+    # event loop — there is one process — so doing that work inline stalls every in-flight
+    # request behind a background top-up decision. `busy_timeout` is 5s, which bounds that
+    # stall at five seconds of total unresponsiveness under write contention.
+    for wallet in await asyncio.to_thread(db.list_wallets):
+        decision = await asyncio.to_thread(assess, wallet["project_id"], wallet["provider"])
         if not decision["should_topup"]:
             results.append({"decision": decision, "acted": False})
             continue
@@ -124,6 +164,14 @@ async def tick() -> list[dict[str, Any]]:
             decision_inputs=decision,
         )
         results.append({"decision": decision, "acted": True, "outcome": outcome})
+
+        # C3: a spent allowance stops the loop rather than being retried next tick.
+        if outcome.get("exhausted"):
+            _trip(f"Prava allowance exhausted while topping up {wallet['project_id']}")
+            break
+        if outcome.get("rate_limited"):
+            _trip(f"Prava rate-limited the top-up for {wallet['project_id']}")
+            break
 
         if outcome.get("ok"):
             notify({"event": "topup", "project": wallet["project_id"],
