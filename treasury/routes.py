@@ -26,8 +26,8 @@ from fastapi.responses import JSONResponse
 
 from proxy import db as proxy_db
 
-from . import config, db
-from .prava import charge_mandate, list_mandates, report_charge
+from . import config, db, treasurer
+from .prava import charge_mandate, create_mandate_session, list_mandates, report_charge
 from .topup import execute_topup
 
 log = logging.getLogger("meter.treasury.routes")
@@ -119,6 +119,27 @@ async def topup(
     return await execute_topup(project_id=project_id, provider=provider, amount_usd=amount_usd)
 
 
+@router.get("/treasury/assess")
+def treasury_assess(project_id: str = "demo-project", provider: str | None = None):
+    """Would the Treasurer top up right now, and why? Reads only — spends nothing.
+
+    This is the panel the demo narrates: balance, burn rate, projected runway, the
+    threshold it is compared against, and the amount it would move. Safe to poll.
+    """
+    return treasurer.assess(project_id, provider)
+
+
+@router.post("/treasury/tick")
+async def treasury_tick():
+    """Run one pass of the Treasurer immediately, across every wallet.
+
+    The loop runs on `TREASURER_INTERVAL_S`, but a demo should not depend on a timer
+    firing at the right moment in front of an audience. This is the same code path the
+    loop runs, on demand.
+    """
+    return await treasurer.tick()
+
+
 @router.get("/treasury/events")
 def treasury_events(project_id: str = "demo-project", provider: str | None = None, limit: int = 20):
     """Every top-up attempt for a wallet — backs the Agent Activity panel."""
@@ -153,24 +174,49 @@ async def mandates():
     ]
 
 
-@router.post("/mandates/sync")
-async def sync_mandates():
-    """Pull live mandates from Prava into the local `mandates` table.
-
-    Prava is the authority on a mandate's caps and lifecycle, so this reads rather than
-    invents: frequency, status, and approved amount come from the API. Meter's own rails
-    (`max_per_txn_usd`, `max_daily_usd`, `cooldown_s`) come from `TREASURER_*` config and
-    sit *inside* whatever the card network already allows.
-
-    Safe to re-run — upsert keyed on the Prava mandate id.
-    """
+def _num(value) -> float | None:
     try:
-        data = await list_mandates()
-    except Exception as exc:
-        log.warning("Prava unreachable syncing mandates: %s", exc)
-        return _error(503, "Prava unreachable; cannot sync mandates.", "prava_unreachable")
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
+    """Pull this project's mandates from Prava into the local table.
+
+    Filters on `externalUserId`, which is the `user_id` we sent at setup and the value
+    Prava echoes back. That filter is the whole point: with one secret key serving every
+    project, an unfiltered sync would file a stranger's mandate under our project and the
+    Treasurer would happily charge their card.
+
+    Prava stays the authority on caps and lifecycle — frequency, status, remaining, and
+    renewal all come from the API. Meter's own rails come from `TREASURER_*` config and
+    sit inside whatever the network already allows.
+    """
+    data = await list_mandates()
+
+    # A Prava outage must not take the sync down with it. `list_mandates` no longer raises
+    # — transport failures come back as an error envelope — so the guard checks `_ok`
+    # rather than catching. Returning empty leaves the local table untouched and lets
+    # `/mandates/status` still answer from what we already know, which is more useful to a
+    # polling dashboard than a 503. (Shubh added the original guard; this keeps the intent
+    # against the newer client.)
+    if not data.get("_ok", True):
+        log.warning("Prava unreachable syncing mandates for %s: %s (response-id %s)",
+                    project_id, data.get("_error"), data.get("_response_id"))
+        return []
+
+    # Which mandates did we already know about? Anything new in this sync is an approval
+    # that just completed, and counting them is how we close out pending rows. Comparing
+    # timestamps instead would mean comparing Prava's `...Z` against our `...+00:00` as
+    # strings, which is not a reliable ordering.
+    known = {m["prava_mandate_id"] for m in db.list_stored_mandates(project_id)
+             if m["prava_mandate_id"]}
+
+    synced = []
     for m in data.get("mandates", []):
-        approved = m.get("approvedAmount")
+        if m.get("externalUserId") != ext_uid:
+            continue
         db.upsert_mandate(
             prava_mandate_id=m["id"],
             provider=config.TREASURER_PROVIDER,
@@ -179,25 +225,162 @@ async def sync_mandates():
             cooldown_s=config.TREASURER_COOLDOWN_S,
             recurring_frequency=m.get("recurringFrequency"),
             status=m.get("status"),
-            approved_amount_usd=float(approved) if approved is not None else None,
+            approved_amount_usd=_num(m.get("approvedAmount")),
+            project_id=project_id,
+            external_user_id_=ext_uid,
+            customer_id=m.get("customerId"),
+            remaining_usd=_num(m.get("remaining")),
+            renews_at=m.get("renewsAt"),
+            valid_until=m.get("validUntil"),
+            last_charge_status=(m.get("lastCharge") or {}).get("status"),
+            last_charge_at=(m.get("lastCharge") or {}).get("at"),
         )
-    return db.list_stored_mandates()
+        synced.append(m)
+
+    # Close out pending rows, one per newly-approved mandate. Resolving *all* of them
+    # because *one* mandate appeared is wrong when several approvals are outstanding at
+    # once — which is exactly the case when someone is setting up a pool. It would report
+    # "0 awaiting approval" while the user still had two links to click.
+    #
+    # We cannot tell which pending row produced which mandate: Prava's setup session
+    # returns no mandate id, and the mandate carries no session id. So this matches by
+    # count, oldest first, which is right in aggregate even if an individual pairing is a
+    # guess. The rows exist to answer "is anything still waiting?", and a count answers it.
+    newly_approved = len([m for m in synced if m["id"] not in known])
+    pending = db.pending_mandates(project_id)
+
+    for p in pending[:newly_approved]:
+        db.resolve_pending_mandate(p["id"], "approved")
+
+    # Anything left that outlived the 15-minute session window never will appear.
+    for p in pending[newly_approved:]:
+        age = db.seconds_since(p["synced_at"])
+        if age is not None and age > 15 * 60:
+            db.resolve_pending_mandate(p["id"], "expired")
+
+    return synced
+
+
+@router.post("/mandates/create")
+async def create_mandate(
+    project_id: str = "demo-project",
+    amount_usd: float | None = None,
+    recurring_frequency: str = "monthly",
+    user_email: str = "owner@example.com",
+    external_user_id: str | None = None,
+):
+    """Start mandate setup and return the URL the owner approves with a passkey.
+
+    This authorizes nothing on its own. The owner opens `approval_url`, enters a card on
+    Prava's page, clears the device-binding OTP on a new browser (`456789` in sandbox),
+    and registers a passkey. Only then does the mandate exist.
+
+    Budget 2-3 minutes for a first-time approval and well under a minute for a repeat one
+    on the same browser. That difference is why a live demo should approve beforehand and
+    show the result, while a booth visitor can happily do the whole thing themselves.
+    """
+    amount = amount_usd or config.MANDATE_DEFAULT_AMOUNT_USD
+
+    # `user_id` decides which Prava *customer* the mandate belongs to, and cards are
+    # vaulted per customer. A new identity therefore starts with no enrolled card, and a
+    # charge against it fails at "Fetching cryptogram failed" — Visa has nothing to mint
+    # a credential from. That is correct for a new person onboarding, who enrols a card
+    # as part of approving. It is wrong when you meant to add a mandate for someone whose
+    # card is already enrolled under an existing identity, so the caller can name it.
+    ext_uid = external_user_id or db.external_user_id(project_id)
+
+    session = await create_mandate_session(
+        user_id=ext_uid,
+        user_email=user_email,
+        amount_usd=amount,
+        merchant_name=config.MANDATE_MERCHANT_NAME,
+        merchant_url=config.MANDATE_MERCHANT_URL,
+        merchant_country=config.MANDATE_MERCHANT_COUNTRY,
+        recurring_frequency=recurring_frequency,
+        callback_url=config.MANDATE_CALLBACK_URL or None,
+    )
+
+    session_id = session.get("session_id")
+    if not session_id:
+        return {"ok": False, "reason": "session_create_failed",
+                "http_status": session.get("_http_status"),
+                "response_id": session.get("_response_id"),
+                "error": session.get("error")}
+
+    db.open_pending_mandate(
+        project_id=project_id, session_id=session_id,
+        provider=config.TREASURER_PROVIDER, amount_usd=amount,
+        recurring_frequency=recurring_frequency, external_user_id_=ext_uid,
+    )
+
+    return {
+        "ok": True,
+        "approval_url": session.get("iframe_url"),
+        "session_id": session_id,
+        "expires_at": session.get("expires_at"),
+        "project_id": project_id,
+        "amount_usd": amount,
+        "recurring_frequency": recurring_frequency,
+        "next": "Open approval_url, approve with a passkey, then poll GET /mandates/status",
+    }
+
+
+@router.get("/mandates/status")
+async def mandate_status(project_id: str = "demo-project",
+                         external_user_id: str | None = None):
+    """Where this project stands: approved yet, and is anything chargeable?
+
+    Poll this after sending someone to `approval_url`. `ready` is the single field a UI
+    needs — it means a mandate exists that the Treasurer could actually charge.
+    """
+    ext_uid = external_user_id or db.external_user_id(project_id)
+    await _sync_project(project_id, ext_uid)
+
+    stored = db.list_stored_mandates(project_id)
+    pending = [m for m in stored if m["status"] == "pending_approval"]
+    active = [m for m in stored if m["active"] == 1]
+    pick = db.chargeable_mandate(project_id, config.TREASURER_PROVIDER)
+
+    return {
+        "project_id": project_id,
+        "external_user_id": ext_uid,
+        "ready": pick is not None,
+        "awaiting_approval": len(pending),
+        "chargeable": pick,
+        "active": active,
+        "pending": pending,
+    }
+
+
+@router.post("/mandates/sync")
+async def sync_mandates(project_id: str = "demo-project",
+                        external_user_id: str | None = None):
+    """Refresh this project's mandates from Prava.
+
+    `external_user_id` overrides the derived `meter_{project_id}` — that is how mandates
+    created before this scoping existed get claimed by a project, rather than being
+    stranded and invisible to the Treasurer.
+    """
+    ext_uid = external_user_id or db.external_user_id(project_id)
+    await _sync_project(project_id, ext_uid)
+    return db.list_stored_mandates(project_id)
 
 
 @router.get("/mandates/stored")
-def stored_mandates():
+def stored_mandates(project_id: str | None = None):
     """What the Treasurer will actually read. `GET /mandates` hits Prava live."""
-    return db.list_stored_mandates()
+    return db.list_stored_mandates(project_id)
 
 
 @router.get("/mandates/chargeable")
-def chargeable():
-    """The mandate the Treasurer would pick for the configured provider.
+def chargeable(project_id: str = "demo-project", amount_usd: float | None = None):
+    """The mandate the Treasurer would pick, for an optional intended amount.
 
-    Returns `null` when nothing qualifies — which is the answer worth seeing before a
-    demo, not during one.
+    Returns `null` when nothing qualifies — the answer worth seeing before a demo rather
+    than during one. Passing `amount_usd` also checks remaining headroom, which is the
+    difference between "we have a mandate" and "we can actually charge this".
     """
-    return db.chargeable_mandate(config.TREASURER_PROVIDER)
+    return db.chargeable_mandate(project_id, config.TREASURER_PROVIDER, amount_usd)
 
 
 @router.post("/charge", dependencies=[Depends(_authed_key)])

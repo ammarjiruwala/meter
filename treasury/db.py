@@ -35,7 +35,28 @@ from typing import Any
 from proxy import config
 
 _conn: sqlite3.Connection | None = None
-_lock = threading.Lock()
+
+# Reentrant, and held for reads as well as writes. One `sqlite3.Connection` is shared
+# across threads (`check_same_thread=False`), and using it from two threads at once is
+# API misuse, not merely contention — it surfaces as
+# `InterfaceError: bad parameter or other API misuse`, intermittently.
+#
+# That is reachable here rather than theoretical: FastAPI runs sync routes
+# (`GET /wallets`, `/mock-openai/billing`) in a threadpool while async ones run on the
+# event loop, so a read and a write genuinely overlap. `proxy/db.py` locks its reads for
+# the same reason. Reentrant because some writers read back through a locked helper
+# after their own write.
+_lock = threading.RLock()
+
+
+def _fetchone(sql: str, params: tuple = ()) -> sqlite3.Row | None:
+    with _lock:
+        return connect().execute(sql, params).fetchone()
+
+
+def _fetchall(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+    with _lock:
+        return connect().execute(sql, params).fetchall()
 
 
 def now_iso() -> str:
@@ -84,7 +105,35 @@ CREATE TABLE IF NOT EXISTS mandates (
     recurring_frequency  TEXT,
     status               TEXT,
     approved_amount_usd  REAL,
-    synced_at            TEXT
+    synced_at            TEXT,
+
+    -- Scoping. `external_user_id` is the `user_id` we send at session creation and the
+    -- `externalUserId` Prava echoes back on every mandate, so it is the join between our
+    -- projects and their records. Without it, `chargeable_mandate` would pick *any*
+    -- active mandate on the merchant account — which is fine with one user and a
+    -- correctness bug the moment a second person creates one.
+    project_id           TEXT,
+    external_user_id     TEXT,
+    customer_id          TEXT,
+
+    -- A mandate does not exist on Prava's side until the owner approves it: the setup
+    -- session returns 201 but `GET /v1/mandates` shows nothing. So we hold the pending
+    -- row ourselves, keyed by the session, and reconcile when the mandate appears.
+    session_id           TEXT,
+
+    -- `remaining` is the operative cap, not `approvedAmount` — the docs' recovery advice
+    -- for THRESHOLD_EXCEEDED is "charge within the remaining cap". Cached here so the
+    -- Treasurer can refuse locally instead of eating a network decline.
+    remaining_usd        REAL,
+    renews_at            TEXT,
+    valid_until          TEXT,
+
+    -- Diagnostics only. `lastCharge` reports the most recent attempt, which may be a
+    -- decline even when an earlier charge already consumed the cycle — so it cannot be
+    -- used to decide whether a mandate is spent. Kept because it is the first thing you
+    -- want to see when asking why a mandate stopped working.
+    last_charge_status   TEXT,
+    last_charge_at       TEXT
 );
 
 -- Declared as an index as well as a column constraint, and this is the one that does the
@@ -158,6 +207,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("status", "TEXT"),
         ("approved_amount_usd", "REAL"),
         ("synced_at", "TEXT"),
+        ("project_id", "TEXT"),
+        ("external_user_id", "TEXT"),
+        ("customer_id", "TEXT"),
+        ("session_id", "TEXT"),
+        ("remaining_usd", "REAL"),
+        ("renews_at", "TEXT"),
+        ("valid_until", "TEXT"),
+        ("last_charge_status", "TEXT"),
+        ("last_charge_at", "TEXT"),
     ):
         if column not in existing:
             conn.execute(f"ALTER TABLE mandates ADD COLUMN {column} {ddl}")
@@ -205,15 +263,13 @@ def set_balance(wallet_id: str, balance_usd: float) -> float | None:
 
 
 def get_wallet(wallet_id: str) -> dict[str, Any] | None:
-    row = connect().execute("SELECT * FROM wallets WHERE id = ?", (wallet_id,)).fetchone()
+    row = _fetchone("SELECT * FROM wallets WHERE id = ?", (wallet_id,))
     return dict(row) if row else None
 
 
 def list_wallets() -> list[dict[str, Any]]:
     """Every wallet, for the dashboard's Provider Balances card."""
-    rows = connect().execute(
-        "SELECT * FROM wallets ORDER BY project_id, provider"
-    ).fetchall()
+    rows = _fetchall("SELECT * FROM wallets ORDER BY project_id, provider")
     return [dict(r) for r in rows]
 
 
@@ -241,6 +297,15 @@ def adjust_balance(wallet_id: str, delta_usd: float) -> float | None:
 # ── Mandates ─────────────────────────────────────────────────────────────────
 
 
+def external_user_id(project_id: str) -> str:
+    """The `user_id` we send to Prava for a project, and the value it echoes back.
+
+    One deterministic string per project, so a project's mandates are findable without
+    keeping a separate mapping in sync. Prava mints one customer per distinct value.
+    """
+    return f"meter_{project_id}"
+
+
 def upsert_mandate(
     prava_mandate_id: str,
     provider: str,
@@ -250,6 +315,14 @@ def upsert_mandate(
     recurring_frequency: str | None = None,
     status: str | None = None,
     approved_amount_usd: float | None = None,
+    project_id: str | None = None,
+    external_user_id_: str | None = None,
+    customer_id: str | None = None,
+    remaining_usd: float | None = None,
+    renews_at: str | None = None,
+    valid_until: str | None = None,
+    last_charge_status: str | None = None,
+    last_charge_at: str | None = None,
 ) -> str:
     """Record (or refresh) a Prava mandate. Keyed on ``prava_mandate_id``.
 
@@ -265,8 +338,10 @@ def upsert_mandate(
             "INSERT INTO mandates"
             " (id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,"
             "  prava_mandate_id, active, recurring_frequency, status,"
-            "  approved_amount_usd, synced_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "  approved_amount_usd, synced_at, project_id, external_user_id,"
+            "  customer_id, remaining_usd, renews_at, valid_until,"
+            "  last_charge_status, last_charge_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(prava_mandate_id) DO UPDATE SET"
             "   provider = excluded.provider,"
             "   max_per_txn_usd = excluded.max_per_txn_usd,"
@@ -276,35 +351,127 @@ def upsert_mandate(
             "   recurring_frequency = excluded.recurring_frequency,"
             "   status = excluded.status,"
             "   approved_amount_usd = excluded.approved_amount_usd,"
-            "   synced_at = excluded.synced_at",
+            "   synced_at = excluded.synced_at,"
+            # COALESCE so a re-sync never blanks a project attribution that a later
+            # call didn't happen to pass.
+            "   project_id = COALESCE(excluded.project_id, mandates.project_id),"
+            "   external_user_id = COALESCE(excluded.external_user_id,"
+            "                               mandates.external_user_id),"
+            "   customer_id = COALESCE(excluded.customer_id, mandates.customer_id),"
+            "   remaining_usd = excluded.remaining_usd,"
+            "   renews_at = excluded.renews_at,"
+            "   valid_until = excluded.valid_until,"
+            "   last_charge_status = excluded.last_charge_status,"
+            "   last_charge_at = excluded.last_charge_at",
             (row_id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,
              prava_mandate_id, active, recurring_frequency, status,
-             approved_amount_usd, now_iso()),
+             approved_amount_usd, now_iso(), project_id, external_user_id_,
+             customer_id, remaining_usd, renews_at, valid_until,
+             last_charge_status, last_charge_at),
         )
         conn.commit()
     return row_id
 
 
-def list_stored_mandates() -> list[dict[str, Any]]:
-    rows = connect().execute("SELECT * FROM mandates ORDER BY provider, id").fetchall()
+# ── Pending approvals ────────────────────────────────────────────────────────
+
+
+def open_pending_mandate(project_id: str, session_id: str, provider: str,
+                         amount_usd: float, recurring_frequency: str,
+                         external_user_id_: str) -> str:
+    """Record a mandate awaiting the owner's passkey approval.
+
+    Prava has nothing to show us yet — a setup session returns 201 but the mandate is
+    absent from `GET /v1/mandates` until it is approved. This row is the only evidence
+    the flow was started, and it is what lets a dashboard say "waiting for approval"
+    instead of "no mandate".
+    """
+    conn = connect()
+    row_id = f"mnd_pending_{session_id}"
+    with _lock:
+        conn.execute(
+            "INSERT OR REPLACE INTO mandates"
+            " (id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,"
+            "  prava_mandate_id, active, recurring_frequency, status,"
+            "  approved_amount_usd, synced_at, project_id, external_user_id,"
+            "  session_id)"
+            " VALUES (?, ?, ?, ?, ?, NULL, 0, ?, 'pending_approval', ?, ?, ?, ?, ?)",
+            (row_id, provider, amount_usd, amount_usd, 0, recurring_frequency,
+             amount_usd, now_iso(), project_id, external_user_id_, session_id),
+        )
+        conn.commit()
+    return row_id
+
+
+def pending_mandates(project_id: str) -> list[dict[str, Any]]:
+    rows = _fetchall(
+        "SELECT * FROM mandates WHERE project_id = ? AND status = 'pending_approval'"
+        " ORDER BY synced_at",
+        (project_id,),
+    )
     return [dict(r) for r in rows]
 
 
-def chargeable_mandate(provider: str) -> dict[str, Any] | None:
-    """The mandate the Treasurer should charge for ``provider``, or ``None``.
+def resolve_pending_mandate(row_id: str, status: str) -> None:
+    """Close out a pending row — ``approved`` once the mandate appears, or ``expired``.
 
-    Excludes ``one_time`` mandates. One of those settles into ``consumed`` on its first
-    reported charge and then 409s forever, so selecting one would give the Treasurer
-    exactly one successful top-up and a dead rail afterwards — a failure that would not
-    show up until the second top-up, which on a demo timeline means on stage.
+    Kept rather than deleted: "they started setup and never finished" is worth being
+    able to see, especially when several people are onboarding at a demo booth.
     """
-    row = connect().execute(
-        "SELECT * FROM mandates"
-        " WHERE provider = ? AND active = 1"
-        "   AND (recurring_frequency IS NULL OR recurring_frequency != 'one_time')"
-        " ORDER BY approved_amount_usd DESC LIMIT 1",
-        (provider,),
-    ).fetchone()
+    conn = connect()
+    with _lock:
+        conn.execute("UPDATE mandates SET status = ? WHERE id = ?", (status, row_id))
+        conn.commit()
+
+
+def list_stored_mandates(project_id: str | None = None) -> list[dict[str, Any]]:
+    if project_id:
+        rows = _fetchall(
+            "SELECT * FROM mandates WHERE project_id = ? ORDER BY provider, id",
+            (project_id,),
+        )
+    else:
+        rows = _fetchall("SELECT * FROM mandates ORDER BY provider, id")
+    return [dict(r) for r in rows]
+
+
+def chargeable_mandate(project_id: str, provider: str,
+                       min_remaining_usd: float | None = None) -> dict[str, Any] | None:
+    """The mandate the Treasurer should charge for this project, or ``None``.
+
+    Three filters, each preventing a distinct failure:
+
+    * **project_id** — mandates belong to whoever created them. Picking "any active
+      mandate on the account" is harmless with one user and charges a stranger's card
+      the moment a second person onboards.
+    * **not one_time** — those settle to ``consumed`` on their first reported charge and
+      409 forever after, so the failure lands on the *second* top-up.
+    * **remaining headroom** — ``remaining``, not ``approvedAmount``, is what the network
+      enforces. Checking it here turns a Prava decline into a local refusal with a
+      reason, which is the difference between a diagnosable demo and a mystery.
+
+    Ordered by remaining headroom so the mandate most able to absorb the charge wins.
+    """
+    sql = ("SELECT * FROM mandates"
+           " WHERE project_id = ? AND provider = ? AND active = 1"
+           "   AND (recurring_frequency IS NULL OR recurring_frequency != 'one_time')"
+           # Spent for this cycle. Confirmed live: a second charge in the same cycle is
+           # declined by Visa with "Purchase already made in the current payment cycle",
+           # even though the mandate stays `active` with headroom left. `remaining` below
+           # `approvedAmount` is the observable signal that the cycle's one purchase is
+           # gone — `lastCharge` is not, since it reports the most recent *attempt* and
+           # may read `declined` while an earlier charge already consumed the cycle.
+           "   AND (remaining_usd IS NULL OR approved_amount_usd IS NULL"
+           "        OR remaining_usd >= approved_amount_usd)")
+    params: list[Any] = [project_id, provider]
+    if min_remaining_usd is not None:
+        # NULL remaining means we have never synced it; treat as unknown-but-usable
+        # rather than excluding a mandate that may be perfectly good.
+        sql += " AND (remaining_usd IS NULL OR remaining_usd >= ?)"
+        params.append(min_remaining_usd)
+    sql += " ORDER BY COALESCE(remaining_usd, approved_amount_usd) DESC LIMIT 1"
+
+    row = _fetchone(sql, tuple(params))
     return dict(row) if row else None
 
 
@@ -373,6 +540,21 @@ def iso_seconds_ago(seconds: float) -> str:
     return ts.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
+def seconds_since(iso_ts: str | None) -> float | None:
+    """Age of one of our own timestamps, or ``None`` if absent/unparseable.
+
+    Only for timestamps this module wrote — Prava's are ISO-8601 with a `Z` suffix and a
+    different precision, so they will not parse here.
+    """
+    if not iso_ts:
+        return None
+    try:
+        then = datetime.strptime(iso_ts, "%Y-%m-%dT%H:%M:%S.%f+00:00")
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - then.replace(tzinfo=timezone.utc)).total_seconds()
+
+
 def pending_event(wallet_id: str) -> dict[str, Any] | None:
     """An unfinished attempt for this wallet, if there is one.
 
@@ -381,11 +563,11 @@ def pending_event(wallet_id: str) -> dict[str, Any] | None:
     thing the key exists to prevent — Prava would see two unrelated charges rather than
     one retried charge. So a caller resumes a pending row instead of starting over.
     """
-    row = connect().execute(
+    row = _fetchone(
         "SELECT * FROM treasury_events WHERE wallet_id = ? AND status = 'pending'"
         " ORDER BY created_at LIMIT 1",
         (wallet_id,),
-    ).fetchone()
+    )
     return dict(row) if row else None
 
 
@@ -396,11 +578,11 @@ def settled_total_since(wallet_id: str, seconds: float) -> float:
     spend anything, and counting it would let a run of declines lock out a legitimate
     top-up.
     """
-    row = connect().execute(
+    row = _fetchone(
         "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM treasury_events"
         " WHERE wallet_id = ? AND status = 'settled' AND created_at >= ?",
         (wallet_id, iso_seconds_ago(seconds)),
-    ).fetchone()
+    )
     return float(row["total"] or 0.0)
 
 
@@ -410,11 +592,11 @@ def seconds_since_last_attempt(wallet_id: str) -> float | None:
     Backs the cooldown. Deliberately counts *attempts* rather than successes — a failing
     charge retried in a tight loop is the case the cooldown most needs to stop.
     """
-    row = connect().execute(
+    row = _fetchone(
         "SELECT created_at FROM treasury_events WHERE wallet_id = ?"
         " ORDER BY created_at DESC LIMIT 1",
         (wallet_id,),
-    ).fetchone()
+    )
     if not row:
         return None
     then = datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%S.%f+00:00")
@@ -424,9 +606,9 @@ def seconds_since_last_attempt(wallet_id: str) -> float | None:
 
 def recent_events(wallet_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """Most recent attempts for a wallet — backs the dashboard's Agent Activity panel."""
-    rows = connect().execute(
+    rows = _fetchall(
         "SELECT * FROM treasury_events WHERE wallet_id = ?"
         " ORDER BY created_at DESC LIMIT ?",
         (wallet_id, limit),
-    ).fetchall()
+    )
     return [dict(r) for r in rows]

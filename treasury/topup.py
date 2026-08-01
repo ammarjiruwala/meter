@@ -61,13 +61,15 @@ async def execute_topup(
     wallet_id = db.ensure_wallet(project_id, provider)
 
     # ── Rails, checked in order and all before any money moves ───────────────
-    mandate = db.chargeable_mandate(provider)
+    mandate = db.chargeable_mandate(project_id, provider)
     if not mandate:
         return _refuse(
             "no_chargeable_mandate",
+            project_id=project_id,
             wallet_id=wallet_id,
             amount_usd=amount_usd,
-            hint="run POST /mandates/sync; one_time mandates are excluded on purpose",
+            hint="POST /mandates/create to set one up, or POST /mandates/sync to claim "
+                 "an existing one; one_time mandates are excluded on purpose",
         )
 
     if amount_usd > mandate["max_per_txn_usd"]:
@@ -98,6 +100,18 @@ async def execute_topup(
             amount_usd=amount_usd,
             wait_s=round(mandate["cooldown_s"] - since, 1),
         )
+
+    # Last, because it is the only rail that is not ours. `remaining` — not
+    # `approvedAmount` — is what the network enforces; the documented recovery for
+    # THRESHOLD_EXCEEDED is "charge within the remaining cap". Refusing here gives a
+    # reason and a number instead of a decline and a shrug. Kept after our own caps so a
+    # request that violates configured policy says so, rather than blaming the rail.
+    remaining = mandate.get("remaining_usd")
+    if remaining is not None and amount_usd > remaining:
+        return _refuse("insufficient_mandate_headroom", remaining_usd=remaining,
+                       requested=amount_usd,
+                       mandate=mandate.get("prava_mandate_id"),
+                       hint="charge less, or create a new mandate")
 
     # ── Write-ahead ──────────────────────────────────────────────────────────
     # Resume an unfinished attempt rather than opening a second one. A new row would mint
@@ -135,10 +149,28 @@ async def execute_topup(
     charge = await charge_mandate(amount_usd, event["idempotency_key"], mandate_id=prava_mandate_id)
     txn_id = charge.get("transactionId")
 
-    if charge.get("status") == "failed" or charge.get("errorMessage"):
-        error = charge.get("errorMessage") or charge.get("errorCode") or "charge_failed"
-        db.settle_event(event["id"], "failed", prava_txn_id=txn_id, error=str(error))
-        return _refuse("charge_declined", error=error, event_id=event["id"])
+    # A timeout is not a refusal. The charge may have been accepted and only the reply
+    # lost, so the event stays `pending` — the next attempt resumes that row, reuses its
+    # idempotency key, and Prava returns the original charge as `deduplicated` instead of
+    # taking the money twice. Settling it `failed` here would throw away the only handle
+    # we have on a charge that might exist.
+    if charge.get("_transport"):
+        return _refuse("prava_unreachable", error=charge.get("_error"),
+                       detail=charge.get("_detail"), event_id=event["id"],
+                       hint="event left pending on purpose; retrying resumes it with "
+                            "the same idempotency key")
+
+    # Everything below is a definite answer from Prava: it did not happen.
+    if (not charge.get("_ok", True) or charge.get("status") == "failed"
+            or charge.get("errorMessage")):
+        error = (charge.get("errorMessage") or charge.get("errorCode")
+                 or charge.get("_error") or "charge_failed")
+        # Response id goes in the error column: it is what Prava support traces on, and
+        # discarding it at the exact moment something broke is a false economy.
+        detail = f"{error} (response-id {charge.get('_response_id')})"
+        db.settle_event(event["id"], "failed", prava_txn_id=txn_id, error=detail)
+        return _refuse("charge_declined", error=error, event_id=event["id"],
+                       response_id=charge.get("_response_id"))
 
     credentials = charge.get(_CRED) or {}
     if charge.get("simulated"):
@@ -194,7 +226,18 @@ async def execute_topup(
             "provider_declined", reason_code=billing.decline_reason, event_id=event["id"]
         )
 
-    db.settle_event(event["id"], "settled", prava_txn_id=txn_id)
+    # The money moved and the wallet is credited, so the event is settled even if the
+    # report call failed — recording it as `failed` would be a lie about a charge that
+    # succeeded. But the unreported settlement is noted, because that charge is sitting
+    # at `awaiting_result` on Prava's side and someone has to finish it.
+    settle_error = None
+    if settlement and not settlement.get("_ok", True):
+        settle_error = (f"charged and credited, but report failed: "
+                        f"{settlement.get('_error')} "
+                        f"(response-id {settlement.get('_response_id')})")
+        log.warning("%s — txn %s", settle_error, txn_id)
+
+    db.settle_event(event["id"], "settled", prava_txn_id=txn_id, error=settle_error)
     log.info(
         "topped up %s %s by $%.2f -> $%.2f",
         project_id,

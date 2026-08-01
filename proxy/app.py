@@ -37,9 +37,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from treasury import db as treasury_db
-from treasury import loop as treasurer_loop
 from treasury import mock_provider
+from treasury import prava as treasury_prava
 from treasury import routes as treasury_routes
+from treasury import treasurer
 
 from . import breaker, budget, config, db, providers
 from .pricing import Usage, estimate_from_bytes, price
@@ -156,8 +157,16 @@ async def lifespan(app: FastAPI):
     # Start the Treasurer Agent loop (Phase 3). Watches burn rate, projects runway, and
     # autonomously tops up wallets when balance drops below the threshold. This is "the 3am
     # save" from the pitch narrative — production never dies on a drained wallet.
-    treasurer_task = asyncio.create_task(treasurer_loop.treasurer_loop())
-    log.info("treasurer agent started")
+    #
+    # `start()` owns its own task and no-ops unless TREASURER_ENABLED, so a process that
+    # charges a card on a timer takes two deliberate switches to turn on — the second
+    # being TREASURER_DRY_RUN.
+    treasurer.start()
+
+    # Prove the payment rail's credentials at boot. A revoked Prava key does not return 401
+    # on this sandbox — it stalls — so without this the first symptom is a top-up hanging at
+    # 3am. Never fatal: it logs and the operator decides.
+    await treasury_prava.verify_credentials()
 
     # The predictor's online learning loop. Without this the estimator only ever uses the
     # constants fitted offline against a dataset, and never learns anything from the
@@ -186,8 +195,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # Cancel the background loops cleanly on shutdown.
-        for task in (treasurer_task, refresh_task):
+        # Cancel the background loops cleanly on shutdown. The Treasurer owns its own task
+        # and cancels it through `stop()`, so it is not in this list.
+        await treasurer.stop()
+        for task in (refresh_task,):
             if task is None:
                 continue
             task.cancel()

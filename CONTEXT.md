@@ -211,7 +211,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Merged with Shubh's RESERVE (2026-08-01):** `proxy/budget.py` holds the estimate against the daily ceiling before forwarding, so the prediction is not informational — it is what a request reserves. It correctly holds **`bound_cost_usd`, not the forecast**: reserving the forecast would leak the ceiling on every under-prediction (~half of requests, by design, since the forecast carries no safety buffer). Over-holding the bound is transient, released at CAPTURE. This is the two-numbers split in DESIGN.md §1 being used exactly as intended.
     *   **Known gap vs §5A:** §5A specifies a trailing-p95 fallback per `(project, endpoint, model)`. The history correction is the closest equivalent but keys on `(project, feature, actor)` and corrects residuals rather than replacing the estimate. Raised in `PROPOSALS.md` rather than treating §5A as satisfied.
 
-*   **Treasurer Agent / Prava: PAYMENT RAIL VERIFIED + TREASURY SCHEMA WORKING; AGENT LOOP NOT STARTED.**
+*   **Treasurer Agent / Prava: WORKING END TO END AGAINST SIMULATED PRAVA; ONE LIVE RUN OUTSTANDING.**
     `treasury/` — **mounted on Shubh's proxy app**, so there is one backend process on one port:
     `uvicorn proxy.app:app --port 8080`. Treasury routes are kept off
     the `/v1` prefix, which stays the surface a caller's provider SDK targets.
@@ -234,36 +234,67 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   `POST /mock-openai/billing` accepts minted credentials and credits the wallet
         (`treasury/mock_provider.py`). This is the one simulated component — everything on the Prava
         side of it is real. Say so in the demo.
-    *   **Not started:** the asyncio Treasurer loop itself (Phase 3) — burn rate, runway projection,
-        cap/cooldown checks, and the top-up decision. Schema and both endpoints it needs now exist.
-    *   ⚠ **`.env` `PRAVA_MANDATE_ID` points at the `one_time` mandate.** Reporting a one-time charge
-        as APPROVED moves it to `consumed` and every later charge 409s. Point it at the monthly
-        mandate `mdt_01KYXWSK8YNAMTPHNY9VWM1DAE` before running the loop.
-    *   ⚠ **`PRAVA_LIVE_MODE` parsing changed 2026-08-01 (Shubh, repo audit) — behaviour change in
-        this lane.** `treasury/prava.py` was reading all four `PRAVA_*` variables from the
-        environment itself, duplicating `treasury/config.py` (whose copies were consequently dead)
-        and comparing `PRAVA_LIVE_MODE` with an exact `== "True"`, so `true` / `1` / `yes` silently
-        **simulated** while looking live — the failure `.env.example` warned "looks identical to
-        success on stage". `prava.py` now reads `config`, which parses it leniently like every other
-        boolean. **If your `.env` says `PRAVA_LIVE_MODE=true` and you were relying on it quietly
-        simulating, it will now transact.** Default (unset) still simulates; verified end to end.
-    *   **Open question — researched 2026-08-01, answer in the docs is "one charge per cycle".**
-        `docs.prava.space` (concepts/mandates.md) states recurring mandates allow one charge per
-        cycle, but our sandbox run put several charges through a monthly mandate and **no
-        documented error code covers over-count** — `THRESHOLD_EXCEEDED` is explicitly a Visa
-        decline on the charge *amount* cap, surfaced in the charge payload's `errorCode` /
-        `errorMessage` fields (with `status: "failed"`), never in the `{error: {code}}`
-        envelope. Enforcement of the per-cycle count is undocumented and likely unenforced in
-        sandbox. **The Treasurer loop must therefore self-gate on `renewsAt` + mandate status
-        rather than trusting Prava to reject** — the demo's repeat-top-up narrative still works,
-        but the loop owns the gate. (The code already reads the Visa decline correctly:
-        `topup.py` treats `status == "failed"` / `errorMessage` as `charge_declined`.)
-    *   **Rate limits — researched 2026-08-01: not documented anywhere.** No RPM/RPS figures
-        exist in any Prava doc (errors.md, OpenAPI, FAQ); the only documented throttle is
-        `429 TRIES_EXHAUSTED` on `POST /v1/sessions` (sandbox test-transaction allowance), with
-        no `Retry-After` headers. C3 stays open: ask `support@prava.space` or measure
-        empirically. Prava's own docs use a **3s poll cadence** for session credentials — good
-        precedent for the demo-box `TREASURER_INTERVAL_S=3`.
+    *   **Treasurer loop: WORKING** (`treasury/treasurer.py`). `assess()` reads balance and burn
+        (from `proxy/db.py:project_window_spend`, which Shubh wrote for exactly this) and projects
+        runway; `tick()` acts. **Two triggers, and the second is not redundant:** runway below
+        `TREASURER_TOPUP_WHEN_HOURS`, *or* balance below an absolute floor — at zero traffic burn is
+        0, runway is infinite, and a wallet at $0.00 would never trip the runway check.
+        Amount is shortfall + buffer toward `TREASURER_TARGET_HOURS` of runway.
+        `GET /treasury/assess` shows the decision without spending; `POST /treasury/tick` runs one
+        pass on demand, so the demo does not depend on a timer firing at the right moment.
+        Guarded by **two** switches: `TREASURER_ENABLED` (does the loop wake up) and
+        `TREASURER_DRY_RUN` (can it move money). `notify()` is a log-only seam mirroring
+        `breaker.notify` — **Tanay wires Poke to it.**
+    *   **Mandates are scoped per project** via `externalUserId` (`meter_{project_id}`), which Prava
+        echoes on every mandate. Selection also excludes `one_time` and checks remaining headroom.
+        This matters because judges create their own mandates on the *same* merchant account —
+        unscoped selection would let the Treasurer charge a stranger's card.
+    *   **Self-serve onboarding:** `POST /mandates/create` returns an approval URL (the session's
+        `iframe_url`); `GET /mandates/status` polls until `ready`. **Tanay: that is the two-call
+        "Connect your card" flow.** A mandate does not exist on Prava's side until approved, so the
+        pending row is held locally.
+    *   **Failure handling (Phase 4):** every Prava call goes through one helper and none of them
+        raise. A **timeout leaves the event `pending`** — it is not a refusal, the charge may have
+        landed — so a retry resumes the same row and the same idempotency key and Prava dedupes it.
+        A definite refusal settles `failed`. `X-Response-ID` is captured into the error column,
+        because that is what Prava support traces on.
+    *   ⚠ **Two settings before any live run**, both read at import so uvicorn must restart:
+        `TREASURER_DRY_RUN=false`, and `PRAVA_MANDATE_ID` still points at the `one_time` mandate
+        (only affects the bare `/charge` and `/report` endpoints — `/topup` reads the table).
+    *   🛑 **ONE PURCHASE PER PAYMENT CYCLE — confirmed live, 2026-08-01.** A second charge against
+        the monthly mandate was declined by Visa:
+        *"Purchase already made in the current payment cycle for transaction: tli_…"*.
+        `remaining` and `renewsAt` make a recurring mandate *look* like a renewing pool; it is not.
+        The evidence was visible all along — the monthly mandate reads `45.00/50.00`, meaning
+        exactly one $5 charge ever landed despite several attempts.
+        **This breaks repeat top-ups against a single mandate**, which the demo narrative assumes.
+        Options: mint a fresh mandate per top-up (which is what §4/§5B's original "one-time scoped
+        card" wording actually described), keep a pool of pre-approved mandates and consume one per
+        save, or demo a single save. **Unresolved — needs a decision before the demo.**
+    *   ⚠ **`remaining`, not `approvedAmount`, is the enforced cap.** `chargeable_mandate` now
+        skips any mandate whose cycle is spent, detected as `remaining < approvedAmount` —
+        **not** `lastCharge`, which reports the most recent *attempt* and can read `declined`
+        while an earlier charge already consumed the cycle.
+    *   ✅ **`PRAVA_LIVE_MODE` parsing fixed 2026-08-01 (Shubh, repo audit) — adopted here.**
+        `prava.py` was reading all four `PRAVA_*` variables itself, duplicating
+        `treasury/config.py` and comparing with an exact `== "True"`, so `true` / `1` / `yes`
+        silently **simulated** while looking live. It now reads `config`, parsed leniently like
+        every other boolean. **If your `.env` says `PRAVA_LIVE_MODE=true` and you were relying on
+        it quietly simulating, it will now transact.**
+    *   **Rate limits — researched 2026-08-01 (Shubh): not documented anywhere.** No RPM/RPS
+        figures in any Prava doc; the only documented throttle is `429 TRIES_EXHAUSTED` on
+        `POST /v1/sessions`, with no `Retry-After`. Prava's own docs use a **3s poll cadence** for
+        session credentials — good precedent for a demo-box `TREASURER_INTERVAL_S=3`.
+    *   🛑 **PRAVA SANDBOX FAILURE, 2026-08-01 ~12:40 UTC onward — blocks the live demo.**
+        Credential minting stopped working: mandates approve fine and show `active` with full
+        headroom, but every charge returns `Visa 400 — Fetching cryptogram failed` and sessions
+        stall at `processing` with `token: null`. Reproduced on 6 mandates, two customers, $50 and
+        $500, with and without `max_charges`, in normal and incognito browsers, and by re-running
+        `create_mandate.py` **unmodified** — the exact request that succeeded at 05:35 UTC. It also
+        fails inside Prava's own hosted checkout ("identity verified, but we couldn't complete the
+        payment"), so it is not our integration. Reported to the organizers with response-ids.
+        `GET /v1/mandates` separately returned `500 DB_INFRASTRUCTURE_ERROR` for ~30 minutes and
+        recovered. **Demo runs on `PRAVA_LIVE_MODE=False` until this clears.**
 
 *   **Dashboard: LAYOUT + LIVE LOGS WORKING, RESTYLED.** `dashboard/` — Next.js (App Router) +
     Tailwind, `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
