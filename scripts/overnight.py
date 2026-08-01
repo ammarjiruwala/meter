@@ -14,8 +14,18 @@ every failure is recorded rather than raised:
               best value; does not apply it. A constant that changes every prediction
               in the product is a human's decision, and the evidence will still be
               there in the morning.
-  3. SEED     load the demo ledger from everything collected.
-  4. REPORT   one markdown file with per-feature held-out accuracy.
+  3. COLDSTART re-fit the scope heuristic on the templated corpus, held out BY
+              FEATURE. The constants currently ship tuned on WildChat, which is the
+              traffic we have measured to matter least. The heuristic's only job is
+              predicting a feature with no history yet, so leave-features-out is the
+              evaluation that matches the job.
+  4. CROSS    the same tasks on Anthropic, cost decomposed into rate vs verbosity.
+              Closes PLAN.md Phase 2/3 and PROPOSALS.md B11.
+  5. PREQ     does the loop actually learn over this corpus, test-then-train.
+  6. SEED     load the demo ledger from everything collected.
+  7. VERIFY   run the full test suite and the end-to-end journey, so a morning report
+              cannot claim success on a tree that no longer passes.
+  8. REPORT   one markdown file with everything above.
 
 Deliberately NOT autonomous about code changes. It gathers evidence and computes
 recommendations; it does not edit the engine while nobody is looking.
@@ -133,6 +143,64 @@ def stage_tune() -> dict:
     return {"per_feature": table, "overall": overall, "best_k": best, "ks": ks}
 
 
+def _run_cmd(name: str, cmd: list[str], timeout: int) -> dict:
+    """Run a stage, capture its tail, never raise. Nobody is awake to intervene."""
+    log(f"{name}: starting")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        log(f"{name}: rc={proc.returncode}")
+        return {"rc": proc.returncode, "out": out[-4000:]}
+    except subprocess.TimeoutExpired:
+        log(f"{name}: TIMED OUT after {timeout}s")
+        return {"rc": -1, "out": f"timed out after {timeout}s"}
+    except Exception as exc:
+        log(f"{name}: {type(exc).__name__}: {exc}")
+        return {"rc": -1, "out": f"{type(exc).__name__}: {exc}"}
+
+
+def stage_coldstart() -> dict:
+    split = REPO / "data" / "corpus-split"
+    s = _run_cmd("coldstart/split",
+                 [sys.executable, str(REPO / "scripts" / "split_corpus.py"),
+                  "--out", str(split)], 300)
+    if s["rc"] != 0:
+        return {"split": s}
+    # No --apply: this reports what the constants WOULD become. Applying them changes
+    # every cold-start prediction, which is a decision to take awake.
+    o = _run_cmd("coldstart/optimize",
+                 [sys.executable, "-m", "predictor.optimize",
+                  "--data", str(split), "--rounds", "3"], 5400)
+    d = _run_cmd("coldstart/discover",
+                 [sys.executable, "-m", "predictor.discover",
+                  "--data", str(split)], 3600)
+    return {"split": s, "optimize": o, "discover": d}
+
+
+def stage_cross(cap_usd: float, yes: bool) -> dict:
+    cmd = [sys.executable, str(REPO / "scripts" / "cross_model.py"),
+           "--cap-usd", str(cap_usd)]
+    if yes:
+        cmd.append("--yes")
+    return _run_cmd("cross-model", cmd, 3600)
+
+
+def stage_prequential() -> dict:
+    return _run_cmd("prequential",
+                    [sys.executable, str(REPO / "scripts" / "prequential.py"),
+                     "--source", "templated", "--shuffle", "--batch", "40"], 1800)
+
+
+def stage_verify() -> dict:
+    out = {}
+    for name in ("test_predictor", "test_proxy", "test_treasury", "test_alerts"):
+        out[name] = _run_cmd(name, [sys.executable, str(REPO / "tests" / f"{name}.py")], 900)
+    out["journey"] = _run_cmd("e2e journey",
+                              [sys.executable, str(REPO / "scripts" / "e2e_journey.py"),
+                               "--offline"], 900)
+    return out
+
+
 def stage_seed() -> dict:
     db = str(REPO / "meter.db")
     proc = subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py"),
@@ -142,7 +210,8 @@ def stage_seed() -> dict:
     return {"returncode": proc.returncode, "stdout": proc.stdout[-2000:]}
 
 
-def write_report(corpus: dict, tune: dict, seed: dict, started: float) -> None:
+def write_report(corpus: dict, tune: dict, seed: dict, started: float,
+                 cold=None, cross=None, preq=None, verify=None) -> None:
     import numpy as np
 
     rows = load_all()
@@ -197,6 +266,22 @@ def write_report(corpus: dict, tune: dict, seed: dict, started: float) -> None:
         lines.append(f"| `{f}` | {len(sub)} | {np.median(i):,.0f} | {np.median(o):,.0f} "
                      f"| {spread:.1f}x |")
 
+    def block(title: str, payload, tail: int = 2500) -> None:
+        if not payload:
+            return
+        lines.extend(["", f"## {title}", ""])
+        if isinstance(payload, dict) and "out" in payload:
+            lines += [f"exit {payload['rc']}", "", "```", payload["out"].strip()[-tail:], "```"]
+        else:
+            for k, v in (payload or {}).items():
+                lines += [f"### {k}", "", f"exit {v['rc']}", "",
+                          "```", v["out"].strip()[-tail:], "```", ""]
+
+    block("Cold-start refit (held out by feature)", (cold or {}).get("optimize"))
+    block("Feature discovery", (cold or {}).get("discover"))
+    block("Cross-model efficiency", cross)
+    block("Prequential — does the loop learn", preq)
+    block("Verification", verify, tail=800)
     lines += ["", "## Demo ledger", "", "```", seed.get("stdout", "").strip()[-1500:], "```"]
     REPORT.write_text("\n".join(lines) + "\n")
     log(f"report -> {REPORT}")
@@ -205,7 +290,8 @@ def write_report(corpus: dict, tune: dict, seed: dict, started: float) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cap-usd", type=float, default=4.0)
+    ap.add_argument("--cap-usd", type=float, default=4.0, help="OpenAI corpus cap")
+    ap.add_argument("--cross-cap-usd", type=float, default=1.5, help="Anthropic cap")
     ap.add_argument("--n", type=int, default=40)
     ap.add_argument("--holdout", type=int, default=8)
     ap.add_argument("--dry-run", action="store_true")
@@ -218,7 +304,9 @@ def main() -> int:
     print(f"tags to collect   {len(todo)}  ({', '.join(todo) or 'none'})")
     print(f"calls             {len(todo) * args.n}")
     print(f"hard spend cap    ${args.cap_usd:.2f}")
-    print("stages            corpus -> shrinkage sweep -> seed demo ledger -> report")
+    print(f"anthropic cap     ${args.cross_cap_usd:.2f}")
+    print("stages            corpus -> shrinkage sweep -> cold-start refit -> "
+          "cross-model\n                  -> prequential -> seed -> verify -> report")
     print(f"report            {REPORT}")
     if args.dry_run:
         subprocess.run([sys.executable, str(REPO / "scripts" / "corpus_probe.py"),
@@ -231,8 +319,13 @@ def main() -> int:
     log("=== overnight batch starting ===")
     corpus = stage_corpus(args.cap_usd, args.n, args.holdout, args.yes)
     tune = stage_tune()
+    cold = stage_coldstart()
+    cross = stage_cross(args.cross_cap_usd, args.yes)
+    preq = stage_prequential()
     seed = stage_seed()
-    write_report(corpus, tune, seed, started)
+    verify = stage_verify()
+    write_report(corpus, tune, seed, started,
+                 cold=cold, cross=cross, preq=preq, verify=verify)
     log(f"=== done in {(time.time() - started) / 60:.0f} min ===")
     return 0
 

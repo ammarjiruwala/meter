@@ -56,7 +56,16 @@ def _tuned_config():
 
 _CFG = None
 
+# Overridable so the fitters can target the templated corpus as well as WildChat.
+# These constants are fitted to whatever traffic they are shown, and the product's
+# traffic is templated -- so a config tuned only on WildChat is tuned for the case we
+# have measured to matter least.
 DATA = REPO / "data" / "wildchat"
+
+
+def set_data_dir(path) -> None:
+    global DATA
+    DATA = Path(path)
 MODEL = REPO / "data" / "model.json"
 
 # Ridge penalty. Small, but non-zero: several candidates are near-collinear (word
@@ -146,10 +155,14 @@ def search(train: List[dict], val: List[dict], max_features: int = 14,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--data", default=None,
+                    help="directory holding train/validation/test.jsonl")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--final", action="store_true")
     ap.add_argument("--max-features", type=int, default=14)
     args = ap.parse_args()
+    if args.data:
+        set_data_dir(args.data)
 
     global _CFG
     _CFG = _tuned_config()
