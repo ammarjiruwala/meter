@@ -113,6 +113,28 @@ Two cases will bite:
 | Client disconnects mid-stream | Tokens were still burned. Estimate from chunks observed, write the row with `estimated = true`, capture against the reservation. |
 | Unknown provider shape | Fall back to byte-length heuristics, flag `estimated = true`. Never drop the row. |
 
+Two more, both found by running the parser against a real provider rather than a fixture:
+
+**The stream arrives compressed, and reading it raw breaks two things at once.** HTTP clients
+advertise `Accept-Encoding: gzip, deflate` by default — httpx adds it whether or not you ask —
+and providers honour it on SSE. Reading the body *raw* therefore yields gzip, which fails
+silently in both directions: the usage parser sees compressed bytes, finds no `data:` lines,
+and quietly downgrades every streamed row to a byte estimate; and the proxy forwards those
+compressed bytes while stripping `content-encoding` as hop-by-hop, handing the client gzip
+labelled `text/event-stream`, which no SSE client can read. Decompress before parsing and
+forwarding. A fake upstream will not reproduce this — test servers generally do not compress —
+so it needs one integration test against something that does.
+
+**Usage is not always in a chunk you can drop.** The proxy injects
+`stream_options: {include_usage: true}` for OpenAI-shaped streams and strips the resulting
+usage chunk back out when the caller did not ask for one. That is safe against OpenAI, which
+emits usage as a *separate* trailing chunk with `choices: []`. It is not universally safe:
+Anthropic's OpenAI-compatibility endpoint merges usage into the **final content chunk**, the
+one carrying `finish_reason`. Dropping that would delete the client's end-of-stream signal.
+The rule is therefore not "drop the chunk containing usage" but "drop only a chunk that
+contains nothing else" — forwarding an unrequested `usage` field is a much smaller sin than
+truncating the stream.
+
 **Capture must be scheduled before the first `await` in the stream's teardown.** A client
 disconnect does not politely end the response generator — it *cancels* it, which cancels the
 capture path along with it. Any `await` in a `finally` block re-raises the cancellation and skips

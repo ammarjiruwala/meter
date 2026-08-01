@@ -320,6 +320,14 @@ class StreamTap:
         self.saw_usage = True
         # A usage-bearing chunk with a non-empty `choices` array still carries content
         # the client needs, so only the content-free chunk is a candidate for dropping.
+        #
+        # This is not a hypothetical distinction. Observed live 2026-08-01: OpenAI emits
+        # usage as a separate trailing chunk with `choices: []`, which is safe to drop.
+        # Anthropic's OpenAI-compatibility endpoint instead *merges* usage into the final
+        # content chunk — the one carrying `finish_reason: "stop"`. Dropping that chunk to
+        # hide an injected `usage` field would delete the client's end-of-stream signal,
+        # which is a far worse outcome than forwarding a `usage` key it did not ask for.
+        # So the rule is: drop only when there is nothing else in the chunk to lose.
         return not data.get("choices")
 
     def _anthropic_event(self, data: dict[str, Any]) -> None:

@@ -8,13 +8,13 @@ Each item states what is wrong or missing, why it matters, and a recommendation.
 applied to `README.md` / `CONTEXT.md` / `ARCHITECTURE.md` **only after a human approves
 them** — this file is the staging area, not the record.
 
-**Applied so far:** A1–A6, B1–B7, C1, C2. Everything else is still a proposal; if you find a
+**Applied so far:** A1–A6, B1–B7, B15, B16, C1, C2, and C4 (Anthropic half). Everything else is still a proposal; if you find a
 new contradiction, add it here and raise it rather than editing one source doc to match
 another (the one you "fixed" may have been the correct one).
 
 Status key: **OPEN** — needs a decision · **RESOLVED / DONE / SHIPPED** — closed, kept for the record.
 
-23 items total: A1–A6 (contradictions), B1–B14 (gaps), C1–C3 (verification).
+25 items: A1–A6 (contradictions), B1–B16 (gaps), C1–C4 (verification).
 
 ---
 
@@ -439,6 +439,45 @@ read the track rules. Owner: Tanay (owns the sponsor docs per `PLAN.md` Phase 0)
 
 ---
 
+### B15 — Streaming responses arrive gzipped; reading them raw breaks the proxy · **DONE**
+
+Found by running the SSE parser against the real Anthropic API instead of a fixture.
+
+httpx puts `Accept-Encoding: gzip, deflate` on every outbound request by default, and real
+providers honour it on SSE. The streaming path read the body with `aiter_raw()`, which yields
+the still-compressed bytes. That failed **silently, in both directions at once**:
+
+1. The usage tap parsed gzip as SSE, found no `data:` lines, and downgraded every streamed
+   row to a byte estimate — so streamed spend was quietly wrong rather than visibly missing.
+2. The proxy forwarded compressed bytes while stripping `content-encoding` as hop-by-hop, so
+   the client received gzip labelled `text/event-stream` — **no SSE client could read the
+   stream at all.**
+
+Every existing test passed throughout, because a fake uvicorn upstream does not compress. This
+is the class of bug that only a real provider produces.
+
+**Fixed:** `aiter_bytes()` instead of `aiter_raw()`. Compression stays on the proxy↔provider
+hop, which is the one that crosses the internet; the client is served what the headers
+actually promise. Guarded by `test_gzipped_upstream_stream`, which stands up a real gzipping
+socket server — the only test in the suite that does, and deliberately so.
+
+### B16 — Anthropic's compat endpoint merges usage into the final content chunk · **DONE**
+
+The proxy injects `stream_options: {include_usage: true}` on OpenAI-shaped streams and strips
+the resulting usage chunk when the caller did not ask for one. Safe against OpenAI, which
+emits usage as a separate trailing chunk with `choices: []`. **Not** safe in general:
+Anthropic's compatibility endpoint merges usage into the final *content* chunk — the one
+carrying `finish_reason: "stop"`.
+
+The shipped rule was already correct (drop only when `choices` is empty), so nothing needed
+fixing in the request path — but the reasoning was undocumented and a future "simplification"
+to "drop the chunk with usage in it" would silently truncate every compat stream. Now recorded
+in `ARCHITECTURE.md` §2 and `proxy/providers.py`, and pinned by a test using the real observed
+chunk shape.
+
+The consequence we accept: on that endpoint the caller sees a `usage` field it did not request.
+Forwarding an extra field is a much smaller sin than deleting the end-of-stream signal.
+
 ## C. Verification tasks
 
 Not design questions — things that are written down and might simply be wrong.
@@ -477,7 +516,7 @@ See B1. Confirmed to exist, with OpenAI-shaped errors and dual auth-header suppo
 
 Blocks A3. Owner: Shivam.
 
-### C4 — The Anthropic account has a $0 credit balance · OPEN · **blocks a MUST BUILD item**
+### C4 — Anthropic credit balance · **RESOLVED for Anthropic (funded key); OpenAI still unfunded**
 
 Found while verifying B1. The key authenticates correctly — it is a real, working
 credential — but **every** call returns:
@@ -503,12 +542,18 @@ Concretely, with no credits:
 - **The pitch line "Across 50 test prompts, Claude was 15% more token-efficient for coding
   tasks" has no data behind it.**
 
-**Recommendation:** put credits on the Anthropic account, or supply a funded key. Nothing
-downstream of real token usage can be finished until then. **Owner: whoever owns the
-account.**
+**Resolved 2026-08-01 for Anthropic.** A second key was supplied and it is funded — real
+completions, real streams, real usage, priced correctly end to end (see B15/B16 below, both
+of which were only findable because of it). Total spend proving it: **$0.00028**.
 
-⚠ Note also that the key currently in `.env` was shared over chat and should be **rotated**
-once a funded credential is in place.
+**Still open for OpenAI.** `OPENAI_API_KEY` in `.env` is still the placeholder. The MUST BUILD
+line says "real OpenAI/Anthropic APIs", and `predictor/calibrate.py` declares `openai>=1.0.0`
+specifically to measure real ratios against it. Half of the cross-model efficiency comparison
+in PLAN.md Phase 3 — the GPT-4o half — has no provider until someone supplies a funded OpenAI
+key. **Owner: whoever owns that account.**
+
+⚠ Both Anthropic keys were shared over chat and should be **rotated**. The one in `.env` is
+gitignored and has never been committed; verified before each commit.
 
 *Silver lining for the demo narrative:* an account at zero balance returning errors on every
 request is, verbatim, the failure Meter exists to prevent — "when the balance hits zero at
