@@ -229,6 +229,16 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
             what is hidden ("Show all 28 · 20 more"), and **footnote counts span every fetched
             row, not the visible ones**: a number that changed when you expanded the table would
             look unreliable at the exact moment someone is reading it.
+        *   **The nav floats.** A translucent rounded bar inset from every edge, pinned to the
+            viewport with content scrolling beneath — 10% *white* over a 6px blur, not a dark
+            scrim, because a dark scrim on a near-black page reads as a hole cut in the canvas
+            rather than glass lying on it. ⚠ It is `fixed`, **not `sticky`**: the bar was already
+            `sticky top-0`, but the layout nests it inside `body.flex` > `div.flex-1` and it had
+            quietly stopped pinning there. A sticky element that has stopped sticking looks
+            identical to a working one until you scroll, which is how it went unnoticed — if you
+            move the nav, re-check it by actually scrolling. A spacer replaces the height it no
+            longer occupies. Of the two translucency knobs, raise alpha rather than blur: blur is
+            what destroys the legibility of whatever is passing underneath.
         *   **Badges became filled tints** (plus outline and inverted variants) instead of colored
             text on a flat surface. Every text/fill pair is **measured, not judged** — the earlier
             tinted attempt put a hue on its own 20% tint and landed at 3.49:1, under the 4.5:1
