@@ -426,6 +426,34 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         is absent, so a `meter.db` whose proxy has not been restarted since the migration still
         renders instead of throwing. Verified end-to-end against a seeded SQLite file: a row
         inserted mid-session shows up on the next poll with no restart.
+    *   **"Treasurer Agent" panel — the autonomous loop, on screen** (2026-08-01, unblocked by
+        Shivam's Treasurer landing). A monospace terminal reading `treasury_events` joined to
+        `wallets`, polling `GET /api/treasury-events` every 3s, oldest-first and pinned to the
+        newest line.
+        *   **`treasury_events` is a lifecycle row, not a log stream** — one row per top-up
+            attempt, moving `pending` → `settled`/`dry_run`/`refused`/`failed`. Each row is
+            rendered as two or three lines (detection from `decision_inputs`, the request, the
+            outcome), **every one derived from a recorded field**. The design reference drove
+            this panel from a `setInterval` inventing messages like "Scanning burn rates…";
+            nothing in the ledger corresponds to those, because a tick that decides not to act
+            writes no row at all. Inventing them would make a real autonomous agent look like an
+            animation, so the panel stays quiet instead and its empty state says why.
+        *   ⚠ **`dry_run` must never render as success, and this is the default.**
+            `TREASURER_DRY_RUN` ships `true`, so a rehearsal writes `status='dry_run'` — the
+            reference's wording ("✓ Top-up successful") would claim a payment that never
+            happened, in front of the people judging whether the payment works. It reads
+            "Dry run — rehearsed $X, no money moved" in the accent colour, never the success
+            green. **Keep that distinction if this panel is ever restyled.**
+        *   Timestamps are **local wall-clock**, not the ledger's UTC. Slicing the ISO string is
+            the obvious implementation and puts a clock on screen hours off the viewer's own,
+            which on a live panel reads as stale data. Server and client therefore disagree by
+            timezone, which is what the `suppressHydrationWarning` on that span is for.
+        *   **Verified against a real loop** (2026-08-01): `TREASURER_ENABLED=true`,
+            `TREASURER_INTERVAL_S=5`, a wallet seeded at $4.00 under the $10 floor and a local
+            monthly mandate. The loop fired on the **floor** trigger, wrote real `dry_run`
+            events, and the panel rendered them with the clock matching the wall clock to five
+            seconds. `TREASURER_DRY_RUN` was left at its default throughout — the settled path
+            has not been exercised from the dashboard side.
     *   **"Cost per Outcome" table — the margin metric, now on screen** (2026-08-01, unblocked
         by Shubh's `POST /v1/annotate`). Grouped by `outcome`:
         `Outcome | Traces | Requests | Cost | Per trace | Value | Margin`. This is the
