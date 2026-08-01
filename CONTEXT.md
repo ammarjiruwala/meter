@@ -269,6 +269,32 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         indicator and the live-polling dot. Type is Inter with a negative tracking ladder
         (-0.064em at 86px down to -0.005em at 12px). Tokens and the type ladder live in
         `dashboard/src/app/globals.css`; shared pieces in `dashboard/src/components/ui/`.
+    *   **Restyled again 2026-08-01 (Tanay) onto a supplied "mission control" design — the visual
+        system below this entry describes the superseded darkroom.** Canvas `#05050a`, glass panels
+        (`rgba(12,12,24,0.75)` + `blur(16px)`) so the background reads through them, indigo `#6366f1`
+        accent, Inter with weight-based hierarchy. Tokens in `dashboard/src/app/globals.css`.
+        *   **The background is four fixed layers**, not a colour: drifting mesh orbs (22/25/28/30s
+            so they never come back into phase), a line grid **masked by a radial ellipse**, SVG
+            noise at 0.03, and a vignette. The mask is the load-bearing part — without it the grid
+            reads as graph paper. All four are `pointer-events: none` and mount once in the root
+            layout, so navigation does not reset the orbs' drift. Honours
+            `prefers-reduced-motion`.
+        *   **Team Budget is now a card grid, not a table** — one colour-gradient card per enforced
+            scope, with a progress fill, a pulsing badge above 70%, and an avatar stack. The
+            avatars are **real attribution**: distinct `actor`s who spent against that scope,
+            ordered by spend, from the ledger.
+        *   **The nav's breaker pill reads `breaker_events`**, not a hardcoded "Normal". A status
+            pill that can only ever say "fine" is worse than no pill, because it reads as a check
+            that ran and passed. Revoke outranks throttle when both are open.
+        *   ⚠ **Two contrast failures in the supplied spec were corrected, and both should stay
+            corrected.** (1) Its status green `#4ade80` sits at **ΔE 7.3** from the amber under
+            protanopia — inside the 6–8 band that needs a secondary encoding. Green-vs-amber here
+            is "safe" against "nearly out of budget", the one distinction a spend dashboard cannot
+            lose, so the ramp keeps `#34d399` (ΔE 10.6). (2) Its `--text-tertiary: #555570`
+            measures **2.74:1** on the glass panel, and that token carries the second line of every
+            two-line row, the column headers and the footnotes — raised to `#7a7a9a` (4.76:1).
+            Budget-card alpha levels were raised the same way (white/35 measured 3.1:1). Every
+            badge fill/text pair now runs 5.43–10.34:1.
     *   **Tables were restyled 2026-08-01 (Tanay) to a supplied reference, and they deliberately
         break two of the rules above.** The rest of the system takes authority from size and
         negative tracking at weight 400; a data table has neither room for size nor a single

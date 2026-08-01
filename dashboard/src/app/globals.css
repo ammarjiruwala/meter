@@ -1,223 +1,588 @@
 @import "tailwindcss";
 
-/* REKKI — mission-control darkroom.
-   Pitch-black canvas, a five-level surface stack, and exactly one chromatic
-   voice. Elevation is an inset white hairline, never a drop shadow. */
+/* Meter — mission control for AI spend.
+   The page breathes: a living mesh gradient under a masked line grid, with glass
+   panels floating on top so the background bleeds through them. Nothing here is a
+   flat surface. */
 @theme {
-  --color-signal-blue: #0063e1;
-  --color-obsidian: #000000;
-  --color-carbon: #040910;
-  --color-graphite: #0d0d0d;
-  --color-iron: #1f1f1f;
-  --color-steel: #2b2c2e;
-  --color-ash: #858585;
-  --color-smoke: #979797;
-  --color-fog: #8c8c8c;
-  --color-paper: #ffffff;
+  --color-canvas: #05050a;
+  --color-surface-1: rgba(12, 12, 24, 0.75);
+  --color-surface-2: #111120;
+  --color-surface-3: #18182a;
+  --color-surface-4: #1f1f35;
 
-  /* Status ramp — a deliberate departure from the brief, which is monochrome
-     plus one blue. Reading a failure at a glance beats palette purity on a
-     dashboard someone watches while production is live.
-     Chosen against the colorblind case rather than by eye: the obvious
-     green/amber pair (#3fb950/#d29922) collapses to ΔE 5.1 under protanopia —
-     indistinguishable to the readers who most need the distinction. These clear
-     ΔE 10.6, stay separable from signal blue, and all three clear AA on
-     graphite. Reserved for state; never decoration, never a chart series. */
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+  --color-border-hover: rgba(255, 255, 255, 0.1);
+
+  --color-text-primary: #f0f0f5;
+  --color-text-secondary: #8888a0;
+  /* The spec's tertiary is #555570, which measures 2.74:1 on the glass panel —
+     well under the 4.5:1 floor for small text. That token is not decoration here:
+     it carries the second line of every two-line row (model, feature, provider),
+     the column headers, and the footnotes. #7a7a9a clears at 4.76:1 and still
+     reads a clear step below secondary (5.70:1), which is all the token is for. */
+  --color-text-tertiary: #7a7a9a;
+
+  --color-accent: #6366f1;
+  --color-accent-light: #818cf8;
+  --color-accent-dim: rgba(99, 102, 241, 0.12);
+
+  /* Status ramp. Amber and red are the spec's; the green is NOT.
+     The spec's #4ade80 sits at ΔE 7.3 from #fbbf24 under protanopia — inside the
+     6–8 band that is only legal alongside a secondary encoding. Green-vs-amber
+     here carries "safe" against "nearly out of budget", which is the single
+     distinction a spend dashboard cannot afford to lose. #34d399 clears ΔE 10.6
+     against the same amber and is otherwise identical in role. Measured, not
+     judged — and it must survive any future restyle. */
   --color-status-good: #34d399;
   --color-status-warn: #fbbf24;
   --color-status-bad: #f87171;
 
-  /* Diatype REKKI and OCD-GARRI are custom faces; these are the substitutes the
-     brief names. Plex Mono carries OCD-GARRI's instrument-label quality — the
-     slight positive tracking is what makes it read as a readout. */
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
-    "Segoe UI", Roboto, sans-serif;
-  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo,
-    monospace;
+  /* Legacy aliases. Earlier components reference paper/ash/fog/graphite; pointing
+     them at the new ramp means nothing renders against the old palette while the
+     restyle lands. */
+  --color-paper: #f0f0f5;
+  --color-ash: #8888a0;
+  --color-fog: #555570;
+  --color-obsidian: #05050a;
+  --color-carbon: rgba(12, 12, 24, 0.75);
+  --color-graphite: #111120;
+  --color-iron: #18182a;
+  --color-steel: #1f1f35;
+  --color-signal-blue: #6366f1;
+  --color-smoke: #8888a0;
 
-  --radius-nav: 2px;
-  --radius-inputs: 8px;
+  --font-sans: var(--font-inter), -apple-system, ui-sans-serif, system-ui,
+    sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "Cascadia Code", ui-monospace,
+    SFMono-Regular, Menlo, monospace;
+
   --radius-cards: 16px;
-  --radius-images: 24px;
-  --radius-buttons: 59px;
 }
 
 body {
-  background: var(--color-obsidian);
-  color: var(--color-ash);
+  background: var(--color-canvas);
+  color: var(--color-text-primary);
   font-family: var(--font-sans);
-  font-feature-settings: "case";
+  min-height: 100vh;
+  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
 
-/* The tracking ladder is the signature: authority comes from size and negative
-   tracking, never from weight. Nothing here goes above 400 except the mono
-   labels, which are a different register entirely. */
+/* ════════════════════════════════════════════════════════════════
+   BACKGROUND — four fixed layers, none of which accept pointer events
+   z: mesh 0 · grid 1 · noise 2 · vignette 3 · content 10 · nav 100
+   ════════════════════════════════════════════════════════════════ */
+
+.bg-mesh {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  will-change: transform;
+  filter: blur(80px);
+}
+
+.orb-1 {
+  width: 1100px;
+  height: 1100px;
+  background: radial-gradient(
+    circle,
+    rgba(99, 102, 241, 0.28) 0%,
+    rgba(139, 92, 246, 0.14) 35%,
+    rgba(139, 92, 246, 0.04) 60%,
+    transparent 70%
+  );
+  top: -300px;
+  left: -100px;
+  animation: drift1 25s ease-in-out infinite;
+}
+
+.orb-2 {
+  width: 800px;
+  height: 800px;
+  background: radial-gradient(
+    circle,
+    rgba(236, 72, 153, 0.18) 0%,
+    rgba(168, 85, 247, 0.08) 40%,
+    transparent 70%
+  );
+  top: -200px;
+  right: -150px;
+  animation: drift2 30s ease-in-out infinite;
+}
+
+.orb-3 {
+  width: 900px;
+  height: 900px;
+  background: radial-gradient(
+    circle,
+    rgba(6, 182, 212, 0.12) 0%,
+    rgba(59, 130, 246, 0.05) 45%,
+    transparent 70%
+  );
+  bottom: -350px;
+  left: 20%;
+  animation: drift3 28s ease-in-out infinite;
+}
+
+.orb-4 {
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(
+    circle,
+    rgba(245, 158, 11, 0.08) 0%,
+    rgba(251, 146, 60, 0.03) 50%,
+    transparent 70%
+  );
+  bottom: -100px;
+  right: 10%;
+  animation: drift4 22s ease-in-out infinite;
+}
+
+/* Durations are deliberately coprime-ish (22/25/28/30s) so the four never come
+   back into phase — the moment they sync, the background stops reading as alive. */
+@keyframes drift1 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  25% {
+    transform: translate(80px, 60px) scale(1.04);
+  }
+  50% {
+    transform: translate(40px, 120px) scale(0.97);
+  }
+  75% {
+    transform: translate(-30px, 50px) scale(1.02);
+  }
+}
+@keyframes drift2 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  25% {
+    transform: translate(-70px, 50px) scale(0.97);
+  }
+  50% {
+    transform: translate(-30px, -30px) scale(1.03);
+  }
+  75% {
+    transform: translate(40px, 20px) scale(0.98);
+  }
+}
+@keyframes drift3 {
+  0%,
+  100% {
+    transform: translate(0, 0) scale(1);
+  }
+  33% {
+    transform: translate(60px, -80px) scale(1.03);
+  }
+  66% {
+    transform: translate(-40px, 40px) scale(0.96);
+  }
+}
+@keyframes drift4 {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  33% {
+    transform: translate(-50px, -40px);
+  }
+  66% {
+    transform: translate(30px, -20px);
+  }
+}
+
+/* The radial mask is what separates this from graph paper: the grid exists in the
+   centre and is gone by the edges. Without it the page reads as a spreadsheet. */
+.bg-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(
+    ellipse 70% 60% at 50% 40%,
+    black 20%,
+    transparent 70%
+  );
+  -webkit-mask-image: radial-gradient(
+    ellipse 70% 60% at 50% 40%,
+    black 20%,
+    transparent 70%
+  );
+}
+
+/* Real surfaces have grain; without this the gradients read as too clean/digital. */
+.bg-noise {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+.bg-vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse 80% 70% at 50% 40%,
+    transparent 0%,
+    rgba(5, 5, 10, 0.6) 100%
+  );
+}
+
+/* ════════════════════════════════════════════════════════════════
+   GLASS
+   ════════════════════════════════════════════════════════════════ */
+
+/* Semi-transparent on purpose: the mesh gradient reads faintly through every
+   panel, which is what ties the cards to the living surface under them. */
+.glass {
+  background: var(--color-surface-1);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 16px;
+}
+
+.surface-card,
+.surface-panel {
+  background: var(--color-surface-1);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 16px;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   TYPOGRAPHY
+   ════════════════════════════════════════════════════════════════ */
+
 .t-display {
-  font-size: 86px;
-  line-height: 1;
-  letter-spacing: -0.064em;
-  font-weight: 400;
-}
-.t-heading-lg {
-  font-size: 56px;
-  line-height: 1.25;
+  font-size: 52px;
+  font-weight: 700;
   letter-spacing: -0.04em;
-  font-weight: 400;
+  line-height: 1;
+  /* White-to-grey, never colour: the hero is the biggest thing on the page and a
+     coloured gradient there would outrank the status ramp it sits above. */
+  background: linear-gradient(135deg, #f0f0f5 0%, #a0a0c0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
-.t-heading {
-  font-size: 24px;
-  line-height: 1.33;
-  letter-spacing: -0.027em;
-  font-weight: 400;
-}
-.t-heading-sm {
-  font-size: 20px;
-  line-height: 1.33;
-  letter-spacing: -0.027em;
-  font-weight: 400;
-}
-.t-subheading {
-  font-size: 18px;
-  line-height: 1.4;
-  letter-spacing: -0.015em;
-  font-weight: 400;
-}
-.t-body {
-  font-size: 16px;
-  line-height: 1.5;
-  letter-spacing: -0.007em;
-  font-weight: 400;
-}
-.t-caption {
+
+.t-eyebrow {
   font-size: 12px;
-  line-height: 1.2;
-  letter-spacing: -0.005em;
-  font-weight: 400;
-}
-
-/* The utility register — instrument labels and tabular readouts. Positive
-   tracking, which is what separates it from everything above. */
-.t-readout {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.23;
-  letter-spacing: 0.033em;
-  font-weight: 400;
-}
-.t-readout-sm {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.2;
-  letter-spacing: 0.033em;
-  font-weight: 400;
-}
-
-/* ── Tables ────────────────────────────────────────────────────────────────
-   Tables are the one place the tracking ladder above does NOT apply. Everything
-   else in this system takes authority from size and negative tracking at weight
-   400; a data table has neither room for size nor a single focal point, so
-   hierarchy comes from weight instead — a bold primary over a muted secondary,
-   on the reference design's two-line row.
-
-   Sans throughout, not the mono readout register. `tabular-nums` does the job
-   mono was doing in these tables (holding a money column in alignment) without
-   making every cell look like an instrument label. */
-.t-th {
-  font-size: 15px;
-  line-height: 1.3;
-  letter-spacing: -0.006em;
   font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-tertiary);
+}
+
+.t-section {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--color-text-primary);
+}
+
+.t-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text-secondary);
+}
+
+.t-th {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 .t-cell {
-  font-size: 15px;
-  line-height: 1.35;
-  letter-spacing: -0.006em;
+  font-size: 13px;
   font-weight: 400;
+  letter-spacing: -0.006em;
 }
-/* The bold half of the two-line row. 620 rather than 700: at 15px on a black
-   canvas, 700 blooms and loses its counters. */
 .t-cell-primary {
-  font-size: 15px;
-  line-height: 1.3;
-  letter-spacing: -0.012em;
-  font-weight: 620;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 .t-cell-secondary {
-  font-size: 13.5px;
-  line-height: 1.3;
-  letter-spacing: -0.004em;
+  font-size: 11px;
   font-weight: 400;
 }
 .t-num {
   font-variant-numeric: tabular-nums;
 }
+.t-heading-sm {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.t-subheading {
+  font-size: 13px;
+  font-weight: 400;
+}
+.t-body {
+  font-size: 13px;
+  font-weight: 400;
+}
+.t-caption {
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.5;
+}
 
-/* Badge fills. Every text/fill pair below is measured, not judged: the previous
-   attempt at tinted badges put a hue on its own 20% tint and landed at 3.49:1,
-   under the 4.5:1 floor for small text. These run 5.81:1 (bad) to 18.42:1
-   (outline). The status hues themselves are the protanopia-safe ones from the
-   ramp above — the pair that fails colorblind separation is the *obvious*
-   green/amber, not these. */
+/* ════════════════════════════════════════════════════════════════
+   BADGES  — filled tints. Every pair measured against the 4.5:1 floor.
+   ════════════════════════════════════════════════════════════════ */
+
 .badge {
   display: inline-flex;
   align-items: center;
-  border-radius: 59px;
-  padding: 4px 10px;
-  font-size: 12.5px;
-  line-height: 1.25;
-  letter-spacing: -0.002em;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   white-space: nowrap;
 }
 .badge-good {
+  background: rgba(52, 211, 153, 0.1);
   color: var(--color-status-good);
-  background: #0e2f24;
 }
 .badge-warn {
+  background: rgba(245, 158, 11, 0.1);
   color: var(--color-status-warn);
-  background: #33280a;
 }
 .badge-bad {
+  background: rgba(239, 68, 68, 0.1);
   color: var(--color-status-bad);
-  background: #3a1616;
 }
 .badge-info {
-  color: #7aa7ff;
-  background: #15254a;
+  background: var(--color-accent-dim);
+  color: var(--color-accent-light);
 }
-/* Outline carries "no state worth colouring" — an unknown status, a viewer-level
-   role. The border is what makes it a badge rather than loose text. */
 .badge-outline {
-  color: var(--color-paper);
-  background: #141414;
-  box-shadow: rgba(255, 255, 255, 0.22) 0 0 0 1px inset;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
 }
-/* Inverted is the loudest thing on the page and is rationed accordingly: one
-   per table at most, for the row that is the answer to the table's question. */
 .badge-invert {
-  color: #101010;
   background: #ededed;
+  color: #101010;
 }
 
-/* Elevation. The inset hairline IS the system — no shadows anywhere. */
-.surface-card {
-  background: var(--color-graphite);
-  border-radius: var(--radius-cards);
-  box-shadow: rgba(255, 255, 255, 0.12) 0px 0px 0px 1px inset;
+/* Pulsing is reserved for states that need someone to act. A pill that pulses
+   when nothing is wrong teaches people to ignore pulsing pills. */
+.badge-pulse-warn {
+  animation: badge-pulse 2s ease-in-out infinite;
 }
-.surface-panel {
-  background: var(--color-carbon);
-  border-radius: var(--radius-cards);
-  box-shadow: rgba(255, 255, 255, 0.12) 0px 0px 0px 1px inset;
+.badge-pulse-bad {
+  animation: badge-pulse 1.5s ease-in-out infinite;
 }
 
-@media (max-width: 900px) {
-  .t-display {
-    font-size: 56px;
-    letter-spacing: -0.04em;
+@keyframes badge-pulse {
+  0%,
+  100% {
+    opacity: 1;
   }
-  .t-heading-lg {
-    font-size: 36px;
+  50% {
+    opacity: 0.7;
   }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 8px var(--color-accent);
+  }
+  50% {
+    opacity: 0.6;
+    box-shadow: 0 0 4px var(--color-accent);
+  }
+}
+
+.live-dot {
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   BUDGET CARDS — opaque colour, deliberately NOT glass. They are the one
+   place on the page that should look solid, because they are the constraint
+   everything else is measured against.
+   ════════════════════════════════════════════════════════════════ */
+
+.budget-card {
+  border-radius: 14px;
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 175px;
+  transition:
+    transform 0.2s,
+    border-color 0.2s;
+}
+.budget-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+.budget-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse at 30% 20%,
+    rgba(255, 255, 255, 0.03) 0%,
+    transparent 60%
+  );
+  pointer-events: none;
+}
+.card-blue {
+  background: linear-gradient(145deg, #1a2744 0%, #0f1a30 100%);
+}
+.card-purple {
+  background: linear-gradient(145deg, #2a1548 0%, #180d2e 100%);
+}
+.card-teal {
+  background: linear-gradient(145deg, #0f2a2a 0%, #0a1a1a 100%);
+}
+.card-indigo {
+  background: linear-gradient(145deg, #1f1548 0%, #120d2e 100%);
+}
+.card-rose {
+  background: linear-gradient(145deg, #2a1028 0%, #180a18 100%);
+}
+
+.progress-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 10px;
+  transition: width 0.8s ease;
+}
+.fill-safe {
+  background: linear-gradient(90deg, #22c55e, #34d399);
+}
+.fill-warn {
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+.fill-danger {
+  background: linear-gradient(90deg, #ef4444, #f87171);
+}
+
+.avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 0, 0, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  margin-left: -6px;
+}
+.avatar:first-child {
+  margin-left: 0;
+}
+
+/* ════════════════════════════════════════════════════════════════
+   MOTION
+   ════════════════════════════════════════════════════════════════ */
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-in {
+  animation: fadeUp 0.5s ease forwards;
+  opacity: 0;
+}
+.delay-1 {
+  animation-delay: 0.05s;
+}
+.delay-2 {
+  animation-delay: 0.1s;
+}
+.delay-3 {
+  animation-delay: 0.15s;
+}
+.delay-4 {
+  animation-delay: 0.2s;
+}
+.delay-5 {
+  animation-delay: 0.25s;
+}
+.delay-6 {
+  animation-delay: 0.3s;
+}
+
+/* Drifting orbs and pulsing badges are motion someone did not ask for. Anyone who
+   has asked the OS to stop it gets a still page — the layout does not depend on
+   any of it. */
+@media (prefers-reduced-motion: reduce) {
+  .orb,
+  .live-dot,
+  .badge-pulse-warn,
+  .badge-pulse-bad,
+  .animate-in {
+    animation: none !important;
+  }
+  .animate-in {
+    opacity: 1;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-3);
+  border-radius: 4px;
 }

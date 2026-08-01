@@ -130,6 +130,19 @@ export function relativeTime(iso: string): string {
   return RELATIVE.format(-Math.round(seconds / per), unit);
 }
 
+/**
+ * Whether a timestamp is older than `ms`.
+ *
+ * Lives here rather than inline in a component for the same reason `relativeTime`
+ * does: reading the clock during render is impure, and `react-hooks/purity` flags
+ * it. Wrapping it keeps the one unavoidable `Date.now()` in a single place.
+ */
+export function isStale(iso: string, ms: number): boolean {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return false;
+  return Date.now() - then > ms;
+}
+
 export function providerLabel(provider: string): string {
   return (
     PROVIDER_LABELS[provider.toLowerCase()] ??
