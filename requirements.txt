@@ -10,6 +10,3 @@ numpy>=1.24.0
 
 # predictor/calibrate.py only — measures real ratios against the OpenAI API
 openai>=1.0.0
-
-# CI lint step (ruff check .) — pinned separately here so fresh clones get it too
-ruff>=0.11
