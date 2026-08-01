@@ -1,10 +1,12 @@
 import { TopNav } from "@/components/TopNav";
 import { SpendHero } from "@/components/SpendHero";
 import { TeamSpendTable } from "@/components/TeamSpendTable";
+import { TeamBudgetCard } from "@/components/TeamBudgetCard";
 import { ProviderBalancesCard } from "@/components/ProviderBalancesCard";
 import { LiveLogsTable } from "@/components/LiveLogsTable";
 import {
   getTeamSpend,
+  getBudgets,
   getLiveLogs,
   getProviderBalances,
   getSpendSummary,
@@ -21,6 +23,7 @@ export default function Home() {
   const summary = getSpendSummary();
   const spend = getTeamSpend();
   const wallets = getProviderBalances();
+  const budgets = getBudgets();
   const liveLogs = getLiveLogs();
 
   return (
@@ -40,6 +43,7 @@ export default function Home() {
         )}
 
         <div className="flex flex-col gap-[80px]">
+          <TeamBudgetCard scopes={budgets} />
           <ProviderBalancesCard wallets={wallets} />
           <LiveLogsTable initialRows={liveLogs} />
           <TeamSpendTable rows={spend} />

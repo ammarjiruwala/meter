@@ -110,7 +110,9 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     ratified, overhead number qualified). Also on main from this window: dashboard restyled onto a
     dark control-room visual system (Tanay) — Phase 4's "finalize UI" effectively done ahead of
     schedule; Poke/Linq breaker alerts wired and verified live (Tanay) — a real iMessage delivered
-    end to end; treasury `/topup` + mandate-selection fixes (Shivam).
+    end to end; treasury `/topup` + mandate-selection fixes (Shivam). **Since that merge: the
+    dashboard's "Team Budget" card (Tanay) reads Shubh's new ceilings, closing the §5D gap that
+    had been specified but unbuildable — spend against a limit, per project and per feature.**
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -224,6 +226,37 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   Hero: total metered spend at display size, with floating readout pills carrying live
         ledger counts. It is the one number the product exists to answer, and a single figure is
         a stat rather than a chart.
+    *   **"Team Budget" card — the §5D gap, now closed** (2026-08-01, unblocked by Shubh's
+        Phase 2 ceilings). One meter per enforced scope: the project ceiling from
+        `projects.ceiling_usd_day`, then its features from `feature_budgets`, showing spend,
+        ceiling, percent used and headroom. It exists at feature granularity because a project
+        can sit at 31% while one feature is at 98% — and it is the feature that will 429, which
+        is why the refusal names a scope in `X-Meter-Budget-Scope` at all.
+        *   **Labelled "rolling 24h", not "today".** The column is `ceiling_usd_day` but
+            `proxy/budget.py` compares against `now - BUDGET_WINDOW_S`, so a calendar-day label
+            would disagree with the 429 a developer just read. The window is read from
+            `BUDGET_WINDOW_S` for the same reason, rather than hard-coded.
+        *   **Scopes render in `meter.yaml` order and are never re-sorted**, including by
+            utilisation — rows must not move under someone watching them during the demo. That
+            order is `ORDER BY rowid`, which is file order because `replace_budgets()` clears
+            and re-inserts both tables in file order at every boot.
+        *   **Settled spend only.** The proxy authorises against settled + in-flight holds, but
+            holds live in its process memory and never reach SQLite by design, so the card can
+            read a shade under what is being enforced during a burst. Footnoted on the card
+            rather than hidden.
+        *   Both spend queries mirror `db.project_window_spend()` / `db.window_spend()`
+            verbatim, including the `iso_seconds_ago` cutoff *format* — `ts` is TEXT compared
+            lexicographically, and JS `toISOString()` emits 3 fractional digits and a `Z`, so a
+            stored `...123456+00:00` sorts below a `...123Z` cutoff and rows inside the window
+            silently vanish.
+        *   No ceilings configured returns `null`, not an empty list, so the card says "no
+            ceilings configured" instead of rendering `$0.00 of $0.00` — which reads as
+            catastrophically over budget when it means the opposite.
+        *   **Verified against a running proxy** (2026-08-01): with a four-ceiling `meter.yaml`,
+            the card's figures matched `/healthz .budget` exactly, and a request tagged with the
+            98%-full feature was refused `429 X-Meter-Budget-Scope: feature:demo-project/batch-eval`,
+            `ceiling 0.50`, `spend 0.490000` — the same numbers the card showed. Requests on the
+            two scopes with headroom passed the budget gate and reached the provider.
     *   "Live Logs" table (`User | Model | Predicted Cost | Actual Cost | Status`), polling
         `GET /api/live-logs` every 3s. **Predicted Cost now reads the real column** (wired
         2026-08-01 once Shubh's predictor integration landed). It stays blank for Claude
