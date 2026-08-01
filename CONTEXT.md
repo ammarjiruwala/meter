@@ -265,9 +265,16 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         (`+1217213007`) still sits inside E.164's generic 8-15 range, so the generic rule passed a
         real typo through to a live send attempt. `+1` now requires exactly 10 national digits;
         other country codes keep the generic rule.
-    *   **Still to verify:** the alert has been proven from a direct call, but not yet from an
-        actual breaker trip against a running proxy. That path adds `notify()` and the cooldown in
-        situ, and it is the one the demo runs.
+    *   **Verified end to end against a running proxy** (2026-08-01), not just from a direct call.
+        Seeded $25.20 into a 5-minute window against a $20 floor at a 12x burst, sent one tagged
+        request, and got: `429` with `X-Meter-Breaker-Scope`/`-Mode` and `Retry-After`, the trip
+        logged with the numbers it compared, and `poke alert sent (HTTP 202)`. Three properties
+        confirmed in the same run — a second request to the open scope returned `429` **without**
+        a duplicate text, and `chat` plus untagged traffic kept flowing while only `batch-eval`
+        was throttled, which is the isolation claim the demo makes out loud.
+    *   **The trip costs nothing to rehearse.** The breaker rejects before FORWARD, so a tripped
+        request never reaches the provider — seed the ledger, send one request, and the whole path
+        exercises with no upstream call and no provider key.
     *   `GET /v3/phone_numbers` is a zero-side-effect way to check a token — use it before
         sending anything, so credential problems never get confused with integration problems.
 
