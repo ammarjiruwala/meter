@@ -1,0 +1,1613 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Prava Payments API",
+    "description": "Server-side REST API for Prava Payments. All requests are authenticated with your secret key (sk_test_* in sandbox, sk_live_* in production).",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://sandbox.api.prava.space",
+      "description": "Sandbox"
+    },
+    {
+      "url": "https://api.prava.space",
+      "description": "Production"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/v1/sessions": {
+      "post": {
+        "summary": "Create Session",
+        "description": "Create a new payment session for a customer and order.",
+        "operationId": "createSession",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSessionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Session created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{id}/revoke": {
+      "post": {
+        "summary": "Revoke Session",
+        "description": "Revoke an active payment session. Revocation is immediate and irreversible.",
+        "operationId": "revokeSession",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The session_id of the session to revoke",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "description": "Always true on successful revocation"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/listCards": {
+      "get": {
+        "summary": "List Cards",
+        "description": "Retrieve enrolled cards for a customer. Only non-sensitive card metadata is returned.",
+        "operationId": "listCards",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": true,
+            "description": "The customer ID to retrieve cards for (the user_id used when creating the session)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Filter by card status",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "all"
+              ],
+              "default": "active"
+            }
+          },
+          {
+            "name": "include_card_art",
+            "in": "query",
+            "required": false,
+            "description": "Include card art URL in response",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cards retrieved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "cards": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Card"
+                      }
+                    },
+                    "count": {
+                      "type": "number",
+                      "description": "Total number of cards returned"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}/payment-result": {
+      "get": {
+        "summary": "Get Payment Result",
+        "description": "Retrieve payment credentials and transaction status for a session. This is a polling endpoint — call it after the user completes authentication to retrieve payment credentials.",
+        "operationId": "getPaymentResult",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "description": "The session ID returned from Create Session",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Payment result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/sessions/{sessionId}/report-status": {
+      "post": {
+        "summary": "Report Status",
+        "description": "Report payment execution outcome back to Prava. Always report status after checkout execution.",
+        "operationId": "reportStatus",
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "description": "The session ID returned from Create Session",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status confirmed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "description": "Always \"confirmed\""
+                    },
+                    "txn_ref_id": {
+                      "type": "string"
+                    },
+                    "txn_status": {
+                      "type": "string",
+                      "enum": [
+                        "APPROVED",
+                        "DECLINED"
+                      ]
+                    },
+                    "visa_confirmation": {
+                      "type": "string",
+                      "enum": [
+                        "SUCCESS",
+                        "FAILURE"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/deleteCard": {
+      "post": {
+        "summary": "Delete Card",
+        "description": "Delete an enrolled card for a customer. Also retires the card's network token where one exists.",
+        "operationId": "deleteCard",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "customer_id",
+                  "card_id"
+                ],
+                "properties": {
+                  "customer_id": {
+                    "type": "string",
+                    "description": "The customer whose card to delete (the user_id used at session creation)"
+                  },
+                  "card_id": {
+                    "type": "string",
+                    "description": "The card to delete (same as enrollmentId from the SDK's collectPAN())"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "CUSTOMER_CONFIRMED",
+                      "LOST",
+                      "STOLEN",
+                      "SUSPECTED_FRAUD",
+                      "CLOSED_ACCOUNT",
+                      "OTHER"
+                    ],
+                    "default": "OTHER",
+                    "description": "Why the card is being deleted"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Card deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "card_id": {
+                      "type": "string"
+                    },
+                    "was_default": {
+                      "type": "boolean",
+                      "description": "Whether the deleted card was the customer's default"
+                    },
+                    "network_token_deleted": {
+                      "type": "boolean",
+                      "description": "Whether a card-network token was retired as part of the deletion"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required field (INVALID_REQUEST)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid or missing API key (AUTH_1001)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Customer or card not found (CUSTOMER_NOT_FOUND / NOT_FOUND)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Card-network deletion failed — retry (NETWORK_DELETE_FAILED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/charge": {
+      "post": {
+        "summary": "Charge a Mandate",
+        "description": "Mint fresh single-use card credentials against an active mandate — no passkey. Available to merchants (secret key) and agents (Ed25519 signature); not exposed over MCP. For agent callers the credentials are returned as an encrypted_payload.",
+        "operationId": "chargeMandate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The mandate id (from List Mandates).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MandateChargeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Charge initiated; single-use credentials issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MandateChargeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/charges/{txnId}/report": {
+      "post": {
+        "summary": "Report a Mandate Charge",
+        "description": "Reconcile a mandate charge outcome (APPROVED / DECLINED) and settle it with the card network.",
+        "operationId": "reportMandateCharge",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The mandate id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "txnId",
+            "in": "path",
+            "required": true,
+            "description": "The transactionId returned from Charge a Mandate.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MandateReportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Charge outcome recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "mandateId": {
+                      "type": "string"
+                    },
+                    "transactionId": {
+                      "type": "string"
+                    },
+                    "orderId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "completed",
+                        "failed"
+                      ]
+                    },
+                    "mandateStatus": {
+                      "type": "string"
+                    },
+                    "visaConfirmation": {
+                      "type": "string",
+                      "enum": [
+                        "SUCCESS",
+                        "FAILURE"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/mandates": {
+      "get": {
+        "summary": "List Mandates",
+        "description": "List the caller's mandates. Merchant keys pass customer_id; control-plane callers pass dashboard_user_id (+ agent_id). Set standing_only=true to exclude transient per-checkout mandates.",
+        "operationId": "listMandates",
+        "parameters": [
+          {
+            "name": "customer_id",
+            "in": "query",
+            "required": false,
+            "description": "Filter to one customer (merchant keys): the external_user_id or a cus_ id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "standing_only",
+            "in": "query",
+            "required": false,
+            "description": "When true, return only standing mandates.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's mandates.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "mandates": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Mandate"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}": {
+      "get": {
+        "summary": "Get a Mandate",
+        "description": "Retrieve one mandate with its derived balance and full charge history.",
+        "operationId": "getMandate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The mandate id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The mandate detail view.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MandateDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/pause": {
+      "post": {
+        "summary": "Pause a Mandate",
+        "description": "Suspend an active mandate. No charges succeed until it is resumed.",
+        "operationId": "pauseMandate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The mandate id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated mandate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Mandate"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/resume": {
+      "post": {
+        "summary": "Resume a Mandate",
+        "description": "Reactivate a paused mandate.",
+        "operationId": "resumeMandate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The mandate id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated mandate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Mandate"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/mandates/{id}/cancel": {
+      "post": {
+        "summary": "Cancel a Mandate",
+        "description": "Revoke a mandate. Stops all future charges; terminal. Past charges are unaffected.",
+        "operationId": "cancelMandate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The mandate id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated mandate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Mandate"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Your secret key: sk_test_* (sandbox) or sk_live_* (production)."
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error response",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Mandate": {
+        "type": "object",
+        "description": "A standing spending authorization (list view).",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Mandate id (mdt_…)."
+          },
+          "agentId": {
+            "type": "string"
+          },
+          "customerId": {
+            "type": "string"
+          },
+          "externalUserId": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "available",
+              "consumed",
+              "expired"
+            ],
+            "description": "Display-derived usability."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "active",
+              "paused",
+              "consumed",
+              "cancelled",
+              "expired"
+            ]
+          },
+          "recurringFrequency": {
+            "type": "string",
+            "enum": [
+              "one_time",
+              "weekly",
+              "monthly",
+              "yearly"
+            ]
+          },
+          "merchantScope": {
+            "type": "string",
+            "enum": [
+              "any",
+              "listed"
+            ]
+          },
+          "merchantName": {
+            "type": "string"
+          },
+          "approvedAmount": {
+            "type": "string",
+            "description": "The authorized per-charge cap."
+          },
+          "remaining": {
+            "type": "string",
+            "description": "Remaining spend in the current window (indicative; the network enforces the real cap)."
+          },
+          "currency": {
+            "type": "string"
+          },
+          "validUntil": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "renewsAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Next cycle boundary for recurring mandates."
+          },
+          "lastCharge": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MandateCharge": {
+        "type": "object",
+        "description": "One charge against a mandate.",
+        "properties": {
+          "transactionId": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string",
+            "nullable": true,
+            "description": "Idempotency reference supplied at charge time."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MandateDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Mandate"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "spent": {
+                "type": "string",
+                "description": "Cumulative amount charged."
+              },
+              "chargeCount": {
+                "type": "integer"
+              },
+              "charges": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MandateCharge"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "MandateChargeRequest": {
+        "type": "object",
+        "required": [
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "string",
+            "description": "Charge amount as a decimal string, e.g. \"40.00\". Must be within the mandate cap."
+          },
+          "reference": {
+            "type": "string",
+            "description": "Idempotency key. The same mandate id + reference returns the original charge."
+          },
+          "purchase_context": {
+            "type": "array",
+            "description": "Optional per-charge product details.",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "MandateChargeResult": {
+        "type": "object",
+        "properties": {
+          "mandateId": {
+            "type": "string"
+          },
+          "instructionId": {
+            "type": "string"
+          },
+          "transactionId": {
+            "type": "string"
+          },
+          "orderId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "awaiting_result",
+              "failed"
+            ]
+          },
+          "fetchStatus": {
+            "type": "string",
+            "enum": [
+              "SUCCESS",
+              "FAILURE"
+            ]
+          },
+          "credentials": {
+            "type": "object",
+            "description": "Present for merchant callers: single-use card credentials.",
+            "properties": {
+              "token": {
+                "type": "string"
+              },
+              "dynamicCvv": {
+                "type": "string"
+              },
+              "expiryMonth": {
+                "type": "string"
+              },
+              "expiryYear": {
+                "type": "string"
+              }
+            }
+          },
+          "encrypted_payload": {
+            "type": "object",
+            "description": "Present for agent callers: credentials encrypted to the agent's public key.",
+            "properties": {
+              "ephemeral_public_key": {
+                "type": "string"
+              },
+              "iv": {
+                "type": "string"
+              },
+              "auth_tag": {
+                "type": "string"
+              },
+              "data": {
+                "type": "string"
+              }
+            }
+          },
+          "errorCode": {
+            "type": "string"
+          },
+          "errorMessage": {
+            "type": "string",
+            "description": "e.g. THRESHOLD_EXCEEDED on an over-cap decline."
+          },
+          "deduplicated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MandateReportRequest": {
+        "type": "object",
+        "required": [
+          "txn_status",
+          "txn_type"
+        ],
+        "properties": {
+          "txn_status": {
+            "type": "string",
+            "enum": [
+              "APPROVED",
+              "DECLINED"
+            ]
+          },
+          "txn_type": {
+            "type": "string",
+            "enum": [
+              "PURCHASE"
+            ]
+          },
+          "authorization_code": {
+            "type": "string"
+          },
+          "response_code": {
+            "type": "string"
+          },
+          "amount_paid": {
+            "type": "string"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Machine-readable error code (e.g. VAL_2001, AUTH_1001)"
+              },
+              "message": {
+                "type": "string",
+                "description": "Human-readable error message"
+              },
+              "details": {
+                "type": "object",
+                "description": "Optional — included for validation errors to specify which fields failed"
+              }
+            }
+          }
+        }
+      },
+      "CreateSessionRequest": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "user_email",
+          "total_amount",
+          "currency",
+          "purchase_context"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Unique identifier for the customer in your system"
+          },
+          "user_email": {
+            "type": "string",
+            "format": "email",
+            "description": "Customer's email address"
+          },
+          "total_amount": {
+            "type": "string",
+            "description": "Total order amount in decimal format (e.g. \"49.99\")"
+          },
+          "currency": {
+            "type": "string",
+            "description": "ISO 4217 currency code — exactly 3 uppercase letters, and one of Prava's supported currencies (e.g. USD, EUR, GBP, INR) - other codes are rejected"
+          },
+          "purchase_context": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "description": "Exactly one purchase context object. Multi-merchant sessions are not currently supported.",
+            "items": {
+              "$ref": "#/components/schemas/PurchaseContext"
+            }
+          },
+          "user_phone": {
+            "type": "string",
+            "description": "Customer's phone number"
+          },
+          "user_country_code_iso2": {
+            "type": "string",
+            "description": "Customer's country — 2 uppercase ISO 3166-1 letters"
+          },
+          "external_order_ref": {
+            "type": "string",
+            "maxLength": 255,
+            "description": "Your external order reference ID"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of the order"
+          },
+          "integration_type": {
+            "type": "string",
+            "enum": [
+              "full_checkout",
+              "embedding"
+            ],
+            "default": "full_checkout",
+            "description": "How the card is collected. full_checkout = hosted redirect; embedding = mount the iframe via the SDK."
+          },
+          "callback_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "For hosted checkout: the https URL Prava redirects the cardholder to after they finish. Optional for all integration types."
+          },
+          "card": {
+            "type": "object",
+            "description": "Pre-select a card. Send card_id OR vault_ref_id; if both are sent, card_id wins.",
+            "properties": {
+              "card_id": {
+                "type": "string",
+                "description": "An existing enrolled card ID"
+              },
+              "vault_ref_id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "A valid UUID referencing a vaulted card"
+              }
+            }
+          },
+          "mandate_setup": {
+            "type": "object",
+            "description": "Turns the session into mandate setup (authorize-only). Absent = standard checkout.",
+            "properties": {
+              "intent": {
+                "type": "string",
+                "enum": [
+                  "checkout",
+                  "mandate_setup"
+                ],
+                "description": "mandate_setup = authorize-only (no charge/credentials). Defaults to mandate_setup when this block is present."
+              },
+              "recurring_frequency": {
+                "type": "string",
+                "enum": [
+                  "one_time",
+                  "weekly",
+                  "monthly",
+                  "yearly"
+                ]
+              },
+              "merchant_scope": {
+                "type": "string",
+                "enum": [
+                  "any",
+                  "listed"
+                ],
+                "description": "Recurring frequencies force listed; any with a recurring frequency returns 400 MANDATE_RECURRING_MUST_BE_SCOPED."
+              },
+              "valid_until": {
+                "type": "string",
+                "format": "date-time",
+                "description": "Ignored for one_time (clamped to 7 days). Recurring horizons: yearly 5y, monthly 2y, weekly 1y."
+              },
+              "max_charges": {
+                "type": "integer",
+                "default": 1,
+                "description": "Positive integer; per-charge cap is network-enforced."
+              }
+            }
+          }
+        }
+      },
+      "PurchaseContext": {
+        "type": "object",
+        "required": [
+          "merchant_details",
+          "product_details"
+        ],
+        "properties": {
+          "merchant_details": {
+            "type": "object",
+            "required": [
+              "name",
+              "url",
+              "country_code_iso2"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Merchant display name"
+              },
+              "url": {
+                "type": "string",
+                "description": "Merchant website URL. Must use https - the URL is forwarded to Visa."
+              },
+              "country_code_iso2": {
+                "type": "string",
+                "description": "Two uppercase ISO 3166-1 country code (e.g. \"US\")"
+              },
+              "category_code": {
+                "type": "string",
+                "maxLength": 10,
+                "description": "Merchant category code"
+              },
+              "category": {
+                "type": "string",
+                "maxLength": 100,
+                "description": "Merchant category description"
+              }
+            }
+          },
+          "product_details": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "description",
+                "unit_price"
+              ],
+              "properties": {
+                "description": {
+                  "type": "string",
+                  "description": "Product description"
+                },
+                "unit_price": {
+                  "type": "string",
+                  "description": "Unit price as a string (no fixed decimal format enforced)"
+                },
+                "product_id": {
+                  "type": "string",
+                  "maxLength": 50,
+                  "description": "Your external product identifier"
+                },
+                "quantity": {
+                  "type": "integer",
+                  "default": 1,
+                  "description": "Quantity of this product"
+                }
+              }
+            }
+          },
+          "effective_until_minutes": {
+            "type": "integer",
+            "default": 15,
+            "description": "How long the mandate remains effective, in minutes. Positive integer, no maximum."
+          }
+        }
+      },
+      "CreateSessionResponse": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Unique session identifier"
+          },
+          "session_token": {
+            "type": "string",
+            "description": "JWT to authenticate client-side SDK operations within this session"
+          },
+          "iframe_url": {
+            "type": "string",
+            "description": "URL for the secure card collection surface"
+          },
+          "order_id": {
+            "type": "string",
+            "description": "Internal order identifier"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 timestamp when the session expires"
+          },
+          "authorizeOnly": {
+            "type": "boolean",
+            "description": "Present and true for mandate-setup sessions (no credentials issued)."
+          }
+        }
+      },
+      "Card": {
+        "type": "object",
+        "properties": {
+          "card_id": {
+            "type": "string",
+            "description": "Unique card identifier (same as enrollmentId from the SDK's collectPAN())"
+          },
+          "card_last4": {
+            "type": "string",
+            "description": "Last 4 digits of the card number"
+          },
+          "card_brand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Card brand (e.g. \"visa\"), or null if unknown"
+          },
+          "card_exp_month": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Expiration month (1-12)"
+          },
+          "card_exp_year": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "Expiration year (4 digits)"
+          },
+          "masked_card_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Masked card number, or null"
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "Whether this is the customer's default card"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "deleted"
+            ],
+            "description": "Card status"
+          },
+          "card_art_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Card art image URL (only when include_card_art=true)"
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Card display metadata (backgroundColor, foregroundColor, labelColor)"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 timestamp of when the card was enrolled"
+          }
+        }
+      },
+      "PaymentResult": {
+        "type": "object",
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "order_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "processing",
+              "awaiting_result",
+              "completed",
+              "failed"
+            ],
+            "description": "Overall session status. `processing` = a transaction exists and is in flight (authenticating / tokenizing) but credentials are not yet available."
+          },
+          "transactions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "txn_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "awaiting_result",
+                    "completed",
+                    "failed"
+                  ]
+                },
+                "line_items": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "txn_ref_id": {
+                        "type": "string",
+                        "description": "Transaction line item reference ID (used in Report Status)"
+                      },
+                      "merchant_name": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "merchant_url": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "total_amount": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "token": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Virtual card number (network token). Only present when status is awaiting_result."
+                      },
+                      "dynamic_cvv": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Single-use CVV. Only present when status is awaiting_result."
+                      },
+                      "expiry_month": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "expiry_year": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "products": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "product_ref_id": {
+                              "type": "string"
+                            },
+                            "external_product_id": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "name": {
+                              "type": "string"
+                            },
+                            "unit_price": {
+                              "type": "string"
+                            },
+                            "quantity": {
+                              "type": "number"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "error": {
+                  "type": "object",
+                  "description": "Present only when the transaction has failed",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ReportStatusRequest": {
+        "type": "object",
+        "required": [
+          "txn_ref_id",
+          "txn_status"
+        ],
+        "properties": {
+          "txn_ref_id": {
+            "type": "string",
+            "description": "The transaction line item reference ID (from Get Payment Result)"
+          },
+          "txn_status": {
+            "type": "string",
+            "enum": [
+              "APPROVED",
+              "DECLINED"
+            ],
+            "description": "The payment outcome"
+          },
+          "txn_type": {
+            "type": "string",
+            "default": "PURCHASE",
+            "description": "Transaction type"
+          },
+          "authorization_code": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Authorization code from the merchant's payment processor"
+          },
+          "response_code": {
+            "type": "string",
+            "maxLength": 2,
+            "description": "Processor response code, e.g. \"00\" for approved"
+          },
+          "amount_paid": {
+            "type": "string",
+            "description": "Override the total amount paid, if different from the original"
+          },
+          "product_statuses": {
+            "type": "array",
+            "description": "Optional per-product status overrides",
+            "items": {
+              "type": "object",
+              "required": [
+                "status"
+              ],
+              "properties": {
+                "product_id": {
+                  "type": "string",
+                  "maxLength": 50,
+                  "description": "Your external product ID. Either product_id or product_ref_id must be provided."
+                },
+                "product_ref_id": {
+                  "type": "string",
+                  "maxLength": 50,
+                  "description": "Prava's internal product reference ID. Either product_id or product_ref_id must be provided."
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "COMPLETED",
+                    "FAILED",
+                    "CANCELED",
+                    "INPROGRESS",
+                    "PENDING",
+                    "ONHOLD"
+                  ],
+                  "description": "Product-level status"
+                },
+                "amount_paid": {
+                  "type": "string",
+                  "description": "Amount paid for this specific product"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
