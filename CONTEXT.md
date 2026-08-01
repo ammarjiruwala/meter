@@ -99,7 +99,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — Tanay's Phase 2 Live Logs table merged.
+*   **Last updated:** 2026-08-01 — Shivam's treasury schema (`wallets`, `mandates`, `treasury_events`)
+    and mock provider billing landed; Prava charge settlement added.
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -130,14 +131,46 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Known gap vs §5A:** §5A specifies a trailing-p95 cost fallback for `(project, endpoint, model)` at cold start. v1 uses static per-bucket priors instead — bucket-aware rather than project-aware, and available on request #1 rather than needing history. Not yet reconciled; **Ammar to raise in `PROPOSALS.md` rather than quietly treat §5A as satisfied.**
     *   **Two things block the feedback loop, both needed before we can claim any accuracy number:** (1) Shubh wiring `predict()` into the request path and writing `predicted_output_tokens` / `bucket` to the ledger at CAPTURE; (2) running `python -m predictor.calibrate` to replace the inherited priors with measured ones. `learner.py` stays dormant until ~30 rows/bucket exist.
 
-*   **Treasurer Agent / Prava:** Not started.
+*   **Treasurer Agent / Prava: PAYMENT RAIL VERIFIED + TREASURY SCHEMA WORKING; AGENT LOOP NOT STARTED.**
+    `prava_service.py`, `main.py` (run with `uvicorn main:app --port 8090`), `treasury/`.
+    *   **We use a standing mandate, not a one-time virtual card.** §4/§5B and the pitch script still
+        say "one-time scoped card"; the mandate is strictly better for the Treasurer — the human
+        approves once with a passkey, the agent charges repeatedly with none. Wording needs updating
+        before the demo.
+    *   **Verified against the real Prava sandbox** (2026-08-01): charge against an active mandate with
+        no passkey; repeating a `reference` returns `deduplicated: true`; an over-cap charge is refused
+        with `THRESHOLD_EXCEEDED`. That refusal is the safety beat — `POST /charge-refusal`.
+    *   `report_charge()` settles a charge via `POST /v1/mandates/{id}/charges/{txnId}/report`.
+        Without it charges sit at `awaiting_result` forever. **Written from the docs, not yet run
+        live** — the one piece of this lane that is documented rather than verified.
+    *   `treasury/db.py` adds `wallets`, `mandates`, `treasury_events` to the **same `meter.db`** the
+        proxy writes, column names verbatim from `ARCHITECTURE.md` §4. The Treasurer is now a second
+        writer alongside the proxy; WAL + `busy_timeout` covers it, writes are single statements and
+        no transaction is held open across a Prava call. `treasury_events` is written *before*
+        Prava is called and its row id is the `reference`, so a retry after a timeout dedupes
+        instead of double-charging (§5).
+    *   `POST /mock-openai/billing` accepts minted credentials and credits the wallet
+        (`treasury/mock_provider.py`). This is the one simulated component — everything on the Prava
+        side of it is real. Say so in the demo.
+    *   **Not started:** the asyncio Treasurer loop itself (Phase 3) — burn rate, runway projection,
+        cap/cooldown checks, and the top-up decision. Schema and both endpoints it needs now exist.
+    *   ⚠ **`.env` `PRAVA_MANDATE_ID` points at the `one_time` mandate.** Reporting a one-time charge
+        as APPROVED moves it to `consumed` and every later charge 409s. Point it at the monthly
+        mandate `mdt_01KYXWSK8YNAMTPHNY9VWM1DAE` before running the loop.
+    *   **Open question:** docs say recurring mandates allow "one charge per cycle", but our sandbox
+        run put several charges through a monthly mandate. Unresolved, and the demo's repeat-top-up
+        narrative depends on it.
 
 *   **Dashboard: LAYOUT + LIVE LOGS WORKING.** `dashboard/` — Next.js (App Router) + Tailwind,
     `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
     (`dashboard/src/lib/db.ts`), WAL mode makes concurrent reads with the proxy's writer safe.
     *   "Team Spend" table (grouped by project/actor/feature from `requests`).
-    *   "Provider Balances" card — placeholder data (`dashboard/src/lib/wallets.ts`) since no
-        `wallets` table exists yet.
+    *   "Provider Balances" card — still placeholder data (`dashboard/src/lib/wallets.ts`), but the
+        `wallets` table now exists in the same `meter.db` (`treasury/db.py`). **Tanay: this is
+        unblocked** — swap the placeholder for
+        `SELECT provider, balance_usd FROM wallets ORDER BY provider`. Seed a wallet with
+        `POST /wallets/seed` (defaults to `$4.00`, the demo's "too low" state), or read
+        `GET /wallets`.
     *   "Live Logs" table (`User | Model | Predicted Cost | Actual Cost | Status`), polling
         `GET /api/live-logs` every 3s. **Predicted Cost is always blank** — the ledger has no
         `predicted_output_tokens`/`bucket` columns yet; wire it for real once Shubh's predictor

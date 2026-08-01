@@ -3,8 +3,11 @@ import uuid
 from fastapi import FastAPI
 
 from prava_service import charge_mandate, list_mandates, report_charge
+from treasury import db as treasury_db
+from treasury.mock_provider import router as mock_provider_router
 
 app = FastAPI()
+app.include_router(mock_provider_router)
 
 
 @app.get("/")
@@ -25,6 +28,24 @@ async def mandates():
         }
         for m in data["mandates"]
     ]
+
+
+@app.get("/wallets")
+def wallets():
+    """Provider balances. Backs the dashboard's Provider Balances card."""
+    return treasury_db.list_wallets()
+
+
+@app.post("/wallets/seed")
+def seed_wallet(project_id: str = "demo-project", provider: str = "openai",
+                balance_usd: float = 4.00):
+    """Create a wallet at a starting balance. $4 is the demo's 'too low' state.
+
+    Idempotent: the balance applies on creation only, so re-running this never wipes a
+    top-up the Treasurer already made.
+    """
+    wallet_id = treasury_db.ensure_wallet(project_id, provider, balance_usd)
+    return treasury_db.get_wallet(wallet_id)
 
 
 @app.post("/charge")
