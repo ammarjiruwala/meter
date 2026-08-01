@@ -8,7 +8,7 @@ Each item states what is wrong or missing, why it matters, and a recommendation.
 applied to `README.md` / `CONTEXT.md` / `ARCHITECTURE.md` **only after a human approves
 them** — this file is the staging area, not the record.
 
-**Applied so far:** A1–A6, B1–B7, B15, B16, C1, C2, and C4 (Anthropic half). Everything else is still a proposal; if you find a
+**Applied so far:** A1–A6, B1–B7, B15, B16, C1, C2, C4. Everything else is still a proposal; if you find a
 new contradiction, add it here and raise it rather than editing one source doc to match
 another (the one you "fixed" may have been the correct one).
 
@@ -516,7 +516,7 @@ See B1. Confirmed to exist, with OpenAI-shaped errors and dual auth-header suppo
 
 Blocks A3. Owner: Shivam.
 
-### C4 — Anthropic credit balance · **RESOLVED for Anthropic (funded key); OpenAI still unfunded**
+### C4 — Provider credit balances · **RESOLVED — both providers funded and verified live**
 
 Found while verifying B1. The key authenticates correctly — it is a real, working
 credential — but **every** call returns:
@@ -546,14 +546,24 @@ Concretely, with no credits:
 completions, real streams, real usage, priced correctly end to end (see B15/B16 below, both
 of which were only findable because of it). Total spend proving it: **$0.00028**.
 
-**Still open for OpenAI.** `OPENAI_API_KEY` in `.env` is still the placeholder. The MUST BUILD
-line says "real OpenAI/Anthropic APIs", and `predictor/calibrate.py` declares `openai>=1.0.0`
-specifically to measure real ratios against it. Half of the cross-model efficiency comparison
-in PLAN.md Phase 3 — the GPT-4o half — has no provider until someone supplies a funded OpenAI
-key. **Owner: whoever owns that account.**
+**Resolved 2026-08-01 for OpenAI too.** A funded key was supplied and verified live through
+the proxy, 18/18: unary and streamed completions on gpt-4o-mini, ledger costs matching the
+published rates exactly, and — the path no fixture ever exercised — the full
+inject-capture-strip cycle against real OpenAI: the proxy injects
+`stream_options.include_usage`, real OpenAI honours it and emits its separate `choices: []`
+usage chunk, the tap captures it, and the client never sees it. When the caller *does*
+request usage, the chunk passes through untouched. Both halves of B16's drop rule are now
+proven against real providers: OpenAI's separate chunk is dropped, Anthropic-compat's merged
+chunk is forwarded. A mixed run also confirmed cross-provider routing lands both providers'
+rows in one ledger, correctly attributed. Total spend proving it: **$0.000054**.
 
-⚠ Both Anthropic keys were shared over chat and should be **rotated**. The one in `.env` is
-gitignored and has never been committed; verified before each commit.
+**Everything CONTEXT.md §3 lists under REAL LLM CALLS is now unblocked** — Ammar's
+`calibrate.py` has both providers to measure against, and the cross-model efficiency
+comparison in PLAN.md Phase 3 can run for real.
+
+⚠ All three keys (two Anthropic, one OpenAI) were shared over chat and should be
+**rotated**. The live ones sit only in `.env`, which is gitignored and has never been
+committed; verified by scan before every commit.
 
 *Silver lining for the demo narrative:* an account at zero balance returning errors on every
 request is, verbatim, the failure Meter exists to prevent — "when the balance hits zero at
