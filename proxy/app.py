@@ -32,6 +32,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from treasury import db as treasury_db
 from treasury import mock_provider
 from treasury import routes as treasury_routes
 
@@ -66,6 +67,14 @@ async def lifespan(app: FastAPI):
     db.connect()
     seeded = db.seed_keys(config.METER_KEYS)
     log.info("ledger ready at %s (%d meter key(s) seeded)", config.DB_PATH, seeded)
+
+    # Create the treasury tables at boot rather than on first use. `treasury.db.connect()`
+    # is lazy, so without this the `wallets` table does not exist until somebody happens to
+    # call a treasury route — and the dashboard reads that table directly and read-only
+    # (dashboard/src/lib/db.ts). It would fail with "no such table: wallets" on a machine
+    # where nobody had hit the endpoint yet, which is every teammate's machine.
+    treasury_db.connect()
+    log.info("treasury tables ready (wallets, mandates, treasury_events)")
 
     if not config.OPENAI_API_KEY and not config.ANTHROPIC_API_KEY:
         log.warning("no provider keys configured — every upstream call will 401")
