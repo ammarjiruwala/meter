@@ -54,7 +54,13 @@ Payload = Union[str, Messages]
 # ledger fills. Flat 1.30 is a starting guess, not a measurement: observed
 # under-prediction was 53% overall but 100% for `code` and 0% for `summary`, so one
 # global constant demonstrably cannot serve every bucket.
-DEFAULT_BUFFER = 1.30
+# 1.0, deliberately. The buffer existed to buy safety by over-predicting, but safety
+# now comes from `bound_output_tokens`, which output cannot exceed. Keeping a
+# multiplicative buffer on the prediction path double-corrects: the buffer and the
+# history factor are BOTH fitted as actual/scope, so applying both computes
+# scope x (actual/scope) x (actual/scope). A prequential run caught this as median
+# error rising from 77% to 204% as the loop "learned".
+DEFAULT_BUFFER = 1.0
 TARGET_UNDER_PREDICTION = 0.15   # what a fitted buffer aims for
 
 # Step 1.
@@ -83,6 +89,11 @@ class PredictionResult:
 
     input_tokens: int
     predicted_output_tokens: int
+    # The raw heuristic output, before buffer/history/clamp. Carried through and
+    # written to the ledger because the learner MUST fit its correction against a
+    # fixed baseline: computing the factor from the corrected prediction divides by
+    # the previous factor every refresh, which oscillates rather than converging.
+    scope_tokens: int
     bound_output_tokens: int
     bucket: str
     predicted_cost_usd: float
@@ -98,13 +109,34 @@ class PredictionResult:
 class Predictor:
     """One instance per proxy process. Holds learned state; safe across threads."""
 
+    @staticmethod
+    def _load_fitted():
+        """Load constants and per-bucket factors produced by predictor/optimize.py.
+
+        Falls back to the shipped defaults when absent, so a fresh checkout works
+        without a fitting run and a bad fit can be reverted by deleting one file.
+        """
+        import json as _json
+        from pathlib import Path as _P
+        path = _P(__file__).resolve().parent.parent / "data" / "fitted.json"
+        if not path.exists():
+            return None, {}
+        try:
+            blob = _json.loads(path.read_text())
+            from .scope import ScopeConfig
+            return ScopeConfig(**blob["config"]), blob.get("factors", {})
+        except Exception:
+            return None, {}
+
     def __init__(self, buffer: float = DEFAULT_BUFFER) -> None:
         self._default_buffer = buffer
         self._buffers: Dict[str, float] = {}
+        self._bounds: Dict[str, int] = {}
         self._history: Dict[Tuple[str, ...], float] = {}
         self._fits: Dict[str, Fit] = {}
         self._cache: "OrderedDict[str, PredictionResult]" = OrderedDict()
         self._lock = Lock()
+        self._cfg, self._factors = self._load_fitted()
 
     # --- step 0 ------------------------------------------------------------
 
@@ -175,13 +207,19 @@ class Predictor:
             method, tasks = "json_schema", []
         else:
             # ── 2 & 3. EXPLICIT LENGTH, else TASK STACKING ─────────────────
-            raw, method, tasks = scope_mod.estimate(payload, model)
+            raw, method, tasks = scope_mod.estimate(payload, model, self._cfg)
 
-        # ── 4. SAFETY BUFFER (asymmetric, per bucket) ──────────────────────
-        raw *= self._buffer_for(bucket)
+        scope_tokens = max(1, int(round(raw)))
+        # Per-bucket scale fitted on held-out data. Applied to the raw scope, so the
+        # ledger's predicted_scope_tokens stays the clean baseline the learner needs.
+        raw *= self._factors.get(bucket, 1.0)
+
+        # ── 4. SAFETY BUFFER — now applied to the BOUND, not the prediction ─
+        # See DEFAULT_BUFFER. The forecast optimises for accuracy; the ceiling
+        # carries the safety guarantee.
 
         # ── 5. HISTORY CORRECTION ──────────────────────────────────────────
-        factor = self._history_factor(project, feature, actor)
+        factor = self._history_factor(project, feature, actor, bucket, model)
         raw *= factor
 
         predicted = max(MIN_PREDICTION, int(round(raw)))
@@ -192,7 +230,7 @@ class Predictor:
         # because max_tokens is a safety valve most SDKs set by default rather than a
         # statement of intent. A team with max_tokens=4096 boilerplate would otherwise
         # get one identical prediction for every prompt they ever send.
-        bound = int(max_tokens) if max_tokens and max_tokens > 0 else DEFAULT_MODEL_MAX_OUTPUT
+        bound = self._bound_for(bucket, max_tokens)
         capped = predicted > bound
         if capped:
             predicted = bound
@@ -208,6 +246,7 @@ class Predictor:
         result = PredictionResult(
             input_tokens=input_tokens,
             predicted_output_tokens=predicted,
+            scope_tokens=scope_tokens,
             bound_output_tokens=bound,
             bucket=bucket,
             predicted_cost_usd=pred_cost,
@@ -224,26 +263,65 @@ class Predictor:
 
     # --- learned state -----------------------------------------------------
 
+    def _bound_for(self, bucket: str, max_tokens: Optional[int]) -> int:
+        """What this call cannot exceed.
+
+        `max_tokens` is exact when the caller sets it. When they do not, falling back
+        to the model's maximum (4096+) would reserve ~$0.04 of gpt-4o output on every
+        request and exhaust a small project's ceiling within a couple of dozen calls.
+        A learned per-bucket p95 is a far tighter bound that is still safe in practice;
+        the model maximum remains the last resort.
+        """
+        if max_tokens and max_tokens > 0:
+            return int(max_tokens)
+        with self._lock:
+            learned = self._bounds.get(bucket)
+        return int(learned) if learned else DEFAULT_MODEL_MAX_OUTPUT
+
+    def load_bounds(self, observations: Dict[str, List[int]],
+                    quantile: float = 0.95) -> Dict[str, int]:
+        """Fit each bucket's fallback ceiling from observed outputs."""
+        import numpy as np
+
+        fitted = {b: int(np.quantile(v, quantile) * 1.2)
+                  for b, v in observations.items() if len(v) >= 20}
+        with self._lock:
+            self._bounds = fitted
+            self._cache.clear()
+        return fitted
+
     def _buffer_for(self, bucket: str) -> float:
         with self._lock:
             return self._buffers.get(bucket, self._default_buffer)
 
-    def _history_factor(self, project, feature, actor) -> float:
-        """Most specific key first, falling back to 1.0 (no correction)."""
-        if not project:
-            return 1.0
+    def _history_factor(self, project, feature, actor, bucket=None, model=None) -> float:
+        """Descend a specificity ladder, taking the first level with enough data.
+
+        A single composite key fragments the data: at 2,000 rows, keying on
+        (bucket, model, user) leaves 40% of rows in cells too small to correct, so
+        most factors sit at 1.0 and the learner silently does nothing. The ladder
+        keeps specificity where the data supports it and degrades gracefully where it
+        does not.
+
+        Ordered most specific first, and ALL attribution rungs precede the generic
+        (bucket, model) rungs: a particular customer's prompting style predicts their
+        next request better than a pattern averaged over everybody's traffic, even
+        when the generic rung has more rows behind it.
+        """
         with self._lock:
             for key in (
                 (project, feature, actor),
                 (project, feature),
                 (project,),
+                (bucket, model),
+                (bucket,),
             ):
                 if all(k is not None for k in key) and key in self._history:
                     return self._history[key]
         return 1.0
 
     def load_buffers(self, observations: Dict[str, List[Tuple[float, int]]]) -> Dict[str, float]:
-        """Fit each bucket's buffer to hit TARGET_UNDER_PREDICTION.
+        """Fit each bucket's SAFETY quantile. Consumed by the bound, not the forecast.
 
         `observations` is {bucket: [(unbuffered_scope, actual_output_tokens)]}. The
         buffer is the quantile of actual/scope that leaves only the target fraction
@@ -264,6 +342,8 @@ class Predictor:
             self._cache.clear()   # cached predictions used the old buffers
         return fitted
 
+    MIN_ROWS_FOR_KEY = 20
+
     def load_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
                      shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
         """Install per-key correction factors with shrinkage toward 1.0.
@@ -274,9 +354,15 @@ class Predictor:
         """
         out: Dict[Tuple[str, ...], float] = {}
         for key, (raw, n) in factors.items():
-            if n <= 0:
+            # Below this the level is skipped entirely so the ladder falls through to
+            # a coarser key that does have support, rather than applying a factor
+            # computed from a handful of rows.
+            if n < self.MIN_ROWS_FOR_KEY:
                 continue
-            out[key] = (n * raw + shrink_k * 1.0) / (n + shrink_k)
+            # Shrinkage still applies on top: a level that just cleared the threshold
+            # is trusted less than one with hundreds of rows.
+            blended = (n * raw + shrink_k * 1.0) / (n + shrink_k)
+            out[key] = float(min(max(blended, 0.5), 3.0))
         with self._lock:
             self._history = out
             self._cache.clear()
@@ -316,8 +402,10 @@ def predict(payload: Payload, model: str, max_tokens: Optional[int] = None,
 
 def load_fits(rows_by_bucket): return _default.load_fits(rows_by_bucket)
 def load_buffers(observations): return _default.load_buffers(observations)
+def load_bounds(observations, quantile: float = 0.95): return _default.load_bounds(observations, quantile)
 def load_history(factors, shrink_k: int = 20): return _default.load_history(factors, shrink_k)
 def current_fits(): return _default.fits
+def current_history(): return dict(_default._history)
 def current_buffers(): return _default.buffers
 def cache_stats(): return _default.cache_stats()
 
