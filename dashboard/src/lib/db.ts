@@ -50,3 +50,35 @@ export function getTeamSpend(): SpendRow[] {
 export function isLedgerAvailable(): boolean {
   return getDb() !== null;
 }
+
+export type LiveLogRow = {
+  id: string;
+  ts: string;
+  actor: string | null;
+  model: string | null;
+  // Not yet in the ledger — predictor/ exists but isn't wired into the proxy's
+  // request path yet (CONTEXT.md §6a). Column stays null until Shubh's Phase 2
+  // integration writes predicted_output_tokens/bucket at CAPTURE.
+  predicted_cost_usd: number | null;
+  cost_usd: number;
+  status: number | null;
+};
+
+export function getLiveLogs(limit = 50): LiveLogRow[] {
+  const conn = getDb();
+  if (!conn) return [];
+  return conn
+    .prepare(
+      `SELECT id,
+              ts,
+              actor,
+              model,
+              NULL AS predicted_cost_usd,
+              cost_usd,
+              status
+         FROM requests
+        ORDER BY ts DESC
+        LIMIT ?`,
+    )
+    .all(limit) as LiveLogRow[];
+}

@@ -99,7 +99,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — Shubh's Phase 1 proxy work merged; Tanay's Phase 0 setup merged.
+*   **Last updated:** 2026-08-01 — Tanay's Phase 2 Live Logs table merged.
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -130,14 +130,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 
 *   **Treasurer Agent / Prava:** Not started.
 
-*   **Dashboard: BASIC LAYOUT WORKING.** `dashboard/` — Next.js (App Router) + Tailwind, `npm run dev`
-    from `dashboard/`. Reads `proxy/meter.db` directly and read-only (`dashboard/src/lib/db.ts`),
-    WAL mode makes concurrent reads with the proxy's writer safe. Renders a "Team Spend" table
-    (grouped by project/actor/feature from `requests`) and a "Provider Balances" card — the latter
-    is placeholder data (`dashboard/src/lib/wallets.ts`) since no `wallets` table exists yet.
-    Handles the ledger-not-created-yet case (nobody has run the proxy) with an empty state instead
-    of crashing. Not yet done: live streaming/polling (Phase 2's Live Logs table), Poke alert
-    wiring (Phase 3, hooks into `breaker.notify()`).
+*   **Dashboard: LAYOUT + LIVE LOGS WORKING.** `dashboard/` — Next.js (App Router) + Tailwind,
+    `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
+    (`dashboard/src/lib/db.ts`), WAL mode makes concurrent reads with the proxy's writer safe.
+    *   "Team Spend" table (grouped by project/actor/feature from `requests`).
+    *   "Provider Balances" card — placeholder data (`dashboard/src/lib/wallets.ts`) since no
+        `wallets` table exists yet.
+    *   "Live Logs" table (`User | Model | Predicted Cost | Actual Cost | Status`), polling
+        `GET /api/live-logs` every 3s. **Predicted Cost is always blank** — the ledger has no
+        `predicted_output_tokens`/`bucket` columns yet; wire it for real once Shubh's predictor
+        integration lands (see Predictive Engine entry above). Verified end-to-end against a
+        seeded SQLite file: a row inserted mid-session shows up on the next poll with no restart.
+    *   Handles the ledger-not-created-yet case (nobody has run the proxy) with an empty state
+        instead of crashing.
+    *   Not yet done: Poke alert wiring (Phase 3, hooks into `breaker.notify()`), Model Efficiency
+        view (Phase 3, needs Ammar's cross-model data), Agent Activity panel (Phase 3, Treasurer).
 
 *   **Resolved since kickoff:**
     1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)

@@ -1,6 +1,7 @@
 import { TeamSpendTable } from "@/components/TeamSpendTable";
 import { ProviderBalancesCard } from "@/components/ProviderBalancesCard";
-import { getTeamSpend, isLedgerAvailable } from "@/lib/db";
+import { LiveLogsTable } from "@/components/LiveLogsTable";
+import { getTeamSpend, getLiveLogs, isLedgerAvailable } from "@/lib/db";
 import { getProviderBalancesPlaceholder } from "@/lib/wallets";
 
 // Reads meter.db on every request — must not be statically prerendered at build
@@ -12,6 +13,7 @@ export default function Home() {
   const ledgerAvailable = isLedgerAvailable();
   const spend = getTeamSpend();
   const balances = getProviderBalancesPlaceholder();
+  const liveLogs = getLiveLogs();
 
   return (
     <div className="flex flex-1 flex-col bg-zinc-50 dark:bg-black">
@@ -31,6 +33,7 @@ export default function Home() {
         )}
 
         <ProviderBalancesCard balances={balances} />
+        <LiveLogsTable initialRows={liveLogs} />
         <TeamSpendTable rows={spend} />
       </main>
     </div>
