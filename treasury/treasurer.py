@@ -87,6 +87,13 @@ def assess(project_id: str, provider: str | None = None) -> dict[str, Any]:
     }
 
 
+# Outcomes that are not worth waking anyone for. A project with no mandate has simply
+# not onboarded yet; a cooldown is the rail working; a dry run is a rehearsal. Alerting
+# on these means every un-onboarded project pages the on-call every TREASURER_INTERVAL_S
+# forever, and the one alert that matters arrives buried in them.
+_QUIET_REASONS = {"no_chargeable_mandate", "dry_run", "cooldown"}
+
+
 def notify(event: dict[str, Any]) -> None:
     """Alert seam for the 3am save. Log-only, deliberately.
 
@@ -123,9 +130,12 @@ async def tick() -> list[dict[str, Any]]:
                     "amount_usd": outcome["amount_usd"],
                     "balance_usd": outcome["balance_usd"],
                     "trigger": decision["trigger"]})
-        else:
+        elif outcome.get("reason") not in _QUIET_REASONS:
             notify({"event": "topup_failed", "project": wallet["project_id"],
                     "reason": outcome.get("reason")})
+        else:
+            log.info("no top-up for %s: %s", wallet["project_id"],
+                     outcome.get("reason"))
 
     return results
 
