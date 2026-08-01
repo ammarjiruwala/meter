@@ -112,7 +112,9 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     schedule; Poke/Linq breaker alerts wired and verified live (Tanay) — a real iMessage delivered
     end to end; treasury `/topup` + mandate-selection fixes (Shivam). **Since that merge: the
     dashboard's "Team Budget" card (Tanay) reads Shubh's new ceilings, closing the §5D gap that
-    had been specified but unbuildable — spend against a limit, per project and per feature.**
+    had been specified but unbuildable — spend against a limit, per project and per feature.
+    "Cost per Outcome" (Tanay) followed, putting the `requests × annotations` margin metric on
+    screen and documenting the fan-out trap that makes the obvious query overstate cost.**
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -265,6 +267,38 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         is absent, so a `meter.db` whose proxy has not been restarted since the migration still
         renders instead of throwing. Verified end-to-end against a seeded SQLite file: a row
         inserted mid-session shows up on the next poll with no restart.
+    *   **"Cost per Outcome" table — the margin metric, now on screen** (2026-08-01, unblocked
+        by Shubh's `POST /v1/annotate`). Grouped by `outcome`:
+        `Outcome | Traces | Requests | Cost | Per trace | Value | Margin`. This is the
+        `requests × annotations` join ARCHITECTURE.md §4 calls the difference between a cost
+        tool and a margin tool.
+        *   ⚠ **The obvious query for this is wrong, and wrong in the dangerous direction.**
+            `annotations` is append-only — `record_annotation` says outright that a trace can be
+            annotated twice — so `requests JOIN annotations ON trace_id` **fans out**: a trace
+            with 12 requests and 2 annotations yields 24 rows and reports double the cost.
+            Measured on the verification fixture, the naive join overstated `resolved` cost by
+            **1.75x** ($0.70 against a true $0.40). On a margin metric that turns a loss into a
+            profit on screen. `dashboard/src/lib/db.ts` therefore rolls `requests` up to one row
+            per trace **before** anything joins to it, and collapses annotations to one row per
+            trace, so the join is strictly 1:1. **Anyone writing this query elsewhere — a
+            Treasurer report, a pitch number — has to do the same.**
+        *   **A trace annotated twice takes its latest annotation, not the sum** (`MAX(id)`).
+            A re-annotation is usually a correction — a ticket reopened, then resolved again —
+            and summing double-counts it. Isolated to one CTE if that call is ever reversed.
+        *   **Margin is measured against only the traces that carry a `value_usd`.** Comparing
+            annotated revenue with the group's whole cost would report a loss that is an
+            artefact of incomplete annotation. Rows where only some traces are valued are
+            marked; a trace with no value shows margin `—`, never `0`, because "broke even" and
+            "unknown" are different facts.
+        *   **Coverage is stated, not assumed.** The card reports annotated traces against all
+            traced traces and the share of traced spend they represent. "$0.20 per resolved
+            ticket" from 3% of traffic looks identical to one from 95% unless coverage sits
+            beside it. Annotations naming a trace with no metered requests (a mistyped
+            `trace_id`) are excluded from the join and counted separately.
+        *   **Verified against a running proxy**, annotating through the real endpoint: a trace
+            annotated twice did not double its cost, `resolved` totalled $0.4000 across 2 traces
+            / 4 requests exactly matching `SUM(cost_usd)`, and the orphan annotation was
+            excluded and reported.
     *   **Every query guards on the table existing, not just the file.** `meter.db` can now be
         created by either side — `treasury/db.py` makes it with only the treasury tables, so
         running any treasury script before the proxy left a file that existed but had no
