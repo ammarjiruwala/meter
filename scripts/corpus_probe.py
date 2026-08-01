@@ -144,6 +144,45 @@ TAGS: Dict[str, Tuple[str, str, int, int, str]] = {
         "Write a complete technical specification for replacing this module: goals, "
         "non-goals, API surface, data model, failure modes, rollout, and testing "
         "strategy.\n\n{body}"),
+
+    # ── mid-consumption: the workloads a real engineering team runs most ──────
+    "unit-test-gen": ("internal-tools", "code", 4_000, 2_000,
+        "Write unit tests for the functions below. Cover the happy path and the "
+        "failure branch of each.\n\n{body}"),
+    "log-anomaly-summary": ("batch-jobs", "logs", 12_000, 900,
+        "Identify the anomalies in these logs and rank them by how urgently they need "
+        "attention.\n\n{body}"),
+    "release-notes-bulk": ("api-prod", "logs", 10_000, 1_200,
+        "Turn this activity record into user-facing release notes, grouped by "
+        "theme.\n\n{body}"),
+    "security-audit": ("internal-tools", "code", 8_000, 2_000,
+        "Audit this code for security issues. For each, give the risk, the affected "
+        "function, and a concrete fix.\n\n{body}"),
+    "perf-analysis": ("batch-jobs", "logs", 12_000, 1_400,
+        "Analyse the latency patterns here. Identify the slowest paths and what is "
+        "most likely causing them.\n\n{body}"),
+    "migration-guide": ("internal-tools", "code", 5_000, 2_500,
+        "Write a migration guide for callers of this module: what breaks, what "
+        "replaces it, and the steps to migrate.\n\n{body}"),
+    "schema-map": ("batch-jobs", "logs", 8_000, 1_200,
+        "Infer the data schema implied by these records: field names, types, "
+        "cardinality, and which are optional.\n\n{body}"),
+    "tradeoff-analysis": ("internal-tools", "transcript", 6_000, 1_800,
+        "Summarise the options discussed and lay out the trade-offs between them, "
+        "then recommend one.\n\n{body}"),
+
+    # ── short/structured output: where the estimator is currently weakest ─────
+    "severity-triage": ("api-prod", "logs", 3_000, 120,
+        "Assign a severity (P0-P3) and a one-line justification. Answer with just "
+        "those two things.\n\n{body}"),
+    "json-extract": ("api-prod", "logs", 4_000, 400,
+        "Extract every distinct service name and its error count as a JSON object. "
+        "Return only the JSON.\n\n{body}"),
+    "entity-tag": ("api-prod", "transcript", 3_000, 250,
+        "List the systems and people mentioned, as a comma-separated line for each "
+        "category. Nothing else.\n\n{body}"),
+    "readme-section": ("internal-tools", "code", 4_000, 800,
+        "Write the 'Usage' section of a README for this module.\n\n{body}"),
 }
 
 
