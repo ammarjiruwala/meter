@@ -13,7 +13,7 @@ import uuid
 
 from fastapi import APIRouter
 
-from . import config, db
+from . import config, db, treasurer
 from .prava import charge_mandate, create_mandate_session, list_mandates, report_charge
 from .topup import execute_topup
 
@@ -59,6 +59,27 @@ async def topup(project_id: str = "demo-project", provider: str | None = None,
     """
     return await execute_topup(project_id=project_id, provider=provider,
                                amount_usd=amount_usd)
+
+
+@router.get("/treasury/assess")
+def treasury_assess(project_id: str = "demo-project", provider: str | None = None):
+    """Would the Treasurer top up right now, and why? Reads only — spends nothing.
+
+    This is the panel the demo narrates: balance, burn rate, projected runway, the
+    threshold it is compared against, and the amount it would move. Safe to poll.
+    """
+    return treasurer.assess(project_id, provider)
+
+
+@router.post("/treasury/tick")
+async def treasury_tick():
+    """Run one pass of the Treasurer immediately, across every wallet.
+
+    The loop runs on `TREASURER_INTERVAL_S`, but a demo should not depend on a timer
+    firing at the right moment in front of an audience. This is the same code path the
+    loop runs, on demand.
+    """
+    return await treasurer.tick()
 
 
 @router.get("/treasury/events")

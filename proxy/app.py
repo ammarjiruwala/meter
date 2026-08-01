@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from treasury import db as treasury_db
 from treasury import mock_provider
 from treasury import routes as treasury_routes
+from treasury import treasurer
 
 from . import breaker, config, db, providers
 from .pricing import Usage, estimate_from_bytes, price
@@ -76,6 +77,11 @@ async def lifespan(app: FastAPI):
     treasury_db.connect()
     log.info("treasury tables ready (wallets, mandates, treasury_events)")
 
+    # The Treasurer's background loop. No-ops unless TREASURER_ENABLED, and cannot move
+    # money unless TREASURER_DRY_RUN is also off — two switches, because a process that
+    # charges a card on a timer should not start by accident.
+    treasurer.start()
+
     if not config.OPENAI_API_KEY and not config.ANTHROPIC_API_KEY:
         log.warning("no provider keys configured — every upstream call will 401")
 
@@ -109,6 +115,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await treasurer.stop()
         # Let in-flight ledger writes land before the loop closes, but never hang
         # shutdown on them.
         if _capture_tasks:

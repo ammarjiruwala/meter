@@ -69,6 +69,30 @@ TREASURER_COOLDOWN_S = _int("TREASURER_COOLDOWN_S", 300)
 # exists so a second mandate for Anthropic is a row, not a migration.
 TREASURER_PROVIDER = _str("TREASURER_PROVIDER", "openai")
 
+# ── Treasurer loop ───────────────────────────────────────────────────────────
+# Whether the background loop runs at all. Two independent guards, on purpose:
+# TREASURER_ENABLED decides if it wakes up, TREASURER_DRY_RUN decides if it can move
+# money. A background process that charges a card should take two deliberate acts to
+# switch on, not one.
+TREASURER_ENABLED = _bool("TREASURER_ENABLED", False)
+
+# Burn rate is measured over this trailing window. An hour is long enough to be a rate
+# rather than noise, and short enough to notice a batch job that started ten minutes ago.
+TREASURER_BURN_WINDOW_S = _int("TREASURER_BURN_WINDOW_S", 3600)
+
+# Top up when projected runway drops below this many hours (ARCHITECTURE.md §5 and the
+# `topup_when_hours_remaining` key in README's meter.yaml).
+TREASURER_TOPUP_WHEN_HOURS = _float("TREASURER_TOPUP_WHEN_HOURS", 0.75)
+
+# Absolute floor, independent of runway. This is not redundant with the hours check: at
+# zero traffic burn is 0, runway is infinite, and a wallet at $0.00 would never trigger.
+# PLAN.md Phase 3 specifies exactly this floor.
+TREASURER_MIN_BALANCE_USD = _float("TREASURER_MIN_BALANCE_USD", 10.0)
+
+# How much runway a top-up aims to restore, and the bounds on any single one.
+TREASURER_TARGET_HOURS = _float("TREASURER_TARGET_HOURS", 24.0)
+TREASURER_MIN_TOPUP_USD = _float("TREASURER_MIN_TOPUP_USD", 25.0)
+
 # ── Mandate setup ────────────────────────────────────────────────────────────
 # The merchant a mandate is pinned to. This is the *destination* — the party being paid
 # — which for Meter is the provider's billing system, stood in for by
