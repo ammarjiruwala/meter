@@ -103,7 +103,7 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
     *   SSE streaming with real usage extraction for both provider shapes (pulled forward from Phase 2). Non-streamed calls too.
     *   Attribution rungs 0–2 (`X-Meter-Feature` / `-Actor` / `-Trace`) recorded on every row.
     *   Measured overhead: **p50 +1.49 ms** wall-clock against a local fake upstream. Loopback, no TLS — a floor, not a production number.
-    *   Not yet done: reservations (needs Redis — see below), per-project daily ceilings, `POST /v1/annotate`.
+    *   Not yet done, all owned by Shubh in Phase 2: reservations (in-process, no Redis — see below), per-project daily ceilings, `POST /v1/annotate`.
 
 *   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
 
@@ -123,10 +123,10 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 *   **Open blockers/decisions:**
     1.  **Two different circuit-breaker detectors are specified** — flat $20/5min here in §5C, ratio-vs-7-day-baseline in `ARCHITECTURE.md` §6. Shipped the flat one. Google's SRE Workbook says the answer is neither: pair a short and a long window and require both to trip. ~10 lines. (`PROPOSALS.md` A1)
     2.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** The first is what turns a cost tool into a margin tool and is ~40 lines; the second is the first command in our own quickstart. (`PROPOSALS.md` B9, B10)
-    3.  **The Visa VIC track has no architectural surface.** We are entered in a track nothing in the build targets. (`PROPOSALS.md` B14)
+    3.  **The Visa VIC track has no architectural surface.** Tanay's Phase 0 confirmed the test-card requirements are covered by `docs/prava/api-reference/test-cards.md`, so the *docs* gap is closed — but nothing in `ARCHITECTURE.md` or the build actually targets VIC. We are still entered in a track no component is designed for. (`PROPOSALS.md` B14)
     4.  **Anthropic's OpenAI-compatibility path is unverified** — a `claude-*` model sent to `/v1/chat/completions` is forwarded to it and nobody has confirmed it exists. One live call with a real key settles it. (`PROPOSALS.md` B1, C2)
 
-*   **`PROPOSALS.md`** collects all 20 open items from a full architecture read. Nothing in it has been applied to this file, `README.md`, or `ARCHITECTURE.md` — they need decisions first.
+*   **`PROPOSALS.md`** collects 20 items from a full architecture read — contradictions between the three source-of-truth docs, and gaps they leave undefined. Four are now closed (pricing verified, Redis decided, budget enforcement owned, disconnect-capture and ledger idempotency shipped). The rest still need decisions. **`README.md` and `ARCHITECTURE.md` remain unedited** — proposals get approved there, not applied silently.
 
 ---
 
