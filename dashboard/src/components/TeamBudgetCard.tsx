@@ -46,15 +46,18 @@ function ScopeRow({ scope, usd }: { scope: BudgetScope; usd: Formatters }) {
   const band = bandFor(used);
   const headroom = Math.max(0, scope.ceiling_usd - scope.spend_usd);
 
+  // Every row keeps the same padding, so all the bars sit on one shared track.
+  // Indenting the whole row would give the project a wider track than its features, and
+  // a bar is only readable against its neighbours if they start and end in the same
+  // place — these are all percent-of-own-ceiling, so their lengths are directly
+  // comparable and should look it. Hierarchy is carried by the label instead.
+  const indent = isProject ? "" : "pl-[20px]";
+
   return (
-    <div
-      className={`border-b border-white/[0.06] px-[24px] py-[18px] last:border-0 ${
-        isProject ? "" : "pl-[44px]"
-      }`}
-    >
+    <div className="border-b border-white/[0.06] px-[24px] py-[18px] last:border-0">
       <div className="flex items-baseline justify-between gap-[16px]">
         <span
-          className={`t-readout ${isProject ? "text-paper" : "text-ash"}`}
+          className={`t-readout ${indent} ${isProject ? "text-paper" : "text-ash"}`}
           title={isProject ? "Every feature plus untagged traffic" : undefined}
         >
           {isProject ? scope.project_id : scope.feature}
@@ -89,7 +92,7 @@ function ScopeRow({ scope, usd }: { scope: BudgetScope; usd: Formatters }) {
         </span>
       </div>
 
-      <p className="t-caption mt-[8px] text-ash">
+      <p className={`t-caption mt-[8px] text-ash ${indent}`}>
         {usd.spend(headroom)} remaining
       </p>
     </div>
