@@ -135,8 +135,10 @@ CREATE INDEX IF NOT EXISTS idx_requests_project_ts ON requests(project_id, ts);
 CREATE INDEX IF NOT EXISTS idx_requests_trace     ON requests(trace_id);
 -- prompt_hash backs duplicate-call and cache-candidate detection for the Analyst.
 CREATE INDEX IF NOT EXISTS idx_requests_prompt    ON requests(prompt_hash);
--- bucket backs the learner's per-bucket refit and the accuracy-by-bucket report.
-CREATE INDEX IF NOT EXISTS idx_requests_bucket    ON requests(bucket);
+-- NOTE: the index on `bucket` is NOT here. It is created in _migrate(), after the
+-- column exists. Creating it here fails outright on a ledger that predates the
+-- column, because CREATE TABLE IF NOT EXISTS no-ops on the existing table and then
+-- the index references a column that is not there yet.
 
 CREATE TABLE IF NOT EXISTS breaker_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,11 +196,21 @@ _ADDED_COLUMNS = (
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns missing from an older ledger. Idempotent, safe on a fresh DB."""
+    """Add columns missing from an older ledger. Idempotent, safe on a fresh DB.
+
+    Runs after the schema script, so every table exists by now. Any index that
+    references a migrated column must be created here rather than in SCHEMA, for the
+    reason noted there.
+    """
     for table, column, decl in _ADDED_COLUMNS:
         existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table absent entirely; SCHEMA owns creating it
         if column not in existing:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    # bucket backs the learner's per-bucket refit and the accuracy-by-bucket report.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_bucket ON requests(bucket)")
 
 
 def seed_keys(spec: str) -> int:

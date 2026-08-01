@@ -386,6 +386,58 @@ def test_proxy_integration() -> None:
         check(f"ledger column {col} exists", col in _REQUEST_COLUMNS)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+def test_ledger_migration() -> None:
+    """An existing meter.db from before the prediction columns must keep working.
+
+    The first version of this crashed on connect: SCHEMA created an index on
+    `bucket` while CREATE TABLE IF NOT EXISTS no-opped on the existing table, so the
+    index referenced a column that did not exist yet. That would have broken every
+    teammate the moment they pulled, and deleting their ledger is not an option --
+    it is the priced history ARCHITECTURE.md §9 calls the part that does not port.
+    """
+    print("\nledger migration")
+    import os, sqlite3, tempfile
+
+    path = Path(tempfile.mkdtemp()) / "old.db"
+    conn = sqlite3.connect(str(path))
+    # The real pre-prediction schema, so the other indexes in SCHEMA resolve too.
+    conn.executescript(
+        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, environment TEXT, actor TEXT, feature TEXT, "
+        "trace_id TEXT, provider TEXT NOT NULL, model TEXT, endpoint TEXT NOT NULL, "
+        "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
+        "cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0, "
+        "pricing_version TEXT, cost_usd REAL DEFAULT 0, latency_ms REAL, ttft_ms REAL, "
+        "overhead_ms REAL, status INTEGER, is_stream INTEGER DEFAULT 0, "
+        "estimated INTEGER DEFAULT 0, prompt_hash TEXT, reservation_id TEXT);"
+        "INSERT INTO requests (id,ts,project_id,provider,endpoint,cost_usd) "
+        "VALUES ('old','2026-01-01','p','openai','/v1/chat',0.5);"
+    )
+    conn.commit()
+    conn.close()
+
+    os.environ["METER_DB_PATH"] = str(path)
+    import importlib
+
+    from proxy import config as cfg
+    importlib.reload(cfg)
+    from proxy import db as dbmod
+    importlib.reload(dbmod)
+    dbmod.connect()
+
+    check2 = sqlite3.connect(str(path))
+    cols = {r[1] for r in check2.execute("PRAGMA table_info(requests)")}
+    for col in ("predicted_output_tokens", "predicted_cost_usd", "bucket", "prediction_method"):
+        check(f"migration added {col}", col in cols)
+    rows = check2.execute("SELECT id, cost_usd FROM requests").fetchall()
+    check("historical rows survive", rows == [("old", 0.5)], f"got {rows}")
+    idx = [r[0] for r in check2.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_requests_bucket'")]
+    check("bucket index created after the column", idx == ["idx_requests_bucket"])
+    check2.close()
+
+
 def main() -> int:
     for suite in (
         test_determinism,
@@ -401,6 +453,7 @@ def main() -> int:
         test_accuracy_report,
         test_priors,
         test_proxy_integration,
+        test_ledger_migration,
     ):
         suite()
     print(f"\n{PASSED} checks passed")
