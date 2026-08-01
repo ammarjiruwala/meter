@@ -2,3 +2,16 @@
 # Lint debt that accumulated before this file existed was fixed in place;
 # `ruff check .` is expected to pass clean.
 line-length = 100
+
+[lint]
+# Stated explicitly rather than left implicit. Ruff's default is E4/E7/E9 + F, but "the
+# default" is a moving target across releases — a version bump would silently widen the
+# rule set and redden every open PR. Naming it makes CI's verdict a property of this
+# repo rather than of whichever ruff happened to install that morning.
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# One-shot Prava probes kept at the repo root for the record. Not imported by anything,
+# not worth tidying.
+"probe.py" = ["E401", "F401"]
+"test2.py" = ["E401", "F401"]

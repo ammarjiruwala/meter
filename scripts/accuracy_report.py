@@ -81,8 +81,8 @@ def main() -> int:
 
     # ── open-ended traffic: the locked WildChat test set ──────────────────────
     out = []
-    test = [json.loads(l) for l in
-            (REPO / "data" / "wildchat" / "test.jsonl").read_text().splitlines() if l.strip()]
+    test = [json.loads(line) for line in
+            (REPO / "data" / "wildchat" / "test.jsonl").read_text().splitlines() if line.strip()]
     p = Predictor()
     pred = np.array([p.predict(r["prompt"], "gpt-4o").predicted_output_tokens for r in test], float)
     act = np.array([r["output_tokens"] for r in test], float)
@@ -91,7 +91,7 @@ def main() -> int:
     # ── templated traffic: the 200 paid probe calls, k-fold corrected ─────────
     from scripts.history_value import evaluate, SRC, FOLDS, SHRINK  # noqa: F401
 
-    rows = [json.loads(l) for l in SRC.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in SRC.read_text().splitlines() if line.strip()]
     keys = [f"{r['project']}/{r['feature']}" for r in rows]
     act_t = np.array([r["output_tokens"] for r in rows], float)
     base_t = np.array([r["predicted_output_tokens"] for r in rows], float)

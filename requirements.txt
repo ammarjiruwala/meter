@@ -10,3 +10,9 @@ numpy>=1.24.0
 
 # predictor/calibrate.py only — measures real ratios against the OpenAI API
 openai>=1.0.0
+
+# CI runs `ruff check .` (.github/workflows/ci.yml). It was never installed, so that
+# step exited 127 "command not found" on every run — the backend job has never actually
+# passed. Pinned rather than floating: an unpinned linter turns "someone released a new
+# rule" into "your PR is red", which is a bad surprise on a deadline.
+ruff==0.16.1
