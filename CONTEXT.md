@@ -119,7 +119,14 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 
 *   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are NOT wired** — `breaker.notify()` is a log-only seam waiting on Tanay.
 
-*   **Predictive Engine:** Not started. The proxy prices *actual* usage after the fact; the predicted-vs-actual variance column arrives with Ammar's engine.
+*   **Predictive Engine: WORKING (v1), NOT YET WIRED INTO THE PROXY.** `predictor/` — full detail in `predictor/README.md`, self-check `python tests/test_predictor.py` (43 checks).
+    *   `predict(payload, model, max_tokens) -> PredictionResult` — the ESTIMATE step of ARCHITECTURE.md §2. Deterministic, no I/O, **p50 0.031ms** (~0.6% of the 5ms pre-flight budget).
+    *   Exact `tiktoken` input counting including chat framing overhead. **Raises on Claude** rather than silently approximating with the wrong vocabulary — see §6b.
+    *   8-bucket prompt classifier; `max_tokens` honoured as a hard cap (a provider-enforced bound beats any heuristic).
+    *   Deliberately biased high (`SAFETY_MARGIN = 1.15`) — see §6b for why accuracy here is asymmetric.
+    *   Priced through `proxy/pricing.py`, so predictions and ledger rows cannot disagree on rates.
+    *   **Known gap vs §5A:** §5A specifies a trailing-p95 cost fallback for `(project, endpoint, model)` at cold start. v1 uses static per-bucket priors instead — bucket-aware rather than project-aware, and available on request #1 rather than needing history. Not yet reconciled; **Ammar to raise in `PROPOSALS.md` rather than quietly treat §5A as satisfied.**
+    *   **Two things block the feedback loop, both needed before we can claim any accuracy number:** (1) Shubh wiring `predict()` into the request path and writing `predicted_output_tokens` / `bucket` to the ledger at CAPTURE; (2) running `python -m predictor.calibrate` to replace the inherited priors with measured ones. `learner.py` stays dormant until ~30 rows/bucket exist.
 
 *   **Treasurer Agent / Prava:** Not started.
 
@@ -144,6 +151,61 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     4.  **Cross-model routing is specified two ways** — §5A says the *proxy* sends the same prompt to both providers; PLAN.md Phase 3 has it as an offline script. The script is right: shadow-calling a second provider on live traffic doubles the customer's bill inside a cost-control tool. Left as a proposal pending Ammar. (`PROPOSALS.md` B11)
 
 *   **`PROPOSALS.md`** collects 20 items from a full architecture read — contradictions between the three source-of-truth docs, and gaps they leave undefined. Four are now closed (pricing verified, Redis decided, budget enforcement owned, disconnect-capture and ledger idempotency shipped). The rest still need decisions. **`README.md` and `ARCHITECTURE.md` remain unedited** — proposals get approved there, not applied silently.
+
+---
+
+## 6b. Decision Record
+
+### 2026-08-01 — Evaluated and rejected PreflightLLMCost as a dependency (Ammar)
+
+We evaluated [PreflightLLMCost](https://github.com/aatakansalar/PreflightLLMCost) (MIT) as a
+ready-made predictive engine, to avoid rebuilding heuristics from scratch. **Decision: do not
+depend on it. Adopt its bucket taxonomy and starting ratios as cold-start priors; write the engine
+ourselves.**
+
+Found by cloning, instrumenting, and running it — not by reading the README:
+
+*   Predictions were **non-deterministic** — Gaussian noise multiplied into every estimate, giving a ~70% spread on an identical prompt. Disqualifying for a reservation, which must be reproducible.
+*   Its **"Tier 3 hidden-state analysis"** performs no LLM call. It is a formula over prompt *string length*, and scores *"write a 10,000 word novel"* **below** *"reply with exactly one word"*. Off by default, and labelled `# Simulate more sophisticated LLM call` in the source.
+*   Its **learning loop was never connected**: `store_actual_result()` is defined but called from nowhere, so its history table stays empty and its regression tier is unreachable in practice.
+*   Its regression **does work** when given data (recovers a known law at 0.6% MAPE) — real code, just unreachable. Credit where due.
+*   The README's *"≤15% MAPE ✅ Achieved"* has **no benchmark, dataset, or evaluation script** anywhere in the repository.
+
+Why we still didn't take the code: only **~35 of its 1,726 lines** survive the fixes, and that
+surviving part is a lookup table rather than logic. Its public API is a batch template/CI
+forecaster, not a per-request in-path predictor, so the entry point needed rewriting regardless.
+It also pulls **scipy (99MB) + pandas (72MB)**, neither of which we need — `numpy.linalg.lstsq`
+replaces its entire use of scipy, exactly, faster, and deterministically. And shipping code
+containing fabricated academic citations into a judged repository is a credibility risk we do not
+need to take.
+
+**Not wasted effort:** the evaluation independently validated our architecture — they converged on
+the same priors-then-learned design. We skipped their execution, not their reasoning. Their priors
+are credited in `predictor/buckets.py`.
+
+### 2026-08-01 — Prediction is OpenAI-only; cross-model analysis is *not* blocked by it (Ammar)
+
+`tiktoken` is exact for OpenAI and **wrong for Anthropic** (different tokenizer). `predictor/
+tokenizer.py` therefore **raises** on Claude rather than approximating with `cl100k_base`, which is
+what the reference did — that returns a confident-looking number roughly 10-20% off with nothing to
+signal it. A visibly wrong answer beats a quietly wrong one in a component that gates spend. For
+exact Claude counts, Anthropic's `/v1/messages/count_tokens` endpoint is free.
+
+**Consequence worth being explicit about: cross-model analysis does not depend on the predictor.**
+Comparing model efficiency uses *actual* usage returned by each provider, which needs no local
+tokenizer — the proxy already captures this for both shapes. So log actuals for both providers from
+day one; only *prediction* is OpenAI-first. This decouples Phase 2's cross-model work from the
+tokenizer question entirely.
+
+### 2026-08-01 — Prediction is deliberately biased high (Ammar)
+
+Accuracy here is **asymmetric**. Under-predicting lets a request through that should have been
+blocked, so the ceiling silently fails; over-predicting holds back budget that is released seconds
+later at CAPTURE. So `SAFETY_MARGIN = 1.15` aims high rather than accurate-on-average, and
+`learner.accuracy_report()` tracks `under_prediction_rate` as a first-class metric alongside MAPE.
+
+**The predictor never affects billing** — billing prices the provider's actual usage. It only
+answers "do we have room for this request?".
 
 ---
 
