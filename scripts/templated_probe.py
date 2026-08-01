@@ -20,7 +20,7 @@ So this generates that shape of traffic for real: 5 templates x 40 slot fillings
 each template a distinct `(project, feature)` pair. The residual within a template
 is a genuine model behaviour, not something we assumed.
 
-MONEY: capped at MAX_CALLS. `--dry-run` prints the exact worst-case bound first, and
+MONEY: capped per set (see SETS). `--dry-run` prints the exact worst-case bound first, and
 every response is flushed to JSONL as it arrives, so a crash never discards calls
 already paid for.
 """
@@ -38,13 +38,8 @@ from typing import Dict, List, Tuple
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-# Hard ceiling. Not a default that can be raised by a flag -- the argument parser
-# clamps to it. 200 calls is what was authorised.
-MAX_CALLS = 200
-MAX_TOKENS = 400          # bounds cost; these templates answer well inside it
-PER_TEMPLATE = 40
-
-OUT = REPO / "data" / "templated" / "gpt-4o-mini.jsonl"
+# Hard ceilings live in SETS below, one per template set, and the argument parser
+# clamps to them -- `--limit` can only ever lower a cap, never raise it.
 
 # --- slot material -----------------------------------------------------------
 # Combinatorial rather than 200 hand-written strings: the point is variation WITHIN
@@ -111,48 +106,118 @@ TEMPLATES: List[Tuple[str, str, str]] = [
 ACTORS = ("ammar", "shubh", "shivam", "tanay")
 
 
-def build() -> List[dict]:
+# ── set v2 ───────────────────────────────────────────────────────────────────
+# A SECOND, independent set. Set v1 established that the method works; this one asks
+# whether that result was a property of the method or of five templates the author
+# happened to write. Different projects, different features, and eight of them rather
+# than five, so the finding does not rest on any single template.
+#
+# Two deliberate differences from v1:
+#   * max_tokens is 1500 rather than 400. In v1, 80 of 200 responses stopped at the cap,
+#     which is the truth for billing but a lower bound on natural length. Here the cap is
+#     set well above what these tasks need, so the observations are natural lengths and
+#     the accuracy statistics mean what they appear to mean.
+#   * 33 per template, not 40. The live refresh fits on the older 75% of rows, and a key
+#     needs MIN_ROWS_FOR_KEY=20 observations in the FIT half to be eligible. At 26/template
+#     the fit half holds 19.5 and every key would be silently skipped; at 33 it holds ~24.
+#     This is exactly the cold-start threshold, and getting it wrong would have looked
+#     like "the loop does not work" rather than "the loop was never given enough rows".
+TEMPLATES_V2: List[Tuple[str, str, str]] = [
+    ("api-prod", "ticket-classify",
+     "Classify this issue by severity (P0-P3) and component. Answer with just the "
+     "labels.\n\nThe {system} {fault}. Signature: {error}."),
+
+    ("api-prod", "sql-from-question",
+     "Write a SQL query answering: how many times did the {system} report "
+     "'{error}' per day over the last week? Table `events(ts, service, message)`."),
+
+    ("api-prod", "changelog-entry",
+     "Write a one-line user-facing changelog entry for a fix to {component} in the "
+     "{system}, which previously {fault}."),
+
+    ("internal-tools", "pr-description",
+     "Write a pull request description for a change to {component} in our {lang} "
+     "{system}. The bug was that it {fault}. Include what changed and how to test it."),
+
+    ("internal-tools", "test-plan",
+     "Write a test plan for a fix to {component} in the {system}, which {fault}. "
+     "Cover the happy path, the regression, and one edge case."),
+
+    ("internal-tools", "regex-explain",
+     "Explain what this pattern matches and when it would fail, in the context of "
+     "parsing logs from our {lang} {system}:\n\n"
+     r"^\[(?P<ts>[^\]]+)\]\s+(?P<lvl>WARN|ERROR)\s+(?P<msg>.*)$"),
+
+    ("batch-jobs", "api-doc-paragraph",
+     "Write the reference documentation paragraph for an endpoint that reports the "
+     "health of {component} in the {system}. Describe the response fields."),
+
+    ("batch-jobs", "postmortem-timeline",
+     "Draft the timeline section of a postmortem for an incident where the {system} "
+     "{fault}, caused by {component}, first seen as {error}. Include detection, "
+     "escalation, mitigation, and resolution entries."),
+]
+
+SETS = {
+    # name: (templates, per-template, hard cap, max_tokens, output filename)
+    "v1": (TEMPLATES, 40, 200, 400, "gpt-4o-mini.jsonl"),
+    "v2": (TEMPLATES_V2, 33, 264, 1500, "gpt-4o-mini-v2.jsonl"),
+}
+
+
+def build(templates, per_template: int, cap: int) -> List[dict]:
     plan = []
-    for project, feature, tmpl in TEMPLATES:
-        for i, s in enumerate(_slots(PER_TEMPLATE)):
+    for project, feature, tmpl in templates:
+        for i, s in enumerate(_slots(per_template)):
             plan.append({"project": project, "feature": feature,
                          "actor": ACTORS[i % len(ACTORS)],
                          "prompt": tmpl.format(**s)})
-    return plan[:MAX_CALLS]
+    return plan[:cap]
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default="gpt-4o-mini")
+    ap.add_argument("--set", choices=tuple(SETS), default="v1")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--yes", action="store_true")
-    ap.add_argument("--limit", type=int, default=MAX_CALLS,
-                    help=f"fewer calls than the {MAX_CALLS} cap; cannot exceed it")
+    ap.add_argument("--limit", type=int, default=10**9,
+                    help="fewer calls than this set's cap; can never exceed it")
+    ap.add_argument("--skip", type=int, default=0,
+                    help="resume: skip the first N planned calls, already in the file")
     args = ap.parse_args()
 
-    plan = build()[: min(args.limit, MAX_CALLS)]
-    assert len(plan) <= MAX_CALLS, "call cap breached"
+    templates, per_template, cap, max_tokens, filename = SETS[args.set]
+    out_path = REPO / "data" / "templated" / filename
+
+    plan = build(templates, per_template, cap)[: min(args.limit, cap)]
+    # Resume after an interrupted run. The plan is deterministic, so the first N entries
+    # are exactly the rows already in the file -- skipping them re-enters the sequence
+    # without re-paying for work already done.
+    plan = plan[args.skip:]
+    assert args.skip + len(plan) <= cap, "call cap breached"
 
     from predictor.engine import predict
 
     # Predict with no network, exactly as the proxy does at ESTIMATE. Same messages
     # shape that is sent upstream -- a bare string here undercounts input by 7.
     planned = [(p, predict([{"role": "user", "content": p["prompt"]}],
-                           args.model, max_tokens=MAX_TOKENS,
+                           args.model, max_tokens=max_tokens,
                            project=p["project"], feature=p["feature"], actor=p["actor"]))
                for p in plan]
 
     est_in = sum(r.input_tokens for _, r in planned)
-    worst = (est_in * 0.15 + len(plan) * MAX_TOKENS * 0.60) / 1_000_000
+    worst = (est_in * 0.15 + len(plan) * max_tokens * 0.60) / 1_000_000
     print(f"model       {args.model}")
-    print(f"calls       {len(plan)}  ({len(TEMPLATES)} templates x {PER_TEMPLATE}, "
-          f"cap {MAX_CALLS})")
-    print(f"max_tokens  {MAX_TOKENS}")
+    print(f"set         {args.set}")
+    print(f"calls       {len(plan)}  ({len(templates)} templates x {per_template}, "
+          f"cap {cap})")
+    print(f"max_tokens  {max_tokens}")
     print(f"input       {est_in:,} tokens (counted exactly)")
     print(f"WORST-CASE COST: ${worst:.4f}  (~{worst*100:.1f} cents)")
     print()
     if args.dry_run:
-        for project, feature, _ in TEMPLATES:
+        for project, feature, _ in templates:
             print(f"  {project}/{feature}")
         print("\ndry run — nothing sent")
         return 0
@@ -165,9 +230,12 @@ def main() -> int:
     load_dotenv(REPO / ".env")
     from openai import OpenAI
 
-    client = OpenAI()
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    fh = OUT.open("a", encoding="utf-8")
+    # A per-request timeout with bounded retries. Without one, the SDK default let a
+    # single stuck request hang for 22 minutes mid-run -- the whole probe sat idle on
+    # call 133 of 264. A slow call is not worth stalling a batch for.
+    client = OpenAI(timeout=90.0, max_retries=2)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = out_path.open("a", encoding="utf-8")
 
     spend, done = 0.0, 0
     by_feature: Dict[str, List[int]] = {}
@@ -177,7 +245,7 @@ def main() -> int:
                 resp = client.chat.completions.create(
                     model=args.model,
                     messages=[{"role": "user", "content": p["prompt"]}],
-                    max_tokens=MAX_TOKENS,
+                    max_tokens=max_tokens,
                 )
             except Exception as exc:
                 print(f"\n  ! stopped at {i-1}/{len(planned)}: "
@@ -227,7 +295,7 @@ def main() -> int:
         print(f"{feat:<20}{len(a):>4}{np.median(a):>12.0f}{spread:>18.1f}x")
 
     print(f"\nactual spend ${spend:.5f} ({spend*100:.2f} cents), bound was ${worst:.4f}")
-    print(f"wrote {done} observations -> {OUT}")
+    print(f"wrote {done} observations -> {out_path}")
     print("\nnext: python scripts/prequential.py --source templated")
     return 0
 
