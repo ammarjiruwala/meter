@@ -63,6 +63,24 @@ UPSTREAM_TIMEOUT_S = _float("UPSTREAM_TIMEOUT_S", 600.0)
 UPSTREAM_CONNECT_TIMEOUT_S = _float("UPSTREAM_CONNECT_TIMEOUT_S", 10.0)
 
 # ── Ledger ───────────────────────────────────────────────────────────────────
+# The ledger is Postgres. There is no local-file fallback on purpose: a silent fallback
+# means half the team develops against a database nobody else can see, and the predictor
+# quietly gets the cold-start numbers (65% median error against 31%) without anyone
+# noticing why. Missing DATABASE_URL is an error you can read, not a degraded mode.
+DATABASE_URL = _str("DATABASE_URL", "")
+
+# Pool bounds. Small: one proxy process makes a handful of queries per request, and
+# Supabase's free tier is not generous with connections.
+DB_POOL_MIN = _int("DB_POOL_MIN", 1)
+DB_POOL_MAX = _int("DB_POOL_MAX", 10)
+
+# Which Postgres schema the ledger lives in. `public` in normal use; the test suites set
+# a throwaway one per run so they cannot write into the tables the demo and the judges
+# are using — the isolation a tempfile gave them for free under SQLite.
+DB_SCHEMA = _str("DB_SCHEMA", "public")
+
+# Retained only so the dashboard's own docs and any leftover tooling can still find the
+# old file. Nothing in the request path reads it.
 DB_PATH = Path(_str("METER_DB_PATH", str(REPO_ROOT / "meter.db")))
 PRICING_VERSION = _str("PRICING_VERSION", "2026-08-01")
 PRICING_DIR = REPO_ROOT / "pricing"
