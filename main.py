@@ -2,7 +2,7 @@ import uuid
 
 from fastapi import FastAPI
 
-from prava_service import charge_mandate, list_mandates
+from prava_service import charge_mandate, list_mandates, report_charge
 
 app = FastAPI()
 
@@ -30,6 +30,12 @@ async def mandates():
 @app.post("/charge")
 async def charge(amount: float = 2.00):
     return await charge_mandate(amount, f"api_{uuid.uuid4().hex[:8]}")
+
+
+@app.post("/report")
+async def report(transaction_id: str, approved: bool = True):
+    """Settle a charge. `transactionId` comes from the /charge response."""
+    return await report_charge(transaction_id, approved)
 
 
 @app.post("/charge-refusal")

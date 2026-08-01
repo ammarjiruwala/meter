@@ -34,6 +34,31 @@ async def charge_mandate(amount_usd: float, reference: str):
     return r.json()
 
 
+async def report_charge(transaction_id: str, approved: bool = True,
+                        amount_paid: str | None = None):
+    """Settle a charge with the card network.
+
+    Without this the charge sits at `awaiting_result` forever — see
+    docs/prava/api-reference/mandate-report.md. Report declines too.
+    """
+    if not PRAVA_LIVE_MODE:
+        await asyncio.sleep(0.4)
+        return {"status": "completed", "simulated": True,
+                "transactionId": transaction_id}
+
+    body = {
+        "txn_status": "APPROVED" if approved else "DECLINED",
+        "txn_type": "PURCHASE",
+    }
+    if amount_paid is not None:
+        body["amount_paid"] = amount_paid
+
+    url = f"{PRAVA_API_BASE}/v1/mandates/{PRAVA_MANDATE_ID}/charges/{transaction_id}/report"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(url, headers=HEADERS, json=body)
+    return r.json()
+
+
 async def list_mandates():
     """Check remaining headroom. The Treasurer calls this before deciding to charge."""
     async with httpx.AsyncClient(timeout=30) as client:
