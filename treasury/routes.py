@@ -162,15 +162,28 @@ async def mandates():
     except Exception as exc:
         log.warning("Prava unreachable listing mandates: %s", exc)
         return _error(503, "Prava unreachable; cannot list mandates.", "prava_unreachable")
+
+    # `list_mandates` signals transport failure by RETURNING an error envelope rather
+    # than raising, so the try/except above does not cover it and `data["mandates"]`
+    # raised KeyError -> 500. Its own docstring warns callers to use `.get`. This is the
+    # endpoint the dashboard polls, so the failure mode was a stack trace on stage every
+    # time Prava hiccupped -- exactly the outcome the 503 envelope exists to prevent.
+    mandates = data.get("mandates")
+    if mandates is None:
+        log.warning("Prava returned no mandates list: %s", data)
+        return _error(503, "Prava unreachable; cannot list mandates.", "prava_unreachable")
+
     return [
         {
-            "id": m["id"],
-            "remaining": m["remaining"],
-            "approved": m["approvedAmount"],
-            "frequency": m["recurringFrequency"],
-            "status": m["status"],
+            # Prava's payload shape is not guaranteed field-for-field either; a missing
+            # optional must not take the whole endpoint down.
+            "id": m.get("id"),
+            "remaining": m.get("remaining"),
+            "approved": m.get("approvedAmount"),
+            "frequency": m.get("recurringFrequency"),
+            "status": m.get("status"),
         }
-        for m in data["mandates"]
+        for m in mandates
     ]
 
 

@@ -449,6 +449,46 @@ def test_failure_handling() -> None:
         topup.charge_mandate, topup.report_charge = real_charge, real_report
 
 
+def test_mandates_route_degrades() -> None:
+    """GET /mandates must never 500, however Prava misbehaves.
+
+    `prava.list_mandates` reports transport failure by RETURNING an error envelope with
+    no `mandates` key rather than raising, so a try/except around the call does not
+    cover it. The route indexed `data["mandates"]` directly and answered a KeyError ->
+    500. The dashboard polls this endpoint, so the live failure mode was a stack trace
+    on stage every time Prava hiccupped.
+    """
+    import asyncio as _asyncio
+
+    from treasury import routes as _routes
+
+    print("\nmandates route degradation")
+
+    async def drive(payload):
+        real = _routes.list_mandates
+        _routes.list_mandates = lambda: _asyncio.sleep(0, result=payload)
+        try:
+            return await _routes.mandates()
+        finally:
+            _routes.list_mandates = real
+
+    # 1. Error envelope, no `mandates` key -- the regression.
+    out = _asyncio.run(drive({"error": {"message": "upstream exploded"}}))
+    status = getattr(out, "status_code", 200)
+    check("error envelope yields 503, not a crash", status == 503, f"got {status}")
+
+    # 2. Healthy payload still maps correctly.
+    out = _asyncio.run(drive({"mandates": [
+        {"id": "m1", "remaining": 10, "approvedAmount": 50,
+         "recurringFrequency": "monthly", "status": "active"}]}))
+    check("healthy payload still maps", isinstance(out, list) and out[0]["id"] == "m1", str(out))
+
+    # 3. A mandate missing an optional field must not take the endpoint down.
+    out = _asyncio.run(drive({"mandates": [{"id": "m2"}]}))
+    check("partial mandate degrades to None, not KeyError",
+          isinstance(out, list) and out[0]["remaining"] is None, str(out))
+
+
 def test_loop_resilience() -> None:
     """Phase 4: a loop that dies on one bad iteration stops silently."""
     print("\nloop resilience")
@@ -905,6 +945,7 @@ def main() -> int:
             test_treasurer_decision,
             test_treasurer_tick,
             test_failure_handling,
+            test_mandates_route_degrades,
             test_loop_resilience,
             test_alert_noise,
             test_credential_preflight,
