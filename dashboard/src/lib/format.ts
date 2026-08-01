@@ -35,6 +35,28 @@ const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
 };
 
+// A balance is only meaningful with its age: "$4.00" is reassuring and "$4.00, 3 hours
+// ago" is alarming, and the Treasurer's whole job is reacting to the second one. The
+// ledger writes `updated_at` as ISO-8601 UTC.
+export function relativeTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (seconds < 45) return "just now";
+  const units: [limit: number, per: number, label: string][] = [
+    [3600, 60, "min"],
+    [86400, 3600, "hr"],
+    [Infinity, 86400, "day"],
+  ];
+  for (const [limit, per, label] of units) {
+    if (seconds < limit) {
+      const n = Math.round(seconds / per);
+      return `${n} ${label}${n === 1 ? "" : "s"} ago`;
+    }
+  }
+  return "";
+}
+
 export function providerLabel(provider: string): string {
   return (
     PROVIDER_LABELS[provider.toLowerCase()] ??
