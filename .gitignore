@@ -18,3 +18,8 @@ meter.db-shm
 *.db
 *.db-wal
 *.db-shm
+
+# WildChat splits — regenerate with scripts/fetch_wildchat.py. Not committed:
+# ~2MB of third-party conversation text, and the test split must stay untouched
+# rather than travel around in diffs.
+data/wildchat/

@@ -125,7 +125,17 @@ CREATE TABLE IF NOT EXISTS requests (
     predicted_output_tokens INTEGER,
     predicted_cost_usd      REAL,
     bucket                  TEXT,
-    prediction_method       TEXT
+    prediction_method       TEXT,
+    -- Raw heuristic output, before buffer/history/clamp. The learner fits its
+    -- correction against THIS, never against predicted_output_tokens: a factor
+    -- derived from an already-corrected number divides by the previous factor on
+    -- every refresh and oscillates rather than converging.
+    predicted_scope_tokens  INTEGER,
+    -- The ceiling. Separate from the prediction because they answer different
+    -- questions: what will this probably cost, versus what can it not exceed.
+    bound_output_tokens     INTEGER,
+    bound_cost_usd          REAL,
+    history_factor          REAL
 );
 
 -- (project_id, ts) backs the rolling-window breaker check that runs on every single
@@ -192,6 +202,16 @@ _ADDED_COLUMNS = (
     ("requests", "predicted_cost_usd", "REAL"),
     ("requests", "bucket", "TEXT"),
     ("requests", "prediction_method", "TEXT"),
+    # The raw heuristic output, BEFORE the safety buffer, the history factor and the
+    # max_tokens clamp. Without it the learner cannot compute a stable correction:
+    # deriving the factor from the already-corrected prediction divides by the
+    # previous factor each refresh, which oscillates instead of converging.
+    ("requests", "predicted_scope_tokens", "INTEGER"),
+    # What the call could not exceed. Separate from the prediction on purpose --
+    # the ceiling check uses this, so its safety is structural rather than statistical.
+    ("requests", "bound_output_tokens", "INTEGER"),
+    ("requests", "bound_cost_usd", "REAL"),
+    ("requests", "history_factor", "REAL"),
 )
 
 
@@ -289,6 +309,7 @@ _REQUEST_COLUMNS = (
     "pricing_version", "cost_usd", "latency_ms", "ttft_ms", "overhead_ms",
     "status", "is_stream", "estimated", "prompt_hash", "reservation_id",
     "predicted_output_tokens", "predicted_cost_usd", "bucket", "prediction_method",
+    "predicted_scope_tokens", "bound_output_tokens", "bound_cost_usd", "history_factor",
 )
 
 

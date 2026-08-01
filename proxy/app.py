@@ -714,6 +714,15 @@ def _row(
         "predicted_cost_usd": getattr(prediction, "predicted_cost_usd", None),
         "bucket": getattr(prediction, "bucket", None),
         "prediction_method": getattr(prediction, "method", None),
+        # The raw heuristic, before buffer/history/clamp. This is the fixed baseline
+        # the learner fits against; fitting against predicted_output_tokens instead
+        # divides by the previous correction each refresh and oscillates.
+        "predicted_scope_tokens": getattr(prediction, "scope_tokens", None),
+        # The ceiling, stored separately because it answers a different question and
+        # is what the budget check should consult.
+        "bound_output_tokens": getattr(prediction, "bound_output_tokens", None),
+        "bound_cost_usd": getattr(prediction, "bound_cost_usd", None),
+        "history_factor": getattr(prediction, "history_factor", None),
     }
 
 

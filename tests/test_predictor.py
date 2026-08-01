@@ -252,18 +252,49 @@ def test_buffer_and_history() -> None:
     fitted = p.load_buffers({"code": [(100.0, 100 + i * 10) for i in range(30)]})
     check("fits with enough rows", "code" in fitted)
 
-    # Step 5 -- shrinkage. A factor from 2 observations must barely move; one from
-    # 200 should apply nearly in full.
-    weak = p.load_history({("proj",): (3.0, 2)})[("proj",)]
-    strong = p.load_history({("proj",): (3.0, 200)})[("proj",)]
-    check("small n is shrunk toward 1.0", weak < 1.3, f"got {weak:.2f}")
-    check("large n applies nearly in full", strong > 2.7, f"got {strong:.2f}")
+    # Step 5 -- a key below MIN_ROWS_FOR_KEY is dropped entirely rather than applied
+    # weakly, so the ladder falls through to a coarser key that actually has support.
+    check("thin key is skipped, not shrunk", p.load_history({("proj",): (3.0, 2)}) == {})
+    barely = p.load_history({("proj",): (3.0, 20)})[("proj",)]
+    strong = p.load_history({("proj",): (3.0, 500)})[("proj",)]
+    check("shrinkage still applies above the threshold", barely < strong, f"{barely:.2f} vs {strong:.2f}")
+    check("factor is clamped at 3.0", p.load_history({("p",): (99.0, 500)})[("p",)] == 3.0)
+    check("factor is clamped at 0.5", p.load_history({("p",): (0.01, 500)})[("p",)] == 0.5)
 
-    # Most specific key wins.
-    p.load_history({("proj", "feat", "ammar"): (2.0, 500), ("proj",): (0.5, 500)})
-    specific = p.predict("hi", MODEL, project="proj", feature="feat", actor="ammar")
-    general = p.predict("hi", MODEL, project="proj", feature="other", actor="x")
-    check("most specific key wins", specific.history_factor > general.history_factor)
+    # The ladder: attribution rungs outrank the generic (bucket, model) rung, because
+    # one team's prompting style predicts their next request better than a pattern
+    # averaged over everyone's traffic -- even when the generic rung has more rows.
+    p.load_history({("proj", "feat", "ammar"): (2.5, 200),
+                    ("proj",): (0.7, 300),
+                    ("code", MODEL): (1.8, 100)})
+    a = p.predict("Write a Python function.", MODEL, project="proj", feature="feat", actor="ammar")
+    b = p.predict("Write a Python function.", MODEL, project="proj", feature="zzz", actor="q")
+    c = p.predict("Write a Python function.", MODEL, project="unknown", feature="x", actor="y")
+    check("most specific rung wins", a.history_factor > 2.0, f"{a.history_factor:.2f}")
+    check("(project,) outranks (bucket, model)", b.history_factor < 1.0, f"{b.history_factor:.2f}")
+    check("unknown project falls to (bucket, model)", 1.0 < c.history_factor < 2.0,
+          f"{c.history_factor:.2f}")
+
+    # Step 6 -- the bound. max_tokens is exact; otherwise a learned per-bucket p95
+    # beats the model maximum, which would reserve ~$0.04 of gpt-4o output on every
+    # request and exhaust a small project's ceiling in a couple of dozen calls.
+    q = Predictor()
+    check("bound defaults to the model maximum", q.predict("hi", MODEL).bound_output_tokens == 4096)
+    q.load_bounds({q.predict("hi", MODEL).bucket: [200] * 25})
+    check("learned bound is tighter than the model maximum",
+          q.predict("hi", MODEL).bound_output_tokens < 4096)
+    check("too few rows keeps the model maximum", q.load_bounds({"code": [200] * 5}) == {})
+
+    # scope_tokens is the fixed baseline the learner fits against, so it must be the
+    # RAW heuristic -- unmoved by the buffer, the history factor, or the clamp.
+    r = Predictor(buffer=1.0)
+    base = r.predict("Explain how DNS works.", MODEL).scope_tokens
+    r.load_history({("p",): (2.0, 500)})
+    with_hist = r.predict("Explain how DNS works.", MODEL, project="p")
+    check("scope is unchanged by the history factor", with_hist.scope_tokens == base)
+    check("but the prediction did move", with_hist.predicted_output_tokens != base)
+    capped = r.predict("Explain how DNS works.", MODEL, max_tokens=5)
+    check("scope is unchanged by the clamp", capped.scope_tokens == base)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
