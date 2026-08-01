@@ -397,7 +397,8 @@ def test_priors() -> None:
 def test_proxy_integration() -> None:
     """The ESTIMATE seam in proxy/app.py, which must never fail a request."""
     print("\nproxy integration")
-    import os, tempfile
+    import os
+    import tempfile
     os.environ.setdefault("METER_DB_PATH", str(Path(tempfile.mkdtemp()) / "t.db"))
     from proxy.app import _predict
 
@@ -440,7 +441,9 @@ def test_ledger_migration() -> None:
     it is the priced history ARCHITECTURE.md §9 calls the part that does not port.
     """
     print("\nledger migration")
-    import os, sqlite3, tempfile
+    import os
+    import sqlite3
+    import tempfile
 
     path = Path(tempfile.mkdtemp()) / "old.db"
     conn = sqlite3.connect(str(path))

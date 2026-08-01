@@ -99,7 +99,7 @@ has been run.**
 ## Tests
 
 ```bash
-python tests/test_predictor.py      # 43 checks, plain asserts, no framework
+python tests/test_predictor.py      # 64 checks, plain asserts, no framework
 ```
 
 Same convention as `tests/test_proxy.py`. They pin determinism, the `max_tokens` hard cap,

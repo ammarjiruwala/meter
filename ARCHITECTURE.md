@@ -206,12 +206,23 @@ very often with jittered temperature; including those fields would make every re
 and break retry-loop detection in the exact scenario the feature exists to catch.
 
 **Budget source of truth: `meter.yaml` wins.** `projects.ceiling_usd_day` and the per-feature
-ceilings are a *read cache*, not the record. A loader parses `meter.yaml` at boot and upserts into
+ceilings are a *read cache*, not the record. A loader parses `meter.yaml` at boot and rebuilds
 these tables so the request path gets an indexed local read instead of a file parse; the file is
-what changes by pull request, and §9 explains why that placement is the point. Two rules follow:
-the loader must be idempotent, and it must reject a config whose feature ceilings sum to more than
-their project's ceiling — catching that in review is the whole of budget-as-code, and it is a
-five-line check.
+what changes by pull request, and §9 explains why that placement is the point. Three rules follow:
+
+- **The loader replaces, it does not upsert.** A ceiling deleted from `meter.yaml` must stop being
+  enforced. Upserting would leave the old row enforcing a limit that appears nowhere in the repo —
+  the exact failure budget-as-code exists to prevent, and invisible precisely because the file no
+  longer mentions it.
+- **Reject a config where any single feature ceiling exceeds its project's.** A child budget above
+  its parent cannot mean what it says — the project ceiling binds first — so it is always a
+  mistake, and catching it in review is the whole of budget-as-code.
+- **Feature ceilings summing past their project's total is legal; warn, do not reject.** "No
+  feature over \$200/day, project under \$800/day" is a coherent policy with six features. The two
+  ceilings are checked independently at authorize time, so over-allocated features still cannot
+  breach the project total. Rejecting here would answer an over-restrictive config by enforcing
+  *nothing at all* for that project, which inverts the failure mode — an operator who fat-fingers
+  one feature's ceiling would lose the project ceiling that was about to catch it.
 
 **The interesting join** is `requests × annotations` on `trace_id`. That is dollars per resolved
 ticket, per closed lead, per generated report. Cost-per-token is a commodity metric; cost-per-outcome

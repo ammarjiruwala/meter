@@ -49,10 +49,8 @@ PRAVA_API_BASE = _str("PRAVA_API_BASE", "https://sandbox.api.prava.space").rstri
 PRAVA_API_KEY = os.getenv("PRAVA_API_KEY", "")
 PRAVA_MANDATE_ID = _str("PRAVA_MANDATE_ID", "")
 
-# NOTE: `prava.py` reads PRAVA_LIVE_MODE with an exact `== "True"` comparison, which is
-# stricter than every other boolean in the codebase. Parsed leniently here so the two
-# agree on `true`/`1`/`yes`; the strict check in prava.py is the one that currently
-# governs, and converging them is a small outstanding cleanup.
+# Parsed leniently, like every other boolean here, so `true`/`1`/`yes`/`on` all work.
+# `prava.py` reads this module rather than the environment, so there is one parse.
 PRAVA_LIVE_MODE = _bool("PRAVA_LIVE_MODE", False)
 
 # ── Treasurer rails ──────────────────────────────────────────────────────────

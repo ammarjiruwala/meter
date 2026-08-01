@@ -1,0 +1,20 @@
+# The whole backend — proxy, treasury, mock provider — is one process, so one
+# service. The dashboard is a separate dev process reading meter.db read-only;
+# run it on the host against the volume (or skip it; it is not required).
+services:
+  meter:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    volumes:
+      # Named volume for the ledger: survives `docker compose down`.
+      - meter-data:/data
+      # Budget-as-code and pricing stay on the host so they change by PR/rebuild,
+      # not by exec'ing into the container.
+      - ./meter.yaml:/app/meter.yaml:ro
+      - ./pricing:/app/pricing:ro
+    restart: unless-stopped
+
+volumes:
+  meter-data:

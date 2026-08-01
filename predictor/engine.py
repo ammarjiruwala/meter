@@ -38,7 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple, Union
 

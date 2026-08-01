@@ -28,8 +28,25 @@ log = logging.getLogger("meter.treasury")
 _CRED = "credentials"
 
 
-def _refuse(reason: str, **extra: Any) -> dict[str, Any]:
+def _refuse(
+    reason: str, *, wallet_id: str | None = None, amount_usd: float = 0.0, **extra: Any
+) -> dict[str, Any]:
     log.warning("top-up refused: %s %s", reason, extra or "")
+
+    # This module's contract says every exit leaves a treasury_events row. Refusals
+    # that fired before `open_event` (rails checks) would otherwise vanish from the
+    # Agent Activity panel and the audit trail, so record one here. Refusals that
+    # already have an event (charge_declined, no_credentials, provider_declined) pass
+    # their event_id and skip this.
+    if wallet_id is not None and "event_id" not in extra:
+        try:
+            event = db.open_event(wallet_id, amount_usd)
+            db.settle_event(event["id"], "refused", error=reason)
+            extra = {**extra, "event_id": event["id"]}
+        except Exception:
+            # Recording the refusal is a convenience, never a second failure mode.
+            log.exception("failed to record refusal event for %s", wallet_id)
+
     return {"ok": False, "reason": reason, **extra}
 
 
@@ -48,21 +65,39 @@ async def execute_topup(
     if not mandate:
         return _refuse(
             "no_chargeable_mandate",
+            wallet_id=wallet_id,
+            amount_usd=amount_usd,
             hint="run POST /mandates/sync; one_time mandates are excluded on purpose",
         )
 
     if amount_usd > mandate["max_per_txn_usd"]:
-        return _refuse("over_per_txn_cap", cap=mandate["max_per_txn_usd"],
-                       requested=amount_usd)
+        return _refuse(
+            "over_per_txn_cap",
+            wallet_id=wallet_id,
+            amount_usd=amount_usd,
+            cap=mandate["max_per_txn_usd"],
+            requested=amount_usd,
+        )
 
     spent = db.settled_total_since(wallet_id, 24 * 3600)
     if spent + amount_usd > mandate["max_daily_usd"]:
-        return _refuse("over_daily_cap", cap=mandate["max_daily_usd"],
-                       already_spent_24h=spent, requested=amount_usd)
+        return _refuse(
+            "over_daily_cap",
+            wallet_id=wallet_id,
+            amount_usd=amount_usd,
+            cap=mandate["max_daily_usd"],
+            already_spent_24h=spent,
+            requested=amount_usd,
+        )
 
     since = db.seconds_since_last_attempt(wallet_id)
     if since is not None and since < mandate["cooldown_s"]:
-        return _refuse("cooldown", wait_s=round(mandate["cooldown_s"] - since, 1))
+        return _refuse(
+            "cooldown",
+            wallet_id=wallet_id,
+            amount_usd=amount_usd,
+            wait_s=round(mandate["cooldown_s"] - since, 1),
+        )
 
     # ── Write-ahead ──────────────────────────────────────────────────────────
     # Resume an unfinished attempt rather than opening a second one. A new row would mint
@@ -71,26 +106,33 @@ async def execute_topup(
     event = db.pending_event(wallet_id)
     if event:
         log.info("resuming pending treasury event %s", event["idempotency_key"])
-        event = {"id": event["id"], "idempotency_key": event["idempotency_key"],
-                 "amount_usd": event["amount_usd"]}
+        event = {
+            "id": event["id"],
+            "idempotency_key": event["idempotency_key"],
+            "amount_usd": event["amount_usd"],
+        }
         amount_usd = event["amount_usd"]
     else:
-        event = db.open_event(wallet_id, amount_usd, mandate_id=mandate["id"],
-                              decision_inputs=decision_inputs)
+        event = db.open_event(
+            wallet_id, amount_usd, mandate_id=mandate["id"], decision_inputs=decision_inputs
+        )
 
     if config.TREASURER_DRY_RUN:
         db.settle_event(event["id"], "dry_run")
-        return {"ok": False, "reason": "dry_run", "event_id": event["id"],
-                "would_have_charged": amount_usd,
-                "hint": "set TREASURER_DRY_RUN=false to move real money"}
+        return {
+            "ok": False,
+            "reason": "dry_run",
+            "event_id": event["id"],
+            "would_have_charged": amount_usd,
+            "hint": "set TREASURER_DRY_RUN=false to move real money",
+        }
 
     # ── Charge the mandate ───────────────────────────────────────────────────
     # The mandate id comes from the row we selected, never from the environment. The
     # table is the only place that knows which mandates are safe to charge repeatedly,
     # so selecting one and charging another would silently drain the wrong authorization.
     prava_mandate_id = mandate["prava_mandate_id"]
-    charge = await charge_mandate(amount_usd, event["idempotency_key"],
-                                  mandate_id=prava_mandate_id)
+    charge = await charge_mandate(amount_usd, event["idempotency_key"], mandate_id=prava_mandate_id)
     txn_id = charge.get("transactionId")
 
     if charge.get("status") == "failed" or charge.get("errorMessage"):
@@ -103,43 +145,63 @@ async def execute_topup(
         # PRAVA_LIVE_MODE is off: no real credentials come back. Synthesise a test card so
         # the rest of the path still runs end to end — the point of simulated mode is to
         # rehearse the whole sequence when the sandbox or the venue wifi is unavailable.
-        credentials = {"token": "4111111111111111", "dynamicCvv": "123",
-                       "expiryMonth": "12", "expiryYear": "2030"}
+        credentials = {
+            "token": "4111111111111111",
+            "dynamicCvv": "123",
+            "expiryMonth": "12",
+            "expiryYear": "2030",
+        }
 
     if not credentials.get("token"):
-        db.settle_event(event["id"], "failed", prava_txn_id=txn_id,
-                        error="charge returned no credentials")
+        db.settle_event(
+            event["id"], "failed", prava_txn_id=txn_id, error="charge returned no credentials"
+        )
         return _refuse("no_credentials", event_id=event["id"], charge=charge)
 
     # ── Pay the provider ─────────────────────────────────────────────────────
-    billing = process_payment(BillingRequest(
-        token=credentials["token"],
-        dynamic_cvv=credentials.get("dynamicCvv", ""),
-        expiry_month=credentials.get("expiryMonth"),
-        expiry_year=credentials.get("expiryYear"),
-        amount_usd=amount_usd,
-        project_id=project_id,
-        provider=provider,
-    ))
+    billing = process_payment(
+        BillingRequest(
+            token=credentials["token"],
+            dynamic_cvv=credentials.get("dynamicCvv", ""),
+            expiry_month=credentials.get("expiryMonth"),
+            expiry_year=credentials.get("expiryYear"),
+            amount_usd=amount_usd,
+            project_id=project_id,
+            provider=provider,
+        )
+    )
 
     # ── Settle with the card network ─────────────────────────────────────────
     # Reported either way. A decline that is never reported leaves the charge stuck at
     # `awaiting_result` on Prava's side just as surely as an unreported approval does.
     settlement = None
     if txn_id:
-        settlement = await report_charge(txn_id, approved=billing.accepted,
-                                         amount_paid=f"{amount_usd:.2f}",
-                                         mandate_id=prava_mandate_id)
+        settlement = await report_charge(
+            txn_id,
+            approved=billing.accepted,
+            amount_paid=f"{amount_usd:.2f}",
+            mandate_id=prava_mandate_id,
+        )
 
     if not billing.accepted:
-        db.settle_event(event["id"], "failed", prava_txn_id=txn_id,
-                        error=f"provider declined: {billing.decline_reason}")
-        return _refuse("provider_declined", reason_code=billing.decline_reason,
-                       event_id=event["id"])
+        db.settle_event(
+            event["id"],
+            "failed",
+            prava_txn_id=txn_id,
+            error=f"provider declined: {billing.decline_reason}",
+        )
+        return _refuse(
+            "provider_declined", reason_code=billing.decline_reason, event_id=event["id"]
+        )
 
     db.settle_event(event["id"], "settled", prava_txn_id=txn_id)
-    log.info("topped up %s %s by $%.2f -> $%.2f", project_id, provider, amount_usd,
-             billing.balance_usd or 0.0)
+    log.info(
+        "topped up %s %s by $%.2f -> $%.2f",
+        project_id,
+        provider,
+        amount_usd,
+        billing.balance_usd or 0.0,
+    )
 
     return {
         "ok": True,

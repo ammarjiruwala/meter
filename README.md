@@ -32,7 +32,8 @@ Meter answers three questions and then acts on the answers:
 
 ```bash
 git clone <repo> && cd meter
-cp .env.example .env        # add provider keys + PRAVA_* credentials
+cp .env.example .env                 # add provider keys + PRAVA_* credentials
+cp meter.yaml.example meter.yaml      # budget ceilings (compose mounts this file)
 docker compose up
 ```
 
@@ -125,8 +126,8 @@ cooldown and can always be reset manually.
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Postgres — the ledger |
-| `REDIS_URL` | Redis — wallet reservations, breaker state |
+| `DATABASE_URL` | Postgres — the ledger. **Not read yet** (the proxy uses SQLite for the demo; the port is a schema swap) |
+| `REDIS_URL` | Redis — wallet reservations, breaker state. **Not read yet** (needed at proxy replica #2 only) |
 | `PRAVA_API_KEY` / `PRAVA_MANDATE_ID` | Payment rail credentials |
 | `TREASURER_DRY_RUN` | Log top-up decisions without transacting. Default `true`. |
 | `TREASURER_MAX_TOPUP_USD` | Per-transaction ceiling |

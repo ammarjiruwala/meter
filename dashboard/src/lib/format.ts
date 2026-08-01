@@ -17,13 +17,88 @@ export function formatUsd(n: number | null | undefined): string {
   // "$0.000000", which reads as "free" when it isn't.
   if (abs < LEDGER_EPSILON) return "<$0.000001";
 
-  const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6;
+  return usdAt(n, decimalsFor(abs));
+}
+
+function decimalsFor(abs: number): number {
+  return abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6;
+}
+
+function usdAt(n: number, decimals: number): string {
   return n.toLocaleString("en-US", {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
+}
+
+/**
+ * A formatter shared across a column, so every cell prints the same number of
+ * decimals and the points line up.
+ *
+ * Per-value precision is right for a lone figure and wrong in a table: a column
+ * holding $0.005975 and $0.0128 renders them at six and four decimals, the
+ * decimal points stop aligning, and the shorter number reads as the smaller one
+ * when it is twice the size. Deciding once for the whole column fixes that.
+ *
+ * Pass every value that shares an axis of comparison — in Live Logs that means
+ * predicted and actual together, since the entire point is reading one against
+ * the other.
+ */
+export function usdColumnFormatter(
+  values: (number | null | undefined)[],
+): (n: number | null | undefined) => string {
+  // Precision is set by the *smallest* value in the column, not the largest: the
+  // column has to be able to show the finest figure in it without rounding to
+  // nothing, and everything larger then pads to match. So a column holding both
+  // $1.50 and $0.0084 prints $1.500000 and $0.008400 — wide, but aligned and
+  // truthful, which is the trade an accounting column makes too.
+  let needed = 0;
+  for (const v of values) {
+    if (v === null || v === undefined) continue;
+    const abs = Math.abs(v);
+    // Zero carries no magnitude information — letting it vote would flatten a
+    // column of sub-cent values to two decimals.
+    if (abs === 0 || abs < LEDGER_EPSILON) continue;
+    needed = Math.max(needed, decimalsFor(abs));
+  }
+  const decimals = needed || 2;
+
+  return (n) => {
+    if (n === null || n === undefined) return "—";
+    if (n === 0) return usdAt(0, decimals);
+    if (Math.abs(n) < LEDGER_EPSILON) return "<$0.000001";
+    return usdAt(n, decimals);
+  };
+}
+
+/**
+ * A formatter for configured limits rather than measured amounts.
+ *
+ * `usdColumnFormatter` scales precision by magnitude, which is right for spend: a figure
+ * below a cent needs six decimals or it reads as zero. A ceiling is not a measurement —
+ * it is a number someone typed into meter.yaml — so the same rule renders a $0.50 cap as
+ * "$0.5000" and drags every sibling to "$10.0000" with it. Trailing zeros on a limit are
+ * noise that makes it look computed.
+ *
+ * So: the fewest decimals (never under 2) that still represent every value exactly.
+ */
+export function usdCeilingFormatter(
+  values: (number | null | undefined)[],
+): (n: number | null | undefined) => string {
+  let decimals = 2;
+  for (const v of values) {
+    if (v === null || v === undefined) continue;
+    let d = 2;
+    // Grow only until the rounded value is indistinguishable from the real one at
+    // ledger resolution — a half-epsilon tolerance keeps binary float noise
+    // (0.1 + 0.2) from demanding six decimals it does not need.
+    while (d < 6 && Math.abs(Number(v.toFixed(d)) - v) > LEDGER_EPSILON / 2) d++;
+    decimals = Math.max(decimals, d);
+  }
+  return (n) =>
+    n === null || n === undefined ? "—" : usdAt(n, decimals);
 }
 
 // Providers are stored lowercase in the ledger (`openai`, `anthropic`). CSS
@@ -38,23 +113,21 @@ const PROVIDER_LABELS: Record<string, string> = {
 // A balance is only meaningful with its age: "$4.00" is reassuring and "$4.00, 3 hours
 // ago" is alarming, and the Treasurer's whole job is reacting to the second one. The
 // ledger writes `updated_at` as ISO-8601 UTC.
+const RELATIVE = new Intl.RelativeTimeFormat("en-US", {
+  numeric: "auto",
+  style: "short",
+});
+
 export function relativeTime(iso: string): string {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return "";
   const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
   if (seconds < 45) return "just now";
-  const units: [limit: number, per: number, label: string][] = [
-    [3600, 60, "min"],
-    [86400, 3600, "hr"],
-    [Infinity, 86400, "day"],
-  ];
-  for (const [limit, per, label] of units) {
-    if (seconds < limit) {
-      const n = Math.round(seconds / per);
-      return `${n} ${label}${n === 1 ? "" : "s"} ago`;
-    }
-  }
-  return "";
+  // Intl handles the pluralisation and the "1 min ago" / "2 min. ago" wording; the
+  // table only needs to pick which unit reads best at this magnitude.
+  const [per, unit]: [number, Intl.RelativeTimeFormatUnit] =
+    seconds < 3600 ? [60, "minute"] : seconds < 86400 ? [3600, "hour"] : [86400, "day"];
+  return RELATIVE.format(-Math.round(seconds / per), unit);
 }
 
 export function providerLabel(provider: string): string {

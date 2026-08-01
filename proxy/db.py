@@ -6,15 +6,22 @@ that cannot start without a database container is a proxy nobody on the team can
 on. Every column name below is copied verbatim from ARCHITECTURE.md §4, so migrating to
 Postgres is a schema swap rather than a rewrite of every call site.
 
-Three deliberate divergences from the target schema, each flagged where it occurs:
+Deliberate divergences from the target schema, each flagged where it occurs:
 
-* ``reservation_id`` is written as NULL. Reservations are Redis Lua (ARCHITECTURE.md §2)
-  and Redis is not in the Phase 1 dependency set. The column exists so the port does not
-  have to add it later.
-* ``overhead_ms`` is an addition, not a divergence — see the note on the column.
+* ``overhead_ms`` is an addition, not a divergence — see the note on the column. So are
+  the four prediction columns, for the same reason: ARCHITECTURE.md §2 step 3 requires an
+  estimate but §4 gives it nowhere to land, and predicted-vs-actual variance is
+  unrecoverable after the fact.
+* ``annotations`` carries a ``project_id`` that ARCHITECTURE.md §4 does not list. Without
+  it any key could annotate any other project's traces, since a trace id is a
+  caller-supplied string.
 * Timestamps are ISO-8601 UTC strings rather than ``timestamptz``. They compare
   lexicographically in the correct order, which is what makes the rolling-window queries
   below work without a date function, and they port to ``timestamptz`` by a cast.
+
+``reservation_id`` is no longer NULL: reservations are now held in-process
+(``proxy/budget.py``) rather than in the Redis that ARCHITECTURE.md §2 specifies, per the
+decision recorded in PROPOSALS.md A5.
 
 Concurrency: one process-wide connection in WAL mode behind a lock. Callers from async
 code must go through ``asyncio.to_thread`` so a slow disk write never blocks the event
@@ -83,6 +90,19 @@ CREATE TABLE IF NOT EXISTS meter_keys (
     revoked_at  TEXT
 );
 
+-- Per-feature daily ceilings, the `features:` block of meter.yaml. Not in
+-- ARCHITECTURE.md §4, which gives ceilings only at project level — but README.md's own
+-- meter.yaml example sets them per feature, and a project-only ceiling cannot express
+-- "chat may spend 500 of the project's 800". Budgets are declared in meter.yaml and
+-- upserted here at boot, so the file stays the source of truth and the request path
+-- still gets to read a table (PROPOSALS.md A6).
+CREATE TABLE IF NOT EXISTS feature_budgets (
+    project_id       TEXT NOT NULL,
+    feature          TEXT NOT NULL,
+    ceiling_usd_day  REAL,
+    PRIMARY KEY (project_id, feature)
+);
+
 -- One priced row per proxied call. This table is the moat described in
 -- ARCHITECTURE.md §9: it is the only attributed, priced history of a company's
 -- inference spend, and it does not port to a competitor.
@@ -118,9 +138,10 @@ CREATE TABLE IF NOT EXISTS requests (
     reservation_id      TEXT,
     -- What the predictor said BEFORE the call, alongside what actually happened.
     -- Storing both in the same row is what makes predictor accuracy a query rather
-    -- than a separate pipeline, and it is what feeds the learner (predictor/learner.py).
-    -- All nullable: a prediction is best-effort and must never be able to fail a
-    -- request. NULL means "not predicted" (unsupported model, or predictor errored),
+    -- than a separate pipeline: it feeds the learner (predictor/learner.py) and is the
+    -- number that says whether the safety margin is set right. All nullable: a
+    -- prediction is best-effort and must never be able to fail a request. NULL means
+    -- "not predicted" (unsupported model — every Claude model — or predictor errored),
     -- which is different from and must not be confused with a prediction of zero.
     predicted_output_tokens INTEGER,
     predicted_cost_usd      REAL,
@@ -137,6 +158,22 @@ CREATE TABLE IF NOT EXISTS requests (
     bound_cost_usd          REAL,
     history_factor          REAL
 );
+
+-- Attribution rung 3 (README.md), the requests × annotations join of ARCHITECTURE.md §4.
+-- Outcomes attach to a trace, never to a request: one resolved ticket is a dozen calls,
+-- and dividing its value across them is what turns cost-per-token into cost-per-outcome.
+CREATE TABLE IF NOT EXISTS annotations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    -- Not in ARCHITECTURE.md §4. A trace id is a caller-supplied string, so without
+    -- scoping, any key could annotate — or read the value of — another project's traces.
+    project_id  TEXT NOT NULL,
+    trace_id    TEXT NOT NULL,
+    outcome     TEXT,
+    value_usd   REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_annotations_trace ON annotations(trace_id);
 
 -- (project_id, ts) backs the rolling-window breaker check that runs on every single
 -- request, so it is the one index that is in the hot path.
@@ -227,7 +264,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if not existing:
             continue  # table absent entirely; SCHEMA owns creating it
         if column not in existing:
+            # No DEFAULT and no NOT NULL: SQLite backfills NULL, which is the honest
+            # value for "this row predates prediction" and needs no table rewrite.
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            log.info("ledger migrated: added %s.%s", table, column)
 
     # bucket backs the learner's per-bucket refit and the accuracy-by-bucket report.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_bucket ON requests(bucket)")
@@ -378,6 +418,109 @@ def project_window_spend(project_id: str, window_s: float) -> float:
             (project_id, iso_seconds_ago(window_s)),
         ).fetchone()
     return float(row["spend"])
+
+
+# ── Budgets ──────────────────────────────────────────────────────────────────
+
+
+def replace_budgets(budgets: dict[str, tuple[float | None, dict[str, float | None]]]) -> None:
+    """Rebuild every ceiling from meter.yaml. ``{project: (ceiling, {feature: ceiling})}``.
+
+    Replaces rather than upserts, because meter.yaml is the source of truth and these
+    tables are a read cache of it (ARCHITECTURE.md §4). Upserting would make deletion
+    impossible: removing a ceiling from the file would leave the old row enforcing a limit
+    that no longer appears anywhere in the repo, which is the exact failure budget-as-code
+    exists to prevent. Every prior ceiling is cleared first, so what the file says is what
+    is enforced — including when the file says nothing.
+
+    One transaction: a half-applied budget config is worse than either the old one or the
+    new one, and it would be live for however long the rest of the loop took.
+
+    Projects named only in meter.yaml are created. A ceiling on a project no Meter key has
+    been seeded for is almost always a typo, and the row is what makes it visible.
+    """
+    conn = connect()
+    with _lock:
+        try:
+            conn.execute("BEGIN")
+            conn.execute("DELETE FROM feature_budgets")
+            conn.execute("UPDATE projects SET ceiling_usd_day = NULL")
+            for project_id, (ceiling, features) in budgets.items():
+                conn.execute(
+                    "INSERT INTO projects (id, name, ceiling_usd_day) VALUES (?, ?, ?) "
+                    "ON CONFLICT(id) DO UPDATE SET ceiling_usd_day = excluded.ceiling_usd_day",
+                    (project_id, project_id, ceiling),
+                )
+                for feature, feature_ceiling in features.items():
+                    conn.execute(
+                        "INSERT INTO feature_budgets (project_id, feature, ceiling_usd_day) "
+                        "VALUES (?, ?, ?)",
+                        (project_id, feature, feature_ceiling),
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def load_ceilings() -> dict[tuple[str, str | None], float]:
+    """Every configured ceiling, keyed ``(project_id, feature or None)``.
+
+    Read once at boot and held in memory by ``budget.py``. Ceilings change when someone
+    edits meter.yaml and restarts, so re-reading them per request would buy nothing and
+    put a query in front of every call.
+    """
+    conn = connect()
+    with _lock:
+        ceilings: dict[tuple[str, str | None], float] = {
+            (r["id"], None): float(r["ceiling_usd_day"])
+            for r in conn.execute(
+                "SELECT id, ceiling_usd_day FROM projects WHERE ceiling_usd_day IS NOT NULL"
+            )
+        }
+        ceilings.update({
+            (r["project_id"], r["feature"]): float(r["ceiling_usd_day"])
+            for r in conn.execute(
+                "SELECT project_id, feature, ceiling_usd_day FROM feature_budgets "
+                "WHERE ceiling_usd_day IS NOT NULL"
+            )
+        })
+    return ceilings
+
+
+# ── Annotations ──────────────────────────────────────────────────────────────
+
+
+def record_annotation(
+    project_id: str, trace_id: str, outcome: str | None, value_usd: float | None
+) -> int:
+    """Attach an outcome to a trace. Append-only: a trace can be annotated twice."""
+    conn = connect()
+    with _lock:
+        cur = conn.execute(
+            "INSERT INTO annotations (ts, project_id, trace_id, outcome, value_usd) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (now_iso(), project_id, trace_id, outcome, value_usd),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def trace_cost(project_id: str, trace_id: str) -> dict[str, Any]:
+    """Total cost of one trace — the `requests` half of the cost-per-outcome join.
+
+    Returned from the annotate endpoint so a caller sees the dollars-per-outcome number
+    immediately instead of having to query the ledger to find out what it just annotated.
+    Scoped to the project so a guessed trace id cannot read another project's spend.
+    """
+    conn = connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS cost_usd, COUNT(*) AS request_count "
+            "FROM requests WHERE project_id = ? AND trace_id = ?",
+            (project_id, trace_id),
+        ).fetchone()
+    return {"cost_usd": round(float(row["cost_usd"]), 6), "request_count": int(row["request_count"])}
 
 
 def active_breaker(scope: str) -> dict[str, Any] | None:

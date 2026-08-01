@@ -19,7 +19,6 @@ Exits non-zero on the first failure, so it is usable as a gate before a demo.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sqlite3
 import subprocess
