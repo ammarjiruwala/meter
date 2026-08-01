@@ -35,9 +35,17 @@ from typing import Dict, List
 #   * n=3 per bucket. Enough to correct an order-of-magnitude error, not enough to
 #     quote an accuracy figure to anyone.
 #   * Per-model. Measured on gpt-4o-mini; do not assume they hold for gpt-4o.
-#   * `translation` looks wrong (ratio 0.26, 331% MAPE). Translation output should
-#     track input near 1.0; the long probes likely were not translated in full.
-#     Re-measure with mid-length inputs before relying on that bucket.
+#   * `translation` is knowingly wrong (ratio 0.26, 331% MAPE) and DEFERRED, not
+#     broken-and-unnoticed. Output should track input near 1.0; either the long
+#     probes were truncated or the fit is bad. Deprioritised on 2026-08-01: our
+#     target users are engineering teams, whose traffic is code/reasoning/summary,
+#     and almost none of it is translation. Two things to fix if time allows:
+#       - re-measure with mid-length inputs and check `finish_reason` for truncation
+#       - the ratio depends on the language *pair and direction*, which one bucket
+#         cannot represent. Non-English text also tokenises less efficiently
+#         (Hindi and Japanese ~1.5x English for identical meaning), so an
+#         English->Japanese job produces far more output tokens than input.
+#     Input counting is unaffected either way -- tiktoken counts what is there.
 #
 # `learner.py` replaces all of this from live traffic once ~30 rows/bucket exist.
 # These are a cold start, not an answer.
