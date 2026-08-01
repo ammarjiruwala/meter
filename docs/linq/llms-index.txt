@@ -1,0 +1,300 @@
+# Linq Partner API
+
+Integrate iMessage, RCS, and SMS messaging directly into your applications.
+
+This file provides an overview of the Linq Partner API documentation. The companion file [llms-full.txt](https://docs.linqapp.com/llms-full.txt) contains the complete documentation concatenated for ingestion. The machine-readable OpenAPI specification at https://cdn.linqapp.com/openapi/linq-api-v3.yaml is the canonical definition of every endpoint, request body, response shape, and webhook event.
+
+## Root URL
+
+API: https://api.linqapp.com/api/partner/v3
+
+Docs: https://docs.linqapp.com
+
+---
+
+## Overview
+
+- [Introduction](https://docs.linqapp.com/index.md) - Integrate iMessage, RCS, and SMS messaging directly into your applications.
+
+## Getting Started
+
+- [AI coding agents](https://docs.linqapp.com/getting-started/ai-agents/index.md) - Install the Linq plugin so Claude Code, Cursor, or Codex can build on Linq for you.
+- [Authentication](https://docs.linqapp.com/getting-started/authentication/index.md) - API keys, bearer tokens, and securing your requests.
+- [Best Practices](https://docs.linqapp.com/getting-started/best-practices/index.md) - Recommended patterns for healthy iMessage conversations using the Linq API.
+- [Key Concepts](https://docs.linqapp.com/getting-started/key-concepts/index.md) - The core resources and vocabulary of the Linq Partner API V3.
+- [Quickstart](https://docs.linqapp.com/getting-started/quickstart/index.md) - Send your first message in under 5 minutes.
+- [Client SDKs](https://docs.linqapp.com/getting-started/sdks/index.md) - Official Linq SDKs for TypeScript/Node.js and Python.
+
+## Guides
+
+### Agentcard
+
+- [Agentcard vs Stripe](https://docs.linqapp.com/guides/agentcard/agentcard-vs-stripe/index.md) - Two payment providers, two different models — pick the right one for your use case.
+- [Cards & credentials](https://docs.linqapp.com/guides/agentcard/cards-and-credentials/index.md) - How the cards your users connect to the Agentcard Wallet are used, and how the credential handoff reaches your agent.
+- [Connect a customer](https://docs.linqapp.com/guides/agentcard/connect-a-customer/index.md) - Link a customer's Agentcard Wallet to your organization with a one-time verification in the messaging channel.
+- [Create & complete a payment](https://docs.linqapp.com/guides/agentcard/create-a-payment/index.md) - Create a payment for a connected customer, wait until it's ready, and hand the card to your agent.
+- [Errors, statuses & go-live](https://docs.linqapp.com/guides/agentcard/errors-and-go-live/index.md) - Agentcard payment and connection states, Linq's error model, and the checklist to ship to production.
+- [Overview](https://docs.linqapp.com/guides/agentcard/index.md) - Let an agent pay on a customer's behalf with a single-use virtual card.
+- [Quickstart](https://docs.linqapp.com/guides/agentcard/quickstart/index.md) - Let your users connect their cards so their agent can pay on their behalf from the Agentcard Wallet — setup to payment in five steps.
+- [Webhooks & lifecycle](https://docs.linqapp.com/guides/agentcard/webhooks/index.md) - Subscribe to Agentcard payment and connection events, verify their signatures (Standard Webhooks), and re-fetch for authoritative state.
+
+### Chats
+
+- [Capability Checks](https://docs.linqapp.com/guides/chats/capability-checks/index.md) - Probe whether a handle can receive iMessage or RCS before sending.
+- [Chat Health](https://docs.linqapp.com/guides/chats/chat-health/index.md) - How we score the health of a chat and how it relates to your line's standing.
+- [Group Chats](https://docs.linqapp.com/guides/chats/group-chats/index.md) - Create and manage group conversations with multiple participants.
+- [Chats](https://docs.linqapp.com/guides/chats/index.md) - Overview of chats — conversation threads with one or more participants.
+- [Sharing Contact Card](https://docs.linqapp.com/guides/chats/share-contact-card/index.md) - Push your configured contact card into a chat so the recipient sees your name and photo.
+- [Typing Indicators](https://docs.linqapp.com/guides/chats/typing-indicators/index.md) - Show and receive typing status in conversations.
+
+### Contact Cards
+
+- [Contact Cards](https://docs.linqapp.com/guides/contact-cards/index.md) - Set, retrieve, update, and share the contact card recipients see for your phone numbers.
+
+### Integrations
+
+- [Vercel Chat SDK](https://docs.linqapp.com/guides/integrations/chat-sdk/index.md) - Build agents on iMessage and SMS with Vercel's Chat SDK, powered by Linq.
+
+### Location Sharing
+
+- [Location Sharing](https://docs.linqapp.com/guides/location-sharing/index.md) - Request a chat participant's location and read incoming location updates as GeoJSON.
+
+### Messaging
+
+- [Attachments](https://docs.linqapp.com/guides/messaging/attachments/index.md) - Send images, videos, documents, and audio as media parts.
+- [iMessage Apps](https://docs.linqapp.com/guides/messaging/imessage-apps/index.md) - Send interactive messages backed by an iMessage app (a Messages app extension).
+- [Messaging](https://docs.linqapp.com/guides/messaging/index.md) - Overview of messages — individual communications within a chat thread.
+- [Message Details](https://docs.linqapp.com/guides/messaging/message-details/index.md) - Retrieve a single message or every message in a thread.
+- [Message Effects](https://docs.linqapp.com/guides/messaging/message-effects/index.md) - Add iMessage screen and bubble effects to your messages.
+- [Protocol Selection](https://docs.linqapp.com/guides/messaging/protocol-selection/index.md) - Choose between iMessage, RCS, and SMS for message delivery.
+- [Reactions](https://docs.linqapp.com/guides/messaging/reactions/index.md) - Add and remove emoji reactions on messages.
+- [Rich Link Previews](https://docs.linqapp.com/guides/messaging/rich-link-previews/index.md) - Send URLs that render as inline previews with a title, description, and image.
+- [Sending Messages](https://docs.linqapp.com/guides/messaging/sending-messages/index.md) - How to send text, media, and rich messages with the Linq API.
+- [Voice Memos](https://docs.linqapp.com/guides/messaging/voice-memos/index.md) - Send audio as an iMessage voice memo with native inline playback.
+
+### Payments
+
+- [Connected accounts](https://docs.linqapp.com/guides/payments/connected-accounts/index.md) - How Stripe Connect, direct charges, and merchant-of-record status work for Linq Payments — and why refunds and disputes are yours.
+- [Payments](https://docs.linqapp.com/guides/payments/index.md) - Request payments over iMessage and collect with Apple Pay — settling to your own Stripe account by default, or through the Natural custodial wallet.
+- [Sending payment links](https://docs.linqapp.com/guides/payments/sending-payment-links/index.md) - Deliver the checkout URL as a rich card, and how Apple Pay App Clips vs web checkout work.
+- [Payment webhooks](https://docs.linqapp.com/guides/payments/webhooks/index.md) - Reconcile payments server-side with the payment.succeeded, payment.canceled, and payment.expired events.
+
+### Phone Numbers
+
+- [Phone Numbers](https://docs.linqapp.com/guides/phone-numbers/index.md) - Discover and monitor the phone numbers provisioned on your account.
+- [Phone Reputation](https://docs.linqapp.com/guides/phone-numbers/phone-reputation/index.md) - How we measure reputation of a phone line and how to check it before you send.
+
+### Platform
+
+- [Debugging](https://docs.linqapp.com/guides/platform/debugging/index.md) - Using trace IDs for request tracing and troubleshooting.
+- [Rate Limits](https://docs.linqapp.com/guides/platform/rate-limits/index.md) - Understanding and handling API rate limits.
+- [Single Sign-On (SSO)](https://docs.linqapp.com/guides/platform/sso/index.md) - Configure SAML/OIDC single sign-on for your organization's dashboard login.
+
+### Resources
+
+- [Examples](https://docs.linqapp.com/guides/resources/example/index.md) - Open-source example projects built with the Linq API.
+- [FAQ](https://docs.linqapp.com/guides/resources/faq/index.md) - Frequently asked questions about the Linq API, SDKs, MCP server, and LLM-friendly docs.
+- [Migrating from V2 to V3](https://docs.linqapp.com/guides/resources/migration-v2-to-v3/index.md) - Step-by-step guide for upgrading your integration from the Linq V2 API to V3.
+
+### Webhooks
+
+- [Webhook Events](https://docs.linqapp.com/guides/webhooks/events/index.md) - Event types you can subscribe to, with a representative payload for each category.
+- [Webhooks](https://docs.linqapp.com/guides/webhooks/index.md) - Real-time event notifications for messages, reactions, chats, and more.
+- [Webhook Subscriptions](https://docs.linqapp.com/guides/webhooks/subscriptions/index.md) - Create, list, retrieve, update, and delete webhook subscriptions.
+
+## Error Codes
+
+- [Error Codes](https://docs.linqapp.com/error/index.md) - Complete reference of Linq API error codes with troubleshooting guides.
+
+### 1xxx
+
+- [1001: Missing required field](https://docs.linqapp.com/error/codes/1xxx/1001/index.md) - A required field is missing from the request body or query parameters.
+- [1002: Phone number must be in E.164 format](https://docs.linqapp.com/error/codes/1xxx/1002/index.md) - Phone numbers must conform to E.164 format (e.g., +14155551234).
+- [1003: Invalid request body](https://docs.linqapp.com/error/codes/1xxx/1003/index.md) - The request body is malformed or invalid JSON.
+- [1004: Invalid message content](https://docs.linqapp.com/error/codes/1xxx/1004/index.md) - The message content or parts array is invalid.
+- [1005: Invalid parameter value](https://docs.linqapp.com/error/codes/1xxx/1005/index.md) - A parameter value does not meet validation requirements.
+- [1006: Cannot update direct message chats](https://docs.linqapp.com/error/codes/1xxx/1006/index.md) - Direct message chats cannot be updated. Only group chats support updates.
+- [1007: Rate limit exceeded](https://docs.linqapp.com/error/codes/1xxx/1007/index.md) - You've hit a rate limit. Wait for the Retry-After interval before sending again.
+- [1008: Invalid iMessage app message](https://docs.linqapp.com/error/codes/1xxx/1008/index.md) - The imessage_app part failed validation — the message names the specific field.
+
+### 2xxx
+
+- [2001: Chat not found](https://docs.linqapp.com/error/codes/2xxx/2001/index.md) - The requested chat does not exist or you lack permission.
+- [2002: Message not found](https://docs.linqapp.com/error/codes/2xxx/2002/index.md) - The requested message does not exist or you lack permission.
+- [2003: Attachment not found](https://docs.linqapp.com/error/codes/2xxx/2003/index.md) - The requested attachment does not exist or is no longer available.
+- [2004: Unauthorized](https://docs.linqapp.com/error/codes/2xxx/2004/index.md) - Missing or invalid authentication credentials.
+- [2005: Access denied](https://docs.linqapp.com/error/codes/2xxx/2005/index.md) - You do not have permission to access this resource.
+- [2006: Phone number permission denied](https://docs.linqapp.com/error/codes/2xxx/2006/index.md) - You cannot send from this phone number.
+- [2007: Attachment not ready](https://docs.linqapp.com/error/codes/2xxx/2007/index.md) - Attachment is still processing.
+- [2008: Recipient not allowed](https://docs.linqapp.com/error/codes/2xxx/2008/index.md) - Recipient is not in the allowed list for this account.
+- [2009: The chat is still being created](https://docs.linqapp.com/error/codes/2xxx/2009/index.md) - The chat is still being created.
+- [2010: Webhook subscription not found](https://docs.linqapp.com/error/codes/2xxx/2010/index.md) - The requested webhook subscription does not exist.
+- [2011: Feature not available](https://docs.linqapp.com/error/codes/2xxx/2011/index.md) - The requested feature is not available for your account.
+- [2012: Contact card not found](https://docs.linqapp.com/error/codes/2xxx/2012/index.md) - No active contact card was found for this phone number.
+- [2013: This chat is unavailable](https://docs.linqapp.com/error/codes/2xxx/2013/index.md) - This chat is unavailable. The chat may have been left, deleted, or is otherwise inaccessible.
+- [2014: A contact card already exists for this phone number](https://docs.linqapp.com/error/codes/2xxx/2014/index.md) - A contact card already exists for this phone number. Use PATCH to update it instead of creating a new one.
+- [2015: Operation conflicts with current state](https://docs.linqapp.com/error/codes/2xxx/2015/index.md) - The resource is in a state that conflicts with the requested operation.
+- [2016: Operation not supported in group chats](https://docs.linqapp.com/error/codes/2xxx/2016/index.md) - This operation only works in a 1:1 chat.
+- [2017: Operation not supported on this chat's service type](https://docs.linqapp.com/error/codes/2xxx/2017/index.md) - The chat's service does not support this operation — the message names the service required.
+- [2018: iMessage app messages can only be sent over iMessage](https://docs.linqapp.com/error/codes/2xxx/2018/index.md) - An imessage_app part was sent while SMS or RCS was explicitly requested.
+- [2019: Phone number not found](https://docs.linqapp.com/error/codes/2xxx/2019/index.md) - No phone number matches the ID you supplied.
+- [2021: Payment request not found](https://docs.linqapp.com/error/codes/2xxx/2021/index.md) - No payment request with that ID exists on your account.
+- [2022: Contact card setup failed](https://docs.linqapp.com/error/codes/2xxx/2022/index.md) - The contact card was saved but could not be applied to the line, so it is not live yet.
+
+### 3xxx
+
+- [3001: Server connection error](https://docs.linqapp.com/error/codes/3xxx/3001/index.md) - Transient server connection error.
+- [3002: Server operation failed](https://docs.linqapp.com/error/codes/3xxx/3002/index.md) - Server operation failed unexpectedly.
+- [3003: Service connection error](https://docs.linqapp.com/error/codes/3xxx/3003/index.md) - Transient internal service connection error.
+- [3004: Service operation failed](https://docs.linqapp.com/error/codes/3xxx/3004/index.md) - Internal service operation failed.
+- [3005: Network timeout](https://docs.linqapp.com/error/codes/3xxx/3005/index.md) - Request timed out.
+- [3006: Internal server error](https://docs.linqapp.com/error/codes/3xxx/3006/index.md) - Unexpected internal error.
+- [3007: Maximum delivery attempts exceeded](https://docs.linqapp.com/error/codes/3xxx/3007/index.md) - All delivery retry attempts exhausted.
+
+### 4xxx
+
+- [4001: Delivery failed](https://docs.linqapp.com/error/codes/4xxx/4001/index.md) - Message could not be delivered.
+- [4002: Phone not available](https://docs.linqapp.com/error/codes/4xxx/4002/index.md) - Phone is offline or unreachable.
+- [4003: Webhook delivery failed](https://docs.linqapp.com/error/codes/4xxx/4003/index.md) - Failed to deliver webhook to your endpoint.
+- [4004: Service unavailable](https://docs.linqapp.com/error/codes/4xxx/4004/index.md) - External service temporarily unavailable.
+- [4005: Recipient does not support this message type](https://docs.linqapp.com/error/codes/4xxx/4005/index.md) - The recipient cannot receive this message type.
+
+### 5xxx
+
+- [5001: File upload failed](https://docs.linqapp.com/error/codes/5xxx/5001/index.md) - File upload failed due to network or storage issues.
+- [5002: File download failed](https://docs.linqapp.com/error/codes/5xxx/5002/index.md) - Failed to download file from URL.
+- [5003: Failed to generate file URL](https://docs.linqapp.com/error/codes/5xxx/5003/index.md) - Failed to generate presigned URL for file access.
+- [5004: Invalid file type](https://docs.linqapp.com/error/codes/5xxx/5004/index.md) - File type not supported.
+- [5005: File too large](https://docs.linqapp.com/error/codes/5xxx/5005/index.md) - File exceeds maximum size.
+- [5006: Content type mismatch](https://docs.linqapp.com/error/codes/5xxx/5006/index.md) - File content type does not match URL extension.
+- [5007: Failed to download image from the provided URL](https://docs.linqapp.com/error/codes/5xxx/5007/index.md) - The provided image URL could not be fetched.
+
+## API Reference
+
+- [API Reference](https://docs.linqapp.com/api/index.md)
+
+### Attachments
+
+- [Attachments](https://docs.linqapp.com/api/resources/attachments/index.md)
+- [api/resources/attachments/methods/create/index.md](https://docs.linqapp.com/api/resources/attachments/methods/create/index.md)
+- [api/resources/attachments/methods/delete/index.md](https://docs.linqapp.com/api/resources/attachments/methods/delete/index.md)
+- [api/resources/attachments/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/attachments/methods/retrieve/index.md)
+
+### Available Number
+
+- [Available Number](https://docs.linqapp.com/api/resources/available_number/index.md)
+- [api/resources/available_number/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/available_number/methods/retrieve/index.md)
+
+### Capability
+
+- [Capability](https://docs.linqapp.com/api/resources/capability/index.md)
+- [api/resources/capability/methods/check_imessage/index.md](https://docs.linqapp.com/api/resources/capability/methods/check_imessage/index.md)
+- [api/resources/capability/methods/check_rcs/index.md](https://docs.linqapp.com/api/resources/capability/methods/check_rcs/index.md)
+
+### Chats
+
+- [Chats](https://docs.linqapp.com/api/resources/chats/index.md)
+- [api/resources/chats/methods/create/index.md](https://docs.linqapp.com/api/resources/chats/methods/create/index.md)
+- [api/resources/chats/methods/leave_chat/index.md](https://docs.linqapp.com/api/resources/chats/methods/leave_chat/index.md)
+- [api/resources/chats/methods/list_chats/index.md](https://docs.linqapp.com/api/resources/chats/methods/list_chats/index.md)
+- [api/resources/chats/methods/mark_as_read/index.md](https://docs.linqapp.com/api/resources/chats/methods/mark_as_read/index.md)
+- [api/resources/chats/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/chats/methods/retrieve/index.md)
+- [api/resources/chats/methods/send_voicememo/index.md](https://docs.linqapp.com/api/resources/chats/methods/send_voicememo/index.md)
+- [api/resources/chats/methods/share_contact_card/index.md](https://docs.linqapp.com/api/resources/chats/methods/share_contact_card/index.md)
+- [api/resources/chats/methods/update/index.md](https://docs.linqapp.com/api/resources/chats/methods/update/index.md)
+- [Location](https://docs.linqapp.com/api/resources/chats/subresources/location/index.md)
+- [api/resources/chats/subresources/location/methods/request/index.md](https://docs.linqapp.com/api/resources/chats/subresources/location/methods/request/index.md)
+- [api/resources/chats/subresources/location/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/chats/subresources/location/methods/retrieve/index.md)
+- [Messages](https://docs.linqapp.com/api/resources/chats/subresources/messages/index.md)
+- [api/resources/chats/subresources/messages/methods/list/index.md](https://docs.linqapp.com/api/resources/chats/subresources/messages/methods/list/index.md)
+- [api/resources/chats/subresources/messages/methods/send/index.md](https://docs.linqapp.com/api/resources/chats/subresources/messages/methods/send/index.md)
+- [Participants](https://docs.linqapp.com/api/resources/chats/subresources/participants/index.md)
+- [api/resources/chats/subresources/participants/methods/add/index.md](https://docs.linqapp.com/api/resources/chats/subresources/participants/methods/add/index.md)
+- [api/resources/chats/subresources/participants/methods/remove/index.md](https://docs.linqapp.com/api/resources/chats/subresources/participants/methods/remove/index.md)
+- [Typing](https://docs.linqapp.com/api/resources/chats/subresources/typing/index.md)
+- [api/resources/chats/subresources/typing/methods/start/index.md](https://docs.linqapp.com/api/resources/chats/subresources/typing/methods/start/index.md)
+- [api/resources/chats/subresources/typing/methods/stop/index.md](https://docs.linqapp.com/api/resources/chats/subresources/typing/methods/stop/index.md)
+
+### Contact Card
+
+- [Contact Card](https://docs.linqapp.com/api/resources/contact_card/index.md)
+- [api/resources/contact_card/methods/create/index.md](https://docs.linqapp.com/api/resources/contact_card/methods/create/index.md)
+- [api/resources/contact_card/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/contact_card/methods/retrieve/index.md)
+- [api/resources/contact_card/methods/update/index.md](https://docs.linqapp.com/api/resources/contact_card/methods/update/index.md)
+
+### Experiences
+
+- [Experiences](https://docs.linqapp.com/api/resources/experiences/index.md)
+- [api/resources/experiences/methods/list/index.md](https://docs.linqapp.com/api/resources/experiences/methods/list/index.md)
+- [api/resources/experiences/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/experiences/methods/retrieve/index.md)
+
+### Messages
+
+- [Messages](https://docs.linqapp.com/api/resources/messages/index.md)
+- [api/resources/messages/methods/add_reaction/index.md](https://docs.linqapp.com/api/resources/messages/methods/add_reaction/index.md)
+- [api/resources/messages/methods/create/index.md](https://docs.linqapp.com/api/resources/messages/methods/create/index.md)
+- [api/resources/messages/methods/delete/index.md](https://docs.linqapp.com/api/resources/messages/methods/delete/index.md)
+- [api/resources/messages/methods/list_messages_thread/index.md](https://docs.linqapp.com/api/resources/messages/methods/list_messages_thread/index.md)
+- [api/resources/messages/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/messages/methods/retrieve/index.md)
+- [api/resources/messages/methods/update_app_card/index.md](https://docs.linqapp.com/api/resources/messages/methods/update_app_card/index.md)
+- [api/resources/messages/methods/update/index.md](https://docs.linqapp.com/api/resources/messages/methods/update/index.md)
+
+### Payment Handles
+
+- [Payment Handles](https://docs.linqapp.com/api/resources/payment_handles/index.md)
+- [api/resources/payment_handles/methods/connect/index.md](https://docs.linqapp.com/api/resources/payment_handles/methods/connect/index.md)
+- [api/resources/payment_handles/methods/connection/index.md](https://docs.linqapp.com/api/resources/payment_handles/methods/connection/index.md)
+- [api/resources/payment_handles/methods/revoke/index.md](https://docs.linqapp.com/api/resources/payment_handles/methods/revoke/index.md)
+- [api/resources/payment_handles/methods/verify/index.md](https://docs.linqapp.com/api/resources/payment_handles/methods/verify/index.md)
+
+### Payment Providers
+
+- [Payment Providers](https://docs.linqapp.com/api/resources/payment_providers/index.md)
+- [api/resources/payment_providers/methods/connect/index.md](https://docs.linqapp.com/api/resources/payment_providers/methods/connect/index.md)
+- [api/resources/payment_providers/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/payment_providers/methods/retrieve/index.md)
+
+### Payment Requests
+
+- [Payment Requests](https://docs.linqapp.com/api/resources/payment_requests/index.md)
+- [api/resources/payment_requests/methods/cancel/index.md](https://docs.linqapp.com/api/resources/payment_requests/methods/cancel/index.md)
+- [api/resources/payment_requests/methods/create/index.md](https://docs.linqapp.com/api/resources/payment_requests/methods/create/index.md)
+- [api/resources/payment_requests/methods/list/index.md](https://docs.linqapp.com/api/resources/payment_requests/methods/list/index.md)
+- [api/resources/payment_requests/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/payment_requests/methods/retrieve/index.md)
+
+### Payments
+
+- [Payments](https://docs.linqapp.com/api/resources/payments/index.md)
+- [api/resources/payments/methods/cancel/index.md](https://docs.linqapp.com/api/resources/payments/methods/cancel/index.md)
+- [api/resources/payments/methods/create/index.md](https://docs.linqapp.com/api/resources/payments/methods/create/index.md)
+- [api/resources/payments/methods/credentials/index.md](https://docs.linqapp.com/api/resources/payments/methods/credentials/index.md)
+- [api/resources/payments/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/payments/methods/retrieve/index.md)
+
+### Phone Numbers
+
+- [Phone Numbers](https://docs.linqapp.com/api/resources/phone_numbers/index.md)
+- [api/resources/phone_numbers/methods/list/index.md](https://docs.linqapp.com/api/resources/phone_numbers/methods/list/index.md)
+- [api/resources/phone_numbers/methods/update/index.md](https://docs.linqapp.com/api/resources/phone_numbers/methods/update/index.md)
+
+### Phonenumbers
+
+- [Phonenumbers](https://docs.linqapp.com/api/resources/phonenumbers/index.md)
+- [api/resources/phonenumbers/methods/list/index.md](https://docs.linqapp.com/api/resources/phonenumbers/methods/list/index.md)
+
+### Webhook Events
+
+- [Webhook Events](https://docs.linqapp.com/api/resources/webhook_events/index.md)
+- [api/resources/webhook_events/methods/list/index.md](https://docs.linqapp.com/api/resources/webhook_events/methods/list/index.md)
+
+### Webhook Subscriptions
+
+- [Webhook Subscriptions](https://docs.linqapp.com/api/resources/webhook_subscriptions/index.md)
+- [api/resources/webhook_subscriptions/methods/create/index.md](https://docs.linqapp.com/api/resources/webhook_subscriptions/methods/create/index.md)
+- [api/resources/webhook_subscriptions/methods/delete/index.md](https://docs.linqapp.com/api/resources/webhook_subscriptions/methods/delete/index.md)
+- [api/resources/webhook_subscriptions/methods/list/index.md](https://docs.linqapp.com/api/resources/webhook_subscriptions/methods/list/index.md)
+- [api/resources/webhook_subscriptions/methods/retrieve/index.md](https://docs.linqapp.com/api/resources/webhook_subscriptions/methods/retrieve/index.md)
+- [api/resources/webhook_subscriptions/methods/update/index.md](https://docs.linqapp.com/api/resources/webhook_subscriptions/methods/update/index.md)
+
+### Webhooks
+
+- [Webhooks](https://docs.linqapp.com/api/resources/webhooks/index.md)
+- [api/resources/webhooks/methods/unwrap/index.md](https://docs.linqapp.com/api/resources/webhooks/methods/unwrap/index.md)
