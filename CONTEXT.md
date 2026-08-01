@@ -247,10 +247,45 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Visual system (2026-08-01):** a "mission-control darkroom" — pitch-black canvas, a
         five-level surface stack (obsidian → carbon → graphite → iron → steel), elevation by inset
         white hairline rather than shadow, and one accent blue reserved for the active nav
-        indicator and the live-polling dot. Type is Inter at weight 400 throughout with a negative
-        tracking ladder (-0.064em at 86px down to -0.005em at 12px); IBM Plex Mono handles
-        readouts — costs, model ids, timestamps. Tokens and the type ladder live in
+        indicator and the live-polling dot. Type is Inter with a negative tracking ladder
+        (-0.064em at 86px down to -0.005em at 12px). Tokens and the type ladder live in
         `dashboard/src/app/globals.css`; shared pieces in `dashboard/src/components/ui/`.
+    *   **Tables were restyled 2026-08-01 (Tanay) to a supplied reference, and they deliberately
+        break two of the rules above.** The rest of the system takes authority from size and
+        negative tracking at weight 400; a data table has neither room for size nor a single
+        focal point, so its hierarchy comes from **weight** — a 620 primary over a 400 muted
+        secondary, on a two-line row. And tables are **sans, not the IBM Plex Mono readout
+        register**: `tabular-nums` holds a money column in alignment, which is the only job the
+        mono was actually doing there, without making every cell look like an instrument label.
+        Mono is no longer used anywhere in the dashboard. Section labels went from uppercase mono
+        micro-labels to sentence-case sans for the same reason.
+        *   **The two-line row retires columns rather than adding decoration.** Model rides under
+            the actor, `project · feature` under the member, trace/request counts under the
+            outcome, staleness under the provider, `spend of ceiling` under the budget scope —
+            each was a column of its own and each reads as a qualifier of the thing above it.
+        *   **All five tables render through one `DataTable` primitive**
+            (`components/ui/DataTable.tsx`) so they cannot drift apart, with `IdentityCell` for
+            the two-line pattern.
+        *   **Rows collapse above a threshold of 8.** The reference row is tall, and Live Logs
+            fetches 50, which would otherwise be most of the page. Below the threshold no control
+            renders at all — a "Show all" button over three rows is furniture. The control names
+            what is hidden ("Show all 28 · 20 more"), and **footnote counts span every fetched
+            row, not the visible ones**: a number that changed when you expanded the table would
+            look unreliable at the exact moment someone is reading it.
+        *   **The nav floats.** A translucent rounded bar inset from every edge, pinned to the
+            viewport with content scrolling beneath — 10% *white* over a 6px blur, not a dark
+            scrim, because a dark scrim on a near-black page reads as a hole cut in the canvas
+            rather than glass lying on it. ⚠ It is `fixed`, **not `sticky`**: the bar was already
+            `sticky top-0`, but the layout nests it inside `body.flex` > `div.flex-1` and it had
+            quietly stopped pinning there. A sticky element that has stopped sticking looks
+            identical to a working one until you scroll, which is how it went unnoticed — if you
+            move the nav, re-check it by actually scrolling. A spacer replaces the height it no
+            longer occupies. Of the two translucency knobs, raise alpha rather than blur: blur is
+            what destroys the legibility of whatever is passing underneath.
+        *   **Badges became filled tints** (plus outline and inverted variants) instead of colored
+            text on a flat surface. Every text/fill pair is **measured, not judged** — the earlier
+            tinted attempt put a hue on its own 20% tint and landed at 3.49:1, under the 4.5:1
+            floor for small text. The shipped pairs run 5.81:1 (bad) to 18.42:1 (outline).
     *   **Status colors are a deliberate exception to that monochrome system** and should survive
         any future restyle. Green/amber/red for 2xx / 429 / 5xx, because catching a failure by
         color beats reading a number on a dashboard watched during a live demo. The specific hex
