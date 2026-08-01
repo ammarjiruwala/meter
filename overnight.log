@@ -127,3 +127,35 @@ wrote 680 rows in 3856s  ($1.832 actual, bound was $2.25)
 [21:44:28] coldstart/optimize: starting
 [22:22:19] coldstart/optimize: rc=0
 [22:22:19] coldstart/discover: starting
+[23:00:29] coldstart/discover: rc=0
+[23:00:29] cross-model: starting
+[23:00:29] cross-model: rc=1
+[23:00:29] prequential: starting
+[23:00:30] prequential: rc=0
+[23:00:30] seed: rc=0 ['Start the proxy against this ledger and /healthz will report learned_factors: 13']
+[23:00:30] test_predictor: starting
+[23:00:30] test_predictor: rc=0
+[23:00:30] test_proxy: starting
+[23:00:33] test_proxy: rc=0
+[23:00:33] test_treasury: starting
+[23:01:03] test_treasury: rc=0
+[23:01:03] test_alerts: starting
+[23:01:04] test_alerts: rc=0
+[23:01:04] e2e journey: starting
+[23:01:07] e2e journey: rc=0
+Traceback (most recent call last):
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 334, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 327, in main
+    write_report(corpus, tune, seed, started,
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                 cold=cold, cross=cross, preq=preq, verify=verify)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 280, in write_report
+    block("Cold-start refit (held out by feature)", (cold or {}).get("optimize"))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 272, in block
+    lines.extend(["", f"## {title}", ""])
+    ^^^^^
+UnboundLocalError: cannot access local variable 'lines' where it is not associated with a value

@@ -45,6 +45,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 CORPUS = REPO / "data" / "templated" / "corpus.jsonl"
+STAGES = REPO / "data" / "overnight-stages.json"
 REPORT = REPO / "data" / "overnight-report.md"
 SOURCES = ("gpt-4o-mini.jsonl", "gpt-4o-mini-v2.jsonl", "corpus.jsonl")
 
@@ -141,6 +142,21 @@ def stage_tune() -> dict:
     log(f"tune: best k={best} ({overall[best]:.1f}% median across {len(table)} features); "
         f"current k=20 is {overall[20]:.1f}%")
     return {"per_feature": table, "overall": overall, "best_k": best, "ks": ks}
+
+
+def save_stage(name: str, payload) -> None:
+    """Checkpoint a completed stage to disk.
+
+    The first run finished every stage and then lost the lot to a crash in the report
+    writer. Stage results are expensive -- one of them is an hour of fitting -- so they
+    are persisted as they complete and the report is regenerable from this file alone.
+    """
+    try:
+        blob = json.loads(STAGES.read_text()) if STAGES.exists() else {}
+    except Exception:
+        blob = {}
+    blob[name] = payload
+    STAGES.write_text(json.dumps(blob, indent=2, default=str))
 
 
 def _run_cmd(name: str, cmd: list[str], timeout: int) -> dict:
@@ -267,15 +283,21 @@ def write_report(corpus: dict, tune: dict, seed: dict, started: float,
                      f"| {spread:.1f}x |")
 
     def block(title: str, payload, tail: int = 2500) -> None:
+        # `nonlocal` is required: an augmented assignment to `lines` anywhere in this
+        # function would rebind it as a local and make every read above it an
+        # UnboundLocalError -- which is exactly what killed the first report after
+        # three hours of stage work had already succeeded.
+        nonlocal lines
         if not payload:
             return
         lines.extend(["", f"## {title}", ""])
         if isinstance(payload, dict) and "out" in payload:
-            lines += [f"exit {payload['rc']}", "", "```", payload["out"].strip()[-tail:], "```"]
+            lines.extend([f"exit {payload['rc']}", "", "```",
+                          payload["out"].strip()[-tail:], "```"])
         else:
             for k, v in (payload or {}).items():
-                lines += [f"### {k}", "", f"exit {v['rc']}", "",
-                          "```", v["out"].strip()[-tail:], "```", ""]
+                lines.extend([f"### {k}", "", f"exit {v['rc']}", "",
+                              "```", v["out"].strip()[-tail:], "```", ""])
 
     block("Cold-start refit (held out by feature)", (cold or {}).get("optimize"))
     block("Feature discovery", (cold or {}).get("discover"))
@@ -295,8 +317,18 @@ def main() -> int:
     ap.add_argument("--n", type=int, default=40)
     ap.add_argument("--holdout", type=int, default=8)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--report-only", action="store_true",
+                    help="rebuild the report from data/overnight-stages.json")
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args()
+
+    if args.report_only:
+        blob = json.loads(STAGES.read_text())
+        write_report(blob.get("corpus", {}), blob.get("tune", {}), blob.get("seed", {}),
+                     time.time(), cold=blob.get("coldstart"), cross=blob.get("cross"),
+                     preq=blob.get("prequential"), verify=blob.get("verify"))
+        print(f"report rebuilt -> {REPORT}")
+        return 0
 
     from scripts.corpus_probe import TAGS
     todo = sorted(set(TAGS) - existing_features())
@@ -318,12 +350,19 @@ def main() -> int:
     started = time.time()
     log("=== overnight batch starting ===")
     corpus = stage_corpus(args.cap_usd, args.n, args.holdout, args.yes)
+    save_stage("corpus", corpus)
     tune = stage_tune()
+    save_stage("tune", tune)
     cold = stage_coldstart()
+    save_stage("coldstart", cold)
     cross = stage_cross(args.cross_cap_usd, args.yes)
+    save_stage("cross", cross)
     preq = stage_prequential()
+    save_stage("prequential", preq)
     seed = stage_seed()
+    save_stage("seed", seed)
     verify = stage_verify()
+    save_stage("verify", verify)
     write_report(corpus, tune, seed, started,
                  cold=cold, cross=cross, preq=preq, verify=verify)
     log(f"=== done in {(time.time() - started) / 60:.0f} min ===")

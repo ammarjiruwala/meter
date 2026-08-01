@@ -1,0 +1,13 @@
+tags to collect   0  (none)
+calls             0
+hard spend cap    $4.00
+anthropic cap     $2.00
+stages            corpus -> shrinkage sweep -> cold-start refit -> cross-model
+                  -> prequential -> seed -> verify -> report
+report            /Users/ammar/Desktop/meter-project/meter/data/overnight-report.md
+[23:12:17] === overnight batch starting ===
+[23:12:17] corpus: nothing to collect, every tag already has data
+[23:12:39] tune: best k=1 (6.7% median across 19 features); current k=20 is 32.1%
+[23:12:39] coldstart/split: starting
+[23:12:39] coldstart/split: rc=0
+[23:12:39] coldstart/optimize: starting
