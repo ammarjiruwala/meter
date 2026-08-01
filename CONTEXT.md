@@ -100,7 +100,9 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
 *   **Last updated:** 2026-08-01 — Shivam's treasury schema (`wallets`, `mandates`, `treasury_events`)
-    and mock provider billing landed; Prava charge settlement added.
+    and mock provider billing landed, then folded into the proxy app: one process, one port.
+    **`proxy/README.md` still describes the proxy's routes as `/v1` + `/healthz` only — Shubh to
+    refresh it.**
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -132,7 +134,10 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Two things block the feedback loop, both needed before we can claim any accuracy number:** (1) Shubh wiring `predict()` into the request path and writing `predicted_output_tokens` / `bucket` to the ledger at CAPTURE; (2) running `python -m predictor.calibrate` to replace the inherited priors with measured ones. `learner.py` stays dormant until ~30 rows/bucket exist.
 
 *   **Treasurer Agent / Prava: PAYMENT RAIL VERIFIED + TREASURY SCHEMA WORKING; AGENT LOOP NOT STARTED.**
-    `prava_service.py`, `main.py` (run with `uvicorn main:app --port 8090`), `treasury/`.
+    `treasury/` — **mounted on Shubh's proxy app**, so there is one backend process on one port:
+    `uvicorn proxy.app:app --port 8080`. The old root-level `main.py` is now a deprecation shim
+    that re-exports the same app, so `uvicorn main:app` still works. Treasury routes are kept off
+    the `/v1` prefix, which stays the surface a caller's provider SDK targets.
     *   **We use a standing mandate, not a one-time virtual card.** §4/§5B and the pitch script still
         say "one-time scoped card"; the mandate is strictly better for the Treasurer — the human
         approves once with a passkey, the agent charges repeatedly with none. Wording needs updating

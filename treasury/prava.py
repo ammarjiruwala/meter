@@ -1,11 +1,21 @@
+"""Prava payment rail — mandate charge and settlement.
+
+Owner: Shivam (Payments & Agent). Was `prava_service.py` at repo root; moved here when
+the treasury routes folded into the proxy app.
+"""
+
 import asyncio
 import os
 import uuid
+from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load from the repo root explicitly rather than the working directory, matching
+# proxy/config.py. Without this, `uvicorn proxy.app:app` started from anywhere other
+# than the repo root silently gets no Prava credentials.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 PRAVA_LIVE_MODE = os.getenv("PRAVA_LIVE_MODE", "False") == "True"
 PRAVA_API_BASE = os.getenv("PRAVA_API_BASE", "https://sandbox.api.prava.space")

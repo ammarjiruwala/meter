@@ -1,65 +1,16 @@
-import uuid
+"""Deprecated entrypoint — kept so `uvicorn main:app` keeps working.
 
-from fastapi import FastAPI
+The treasury and Prava routes that used to live here are now part of the proxy app
+(`proxy/app.py`), so the whole backend is one process on one port:
 
-from prava_service import charge_mandate, list_mandates, report_charge
-from treasury import db as treasury_db
-from treasury.mock_provider import router as mock_provider_router
+    uvicorn proxy.app:app --port 8080
 
-app = FastAPI()
-app.include_router(mock_provider_router)
+This module re-exports that same app object. Nothing is lost by using it, but prefer
+the line above; this file goes away once nobody's notes point at it.
 
+Owner: Shivam (Payments & Agent).
+"""
 
-@app.get("/")
-def read_root():
-    return {"status": "Meter Proxy is running"}
+from proxy.app import app
 
-
-@app.get("/mandates")
-async def mandates():
-    data = await list_mandates()
-    return [
-        {
-            "id": m["id"],
-            "remaining": m["remaining"],
-            "approved": m["approvedAmount"],
-            "frequency": m["recurringFrequency"],
-            "status": m["status"],
-        }
-        for m in data["mandates"]
-    ]
-
-
-@app.get("/wallets")
-def wallets():
-    """Provider balances. Backs the dashboard's Provider Balances card."""
-    return treasury_db.list_wallets()
-
-
-@app.post("/wallets/seed")
-def seed_wallet(project_id: str = "demo-project", provider: str = "openai",
-                balance_usd: float = 4.00):
-    """Create a wallet at a starting balance. $4 is the demo's 'too low' state.
-
-    Idempotent: the balance applies on creation only, so re-running this never wipes a
-    top-up the Treasurer already made.
-    """
-    wallet_id = treasury_db.ensure_wallet(project_id, provider, balance_usd)
-    return treasury_db.get_wallet(wallet_id)
-
-
-@app.post("/charge")
-async def charge(amount: float = 2.00):
-    return await charge_mandate(amount, f"api_{uuid.uuid4().hex[:8]}")
-
-
-@app.post("/report")
-async def report(transaction_id: str, approved: bool = True):
-    """Settle a charge. `transactionId` comes from the /charge response."""
-    return await report_charge(transaction_id, approved)
-
-
-@app.post("/charge-refusal")
-async def charge_refusal():
-    """Over the cap. Visa declines. This is the demo beat."""
-    return await charge_mandate(999.00, f"refuse_{uuid.uuid4().hex[:8]}")
+__all__ = ["app"]
