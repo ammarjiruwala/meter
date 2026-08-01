@@ -33,8 +33,21 @@ export function TopNav() {
   }, []);
 
   return (
-    <nav className="sticky top-0 z-50 bg-obsidian/85 backdrop-blur-md">
-      <div className="mx-auto flex h-[80px] max-w-[1200px] items-center justify-between px-[24px]">
+    <>
+      {/* Floating rather than full-bleed: inset from every edge so the black canvas
+          shows around it, and content scrolls *beneath* it.
+
+          `fixed`, not `sticky`. Sticky depends on the ancestor chain — the layout
+          puts this inside `body.flex` > `div.flex-1`, and sticky silently stopped
+          pinning there, which looks identical to working until you actually scroll.
+          Fixed takes the element out of flow unconditionally; the spacer below gives
+          back the height it no longer occupies.
+
+          Translucency needs the blur to stay legible: over a table row a plain alpha
+          fill would let the row read straight through the labels. backdrop-blur plus
+          saturate keeps the surface reading as a surface. */}
+      <nav className="fixed left-1/2 top-[16px] z-50 w-[calc(100%-32px)] max-w-[1200px] -translate-x-1/2 rounded-[59px] bg-[rgba(8,8,8,0.62)] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset] backdrop-blur-[20px] backdrop-saturate-150">
+        <div className="flex h-[64px] items-center justify-between px-[24px]">
         <a href="#top" className="flex items-center gap-[10px] text-paper">
           {/* Angular geometric mark — a gauge sweep with its needle. */}
           <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
@@ -67,8 +80,13 @@ export function TopNav() {
               </a>
             );
           })}
+          </div>
         </div>
-      </div>
-    </nav>
+      </nav>
+
+      {/* Gives back the 16px offset + 64px bar the fixed nav no longer occupies, so
+          the hero starts exactly where it did before. */}
+      <div aria-hidden="true" className="h-[80px] shrink-0" />
+    </>
   );
 }
