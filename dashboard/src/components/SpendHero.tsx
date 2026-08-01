@@ -24,15 +24,15 @@ export function SpendHero({ summary }: { summary: SpendSummary }) {
         <Pill>{summary.provider_count} providers live</Pill>
       </div>
 
-      <p className="t-readout mx-auto mt-[56px] uppercase text-ash">
-        Total metered spend
-      </p>
-      <p className="t-display mt-[20px] text-paper">
+      {/* Sentence case, sans — matching the reference away from the uppercase mono
+          label the old system used above the figure. */}
+      <p className="t-cell mx-auto mt-[56px] text-ash">Total metered spend</p>
+      <p className="t-display t-num mt-[20px] text-paper">
         {formatUsd(summary.total_cost_usd)}
       </p>
       {summary.last_ts && (
         <p className="t-subheading mt-[24px] text-ash">
-          last call {relativeTime(summary.last_ts)}
+          Last call {relativeTime(summary.last_ts)}
         </p>
       )}
     </header>
