@@ -38,10 +38,35 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--batch", type=int, default=40)
     ap.add_argument("--db", default="/tmp/meter-prequential.db")
+    ap.add_argument("--source", choices=("wildchat", "templated"), default="wildchat",
+                    help="wildchat = synthetic attribution over unrelated prompts; "
+                         "templated = real (project, feature) from the probe run")
+    ap.add_argument("--exclude-truncated", action="store_true")
+    ap.add_argument("--shuffle", action="store_true",
+                    help="interleave features, as real traffic arrives")
     args = ap.parse_args()
 
-    src = REPO / "data" / "wildchat" / "train.jsonl"
-    rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+    if args.source == "templated":
+        src = REPO / "data" / "templated" / "gpt-4o-mini.jsonl"
+        if not src.exists():
+            sys.exit(f"missing {src} — run: python scripts/templated_probe.py")
+        rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+        if args.exclude_truncated:
+            # Two defensible readings. A row that stopped at max_tokens is a LOWER
+            # BOUND on natural output length, so fitting a length model on it teaches
+            # under-prediction. But for BILLING it is the truth: the caller is charged
+            # for 400 tokens and no more. Kept by default because Meter predicts cost,
+            # not prose length; this flag exists so the other reading is measurable.
+            rows = [r for r in rows if r.get("finish_reason") == "stop"]
+        # The probe writes template-by-template. Real traffic interleaves features,
+        # so shuffling is the more honest ordering -- and without it the first
+        # batches contain exactly one feature, which flatters early accuracy.
+        if args.shuffle:
+            import random
+            random.Random(0).shuffle(rows)
+    else:
+        src = REPO / "data" / "wildchat" / "train.jsonl"
+        rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
 
     db = Path(args.db)
     if db.exists():
@@ -63,6 +88,17 @@ def main() -> int:
     pred = Predictor()
     pred._factors, pred._cfg = {}, None      # start from the base engine, learn from zero
 
+    def attribution(r: dict, bucket: str, idx: int) -> tuple[str, str, str]:
+        """One definition, used by BOTH the predict and the write phase.
+
+        Deriving it twice is how the first version of this harness broke: predict
+        passed a placeholder bucket, write passed the real one, so predict looked up
+        keys the learner had never fitted and the curve was meaningless.
+        """
+        if args.source == "templated":
+            return r["project"], r["feature"], r["actor"]
+        return synthetic_attribution(r["prompt"], bucket, idx)
+
     conn = sqlite3.connect(str(db))
     base_ts = datetime.now(timezone.utc) - timedelta(days=1)
     curve = []
@@ -83,7 +119,7 @@ def main() -> int:
             # Attribution must be derived exactly as it will be when the row is
             # written, or predict() looks up keys the learner never fitted.
             bucket = buckets.classify(_text_of(r["prompt"])[0])
-            project, feature, actor = synthetic_attribution(r["prompt"], bucket, b0 + i)
+            project, feature, actor = attribution(r, bucket, b0 + i)
             p = pred.predict(r["prompt"], "gpt-4o",
                              project=project, feature=feature, actor=actor)
             a = r["output_tokens"]
@@ -93,7 +129,7 @@ def main() -> int:
 
         # --- 2. TRAIN: write the batch, then refresh -------------------------
         for i, (r, p) in enumerate(zip(batch, preds)):
-            project, feature, actor = synthetic_attribution(r["prompt"], p.bucket, b0 + i)
+            project, feature, actor = attribution(r, p.bucket, b0 + i)
             conn.execute(
                 "INSERT INTO requests (id, ts, project_id, actor, feature, provider, "
                 "model, endpoint, input_tokens, output_tokens, cost_usd, status, "
