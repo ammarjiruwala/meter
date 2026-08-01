@@ -123,7 +123,14 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 
 *   **Treasurer Agent / Prava:** Not started.
 
-*   **Dashboard:** Not started. Tanay can read `meter.db` directly today — WAL mode is on, so reading while the proxy writes is safe.
+*   **Dashboard: BASIC LAYOUT WORKING.** `dashboard/` — Next.js (App Router) + Tailwind, `npm run dev`
+    from `dashboard/`. Reads `proxy/meter.db` directly and read-only (`dashboard/src/lib/db.ts`),
+    WAL mode makes concurrent reads with the proxy's writer safe. Renders a "Team Spend" table
+    (grouped by project/actor/feature from `requests`) and a "Provider Balances" card — the latter
+    is placeholder data (`dashboard/src/lib/wallets.ts`) since no `wallets` table exists yet.
+    Handles the ledger-not-created-yet case (nobody has run the proxy) with an empty state instead
+    of crashing. Not yet done: live streaming/polling (Phase 2's Live Logs table), Poke alert
+    wiring (Phase 3, hooks into `breaker.notify()`).
 
 *   **Resolved since kickoff:**
     1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)
