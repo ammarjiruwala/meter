@@ -14,7 +14,7 @@ another (the one you "fixed" may have been the correct one).
 
 Status key: **OPEN** — needs a decision · **RESOLVED / DONE / SHIPPED** — closed, kept for the record.
 
-26 items: A1–A6 (contradictions), B1–B18 (gaps), C1–C4 (verification).
+33 items: A1–A6 (contradictions), B1–B18 (gaps), C1–C5 (verification), D1–D4 (research findings).
 
 ---
 
@@ -687,9 +687,25 @@ header comment; not worth building until someone actually runs 1-hour TTLs.
 
 See B1. Confirmed to exist, with OpenAI-shaped errors and dual auth-header support.
 
-### C3 — Prava sandbox rate limits are unknown · OPEN
+### C3 — Prava sandbox rate limits · OPEN — researched 2026-08-01: not documented anywhere
 
 Blocks A3. Owner: Shivam.
+
+**Research result (2026-08-01, full read of `docs.prava.space` — errors.md, OpenAPI spec,
+create-session.md, developer FAQ, go-live checklist):** no RPM/RPS figures exist for any
+endpoint. The only documented throttle is `429 TRIES_EXHAUSTED` on `POST /v1/sessions`,
+described inconsistently as either a session-allowance depletion or a sandbox
+test-transaction limit. No `Retry-After` / `X-RateLimit-*` headers are documented anywhere.
+The mandate charge/report paths declare no 429 at all (charge: 400/401/403/409/500; report:
+400/401/404/500).
+
+**Implication for the loop-interval decision:** no published number constrains either 30s or
+3s. The real limiters are (a) the undocumented sandbox test-transaction allowance (ask
+`support@prava.space`, quoting an `X-Response-ID`, or measure empirically) and (b) the
+mandate's per-cycle cap (see the mandate finding in CONTEXT.md §6a). Prava's own docs
+recommend a **3s poll cadence** for session credentials — a precedent that supports the
+demo-box `TREASURER_INTERVAL_S=3`. Implement backoff on 429 and treat `TRIES_EXHAUSTED` as
+a loop trip rather than a retryable blip.
 
 ### C4 — Provider credit balances · **RESOLVED — both providers funded and verified live**
 
@@ -744,3 +760,80 @@ committed; verified by scan before every commit.
 request is, verbatim, the failure Meter exists to prevent — "when the balance hits zero at
 3am, production returns errors until a human wakes up." We have an unusually authentic
 screenshot of the problem statement.
+
+### C5 — Linq sandbox requires the recipient to message first · OPEN — verify before demo day
+
+Found in a full read of `docs.linqapp.com` (2026-08-01). The sandbox error reference lists
+`2008 Recipient not allowed` with the rule *"in sandbox, recipients must message you first"*.
+If the demo `.env` uses a sandbox Linq token, breaker alerts to the CTO's number may silently
+fail with 2008 until that number has messaged the sending line once.
+
+**Recommendation:** before demo rehearsal, send one iMessage from the line to the demo
+number (or confirm with the Linq token whether the account is sandbox). One sentence in
+CONTEXT.md §6a records the gotcha; this item closes when someone has verified which mode
+the token is in. Owner: Tanay.
+
+---
+
+## D. Research findings (2026-08-01)
+
+Patterns from a review of the major open-source LLM gateways (LiteLLM, Helicone, Portkey,
+OpenRouter, one-api/new-api, Langfuse) — things Meter deliberately does not yet have, or does
+have and was validated on. These are recorded for the team to pick from; none block the demo.
+
+### D1 — Client-visible request id / idempotency key · OPEN
+
+Every major gateway exposes a request id — Helicone accepts a client-supplied
+`Helicone-Request-Id` header (idempotent retries, links retries to one logical request),
+OpenRouter returns `request_id`, LiteLLM has a `request_id` column. Meter's request id is
+generated internally (B8) but never echoed to the caller, and nothing accepts a client
+idempotency key.
+
+**Recommendation (post-hackathon unless a judge asks):** echo an `X-Meter-Request-Id`
+response header and accept an optional client-supplied `X-Meter-Request-Id`, `INSERT OR
+REPLACE` semantics already make a replay idempotent (B8). ~5 lines, answers "what happens
+when the client retries?". Owner: Shubh.
+
+### D2 — Soft-budget alert below the hard ceiling · OPEN
+
+LiteLLM distinguishes `soft_budget` (warn only) from `max_budget` (block). Meter has the
+block side (`meter.yaml` ceilings → 429) and the alert rail (`alerts/` → iMessage) but no
+"approaching the ceiling" warning. An iMessage at ~80% of a ceiling turns a binary block
+into a preventable incident — and is a demo beat the current 429-only flow cannot show.
+
+**Recommendation:** a per-ceiling threshold check in the Treasurer loop (it already scans
+burn rate) that fires `alerts/` when spend crosses a configurable fraction of a ceiling.
+Cheap; the pieces all exist. Owner: Shubh or Tanay, post-hackathon.
+
+### D3 — `402` vs `429` for budget refusals · OPEN — documentation decision
+
+OpenRouter splits the two: credit/balance exhaustion is `402 Payment Required`, rate limits
+are `429` with `X-RateLimit-*` headers. Meter refuses budget-exhausted requests with `429`
+(no rate-limit headers) — which matches LiteLLM's budget-block behaviour, but conflates
+"out of money" with "too fast" on the wire.
+
+**Recommendation:** keep `429` (it is what SDKs already back off on, and LiteLLM does the
+same), but add one sentence to `proxy/README.md` stating that Meter's `429` means "budget
+exhausted", not "rate limited", and reserve `402` for a future paywall. Owner: Shubh, if
+anyone asks.
+
+### D4 — Things Meter already does that the gateways validate (recorded, no action)
+
+- **Reserve/reconcile/release** authorize-capture matches LiteLLM's budget reservation and
+  one-api's pre/post consumption exactly (A5, B7).
+- **Throttle-vs-block split** (429 tag-scoped vs 403 key-scoped) mirrors LiteLLM's
+  budget-throttle escape hatch and Portkey's breaker-on-429 handling.
+- **Keys stored as SHA-256 hashes** (`proxy/db.py` `hash_key`) matches LiteLLM's
+  `hash_token`.
+- **Versioned pricing files** match Langfuse's cost-at-ingestion rule: never reprice
+  history (C1).
+- **`stream_options.include_usage` injection** is Helicone's canonical streaming-cost fix
+  and LiteLLM's `always_include_stream_usage` (B15/B16).
+- **Floor+burst detection** is the SRE multi-window pattern (A1).
+
+**Deliberately not copied (post-hackathon candidates):** provider retries with backoff and
+fallback routing (Portkey), per-key RPM/TPM token buckets (LiteLLM), response caching with
+cache-hit accounting (Helicone), pre-aggregated daily spend rollups (LiteLLM), mid-stream
+error encoding as SSE `finish_reason: "error"` (OpenRouter). All are real industry features;
+none are needed for the 48-hour demo, and a few (retries) would obscure the ledger's
+one-row-per-request contract.

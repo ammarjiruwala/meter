@@ -126,8 +126,8 @@ cooldown and can always be reset manually.
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Postgres — the ledger. **Not read yet** (Phase 2; the proxy uses SQLite until then) |
-| `REDIS_URL` | Redis — wallet reservations, breaker state. **Not read yet** (Phase 2) |
+| `DATABASE_URL` | Postgres — the ledger. **Not read yet** (the proxy uses SQLite for the demo; the port is a schema swap) |
+| `REDIS_URL` | Redis — wallet reservations, breaker state. **Not read yet** (needed at proxy replica #2 only) |
 | `PRAVA_API_KEY` / `PRAVA_MANDATE_ID` | Payment rail credentials |
 | `TREASURER_DRY_RUN` | Log top-up decisions without transacting. Default `true`. |
 | `TREASURER_MAX_TOPUP_USD` | Per-transaction ceiling |

@@ -74,7 +74,7 @@ sqlite3 meter.db \
 ## Test it
 
 ```bash
-python tests/test_proxy.py     # 207 checks, no framework, ~3s
+python tests/test_proxy.py     # 215 checks, no framework, ~3s
 ```
 
 Covers model routing, provider key substitution, longest-prefix pricing, both SSE parser
@@ -181,17 +181,15 @@ client, so it is a floor rather than a production number, though comfortably ins
 
 Two caveats, both load-bearing if this goes in front of judges:
 
-1. **It predates ESTIMATE and RESERVE.** The estimate adds ~0.03 ms
-   (`predictor/README.md`); a reserve costs one or two SQLite reads, but *only* when a
-   ceiling is configured — `budget.authorize` returns on a dict lookup when `meter.yaml`
-   is absent, so the demo path is barely affected and the enforced path is untested.
-2. **The harness that produced it was never committed**, so nobody can currently reproduce
-   the number on demand. `overhead_ms` is a column on `requests` and
+1. **Loopback is a floor, not a production number.** The harness (`tests/bench_overhead.py`,
+   committed 2026-08-01) measures against a local fake upstream — no TLS, no real provider
+   round trip, single client. Re-run it in both configurations — no `meter.yaml` and with
+   one — before a judge-facing slide; `overhead_ms` is a column on `requests` and
    `X-Meter-Overhead-Ms` is on every response, so re-deriving it is a loop plus one
-   `SELECT` — it just does not exist yet.
-
-Re-measuring is Phase 4 work (PLAN.md, Shubh). Do it in both configurations — no
-`meter.yaml` and with one — and commit the script that does it.
+   `SELECT`.
+2. **The estimate adds ~0.03 ms** (`predictor/README.md`); a reserve costs one or two
+   SQLite reads, but *only* when a ceiling is configured — `budget.authorize` returns on a
+   dict lookup when `meter.yaml` is absent, so the demo path is barely affected.
 
 ---
 
@@ -316,9 +314,7 @@ Each of these is a deliberate omission with a reason, not an oversight.
 | Missing | Why | Who / when |
 | --- | --- | --- |
 | **Redis-backed reservations** | Reservations now exist, held in-process (`budget.py`). Redis is not what makes authorize/capture correct — serialisation is, and one proxy process plus an `asyncio.Lock` is an identical guarantee. Redis becomes load-bearing at replica #2; the upgrade is `_holds` → a Redis hash and `authorize` → the Lua script | Shubh, at replica #2 (PROPOSALS.md A5) |
-| **Postgres** | Still SQLite. Shivam's treasury tables (`wallets`, `mandates`, `treasury_events`) landed in this same file, also with ARCHITECTURE.md §4 column names verbatim, so the port stays one swap for both halves | Shivam, Phase 2 |
+| **Postgres** | Still SQLite. Shivam's treasury tables (`wallets`, `mandates`, `treasury_events`) landed in this same file, also with ARCHITECTURE.md §4 column names verbatim, so the port stays one swap for both halves | Shivam, post-hackathon (was "Phase 2", deferred — SQLite is deliberate for the demo) |
 | **Prediction for Claude models** | `tiktoken` has no Anthropic vocabulary, and the predictor raises rather than returning a number ~10-20% wrong. Those requests reserve `$0`, so a ceiling still stops them — one request later than it stops an OpenAI one | Needs Anthropic's `count_tokens` endpoint (a network call in the request path — not free) |
 | **The predictor's learning tier** | `learner.py` stays on priors until ~30 rows per bucket exist. The ledger now records `predicted_output_tokens` and `bucket`, so the feedback loop is *closed* — but nobody calls `load_fits()` on a schedule yet | Ammar |
 | **7-day breaker baseline** | Resolved differently: the burst check compares against the trailing *hour*, which needs no accumulated history and works on day one. See ARCHITECTURE.md §6 | Done |
-| **Poke/Linq alerts** | `breaker.notify()` is the seam, deliberately log-only. An awaited third-party HTTP call in the request path puts someone else's latency in front of production | Tanay, Phase 3 |
-| **Docker Compose** | README.md quickstart promises `docker compose up`; no phase assigns it | See PROPOSALS.md B10 |

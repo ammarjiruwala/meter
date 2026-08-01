@@ -99,7 +99,18 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — **`shubh/phase2` merged into main** (prior entry below), then
+*   **Last updated:** 2026-08-01 — **full documentation review + external research (Shubh,
+    same day as phase3 merge):** Prava docs (`docs.prava.space`), Linq docs
+    (`docs.linqapp.com`), and the major open-source LLM gateways (LiteLLM, Helicone, Portkey,
+    OpenRouter, one-api, Langfuse) were read for drift and gaps. Findings: Prava rate limits
+    are **undocumented anywhere** (C3 researched, still open); recurring mandates are
+    documented as **one charge per cycle** with no over-count error — the Treasurer loop must
+    self-gate on `renewsAt` + status (see Treasurer entry); Linq sandbox requires the
+    recipient to message first (C5, verify before demo); "Poke is not Linq's former name" —
+    Poke is Linq's flagship customer; gateway review added `PROPOSALS.md` D1–D4 (request-id
+    echo, soft-budget alert, 402-vs-429 note, and a "things we already do right" list) and
+    fixed stale `proxy/README.md` text (check counts, the overhead-harness contradiction,
+    and the "Not implemented" table). Prior entries — **`shubh/phase2` merged into main**, then
     **`shubh/phase3` + full-codebase audit (Shubh, same day).** Phase 3: the **Treasurer agent
     loop** (`treasury/loop.py`, registered in `proxy/app.py` lifespan) watches burn rate every
     `TREASURER_INTERVAL_S` and autonomously tops up when projected runway drops under
@@ -212,9 +223,23 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         success on stage". `prava.py` now reads `config`, which parses it leniently like every other
         boolean. **If your `.env` says `PRAVA_LIVE_MODE=true` and you were relying on it quietly
         simulating, it will now transact.** Default (unset) still simulates; verified end to end.
-    *   **Open question:** docs say recurring mandates allow "one charge per cycle", but our sandbox
-        run put several charges through a monthly mandate. Unresolved, and the demo's repeat-top-up
-        narrative depends on it.
+    *   **Open question — researched 2026-08-01, answer in the docs is "one charge per cycle".**
+        `docs.prava.space` (concepts/mandates.md) states recurring mandates allow one charge per
+        cycle, but our sandbox run put several charges through a monthly mandate and **no
+        documented error code covers over-count** — `THRESHOLD_EXCEEDED` is explicitly a Visa
+        decline on the charge *amount* cap, surfaced in the charge payload's `errorCode` /
+        `errorMessage` fields (with `status: "failed"`), never in the `{error: {code}}`
+        envelope. Enforcement of the per-cycle count is undocumented and likely unenforced in
+        sandbox. **The Treasurer loop must therefore self-gate on `renewsAt` + mandate status
+        rather than trusting Prava to reject** — the demo's repeat-top-up narrative still works,
+        but the loop owns the gate. (The code already reads the Visa decline correctly:
+        `topup.py` treats `status == "failed"` / `errorMessage` as `charge_declined`.)
+    *   **Rate limits — researched 2026-08-01: not documented anywhere.** No RPM/RPS figures
+        exist in any Prava doc (errors.md, OpenAPI, FAQ); the only documented throttle is
+        `429 TRIES_EXHAUSTED` on `POST /v1/sessions` (sandbox test-transaction allowance), with
+        no `Retry-After` headers. C3 stays open: ask `support@prava.space` or measure
+        empirically. Prava's own docs use a **3s poll cadence** for session credentials — good
+        precedent for the demo-box `TREASURER_INTERVAL_S=3`.
 
 *   **Dashboard: LAYOUT + LIVE LOGS WORKING, RESTYLED.** `dashboard/` — Next.js (App Router) +
     Tailwind, `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
@@ -323,8 +348,9 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         `requests` table, and the whole page 500'd with `no such table: requests`. Each read
         checks `sqlite_master` first and degrades to an empty state per card, so a half-built
         database shows what it has instead of nothing.
-    *   Not yet done: Model Efficiency view (Phase 3, needs Ammar's cross-model data), Agent
-        Activity panel (Phase 3, needs the Treasurer loop).
+    *   Not yet done: Model Efficiency view (Phase 3, needs Ammar's cross-model data — B11),
+        Agent Activity panel (Phase 3; the Treasurer loop it was waiting on exists since
+        2026-08-01, so this is unblocked and just needs the streaming-log wiring).
 
 *   **Alerts (Poke / Linq): WORKING, VERIFIED LIVE.** A real iMessage was delivered end to end
     through the shipping code path on 2026-08-01 (Linq returned `202 Accepted`). `alerts/` — a sibling
@@ -350,6 +376,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         (`+1217213007`) still sits inside E.164's generic 8-15 range, so the generic rule passed a
         real typo through to a live send attempt. `+1` now requires exactly 10 national digits;
         other country codes keep the generic rule.
+    *   **Wording: Linq is not "Poke's former name".** Poke (The Interaction Company of
+        California) is Linq's flagship *customer*; Linq is the iMessage infrastructure provider
+        (`linqapp.com`). Our alert calls `POST /v3/messages` on the Linq Partner API, which
+        resolves the sending line itself — the docs' recommended pattern. The API is current
+        (V3; V2 is legacy), and error `1002` is confirmed as an E.164 *format* check — our
+        NANP-aware validation is a strict subset of what Linq validates.
+    *   ⚠ **Sandbox gotcha, verify before demo day (error `2008`): in sandbox, recipients
+        must message the sending line first.** If `.env` uses a sandbox token, the CTO's phone
+        may need to text the line once before breaker alerts deliver — otherwise the demo's
+        iMessage beat silently fails. Confirmed against `docs.linqapp.com` (error reference).
+    *   **Rate limits we are nowhere near:** 30 msgs/60s per sender–recipient pair, and a
+        sandbox cap of 100 msgs/day — our 300s `POKE_COOLDOWN_S` caps us at ~12/hour. Nothing
+        to change; known so nobody "optimises" the cooldown down.
+    *   **One-line improvement, not yet done:** log the `X-Trace-ID` Linq returns on success —
+        currently only logged inside failure bodies.
     *   **Verified end to end against a running proxy** (2026-08-01), not just from a direct call.
         Seeded $25.20 into a 5-minute window against a $20 floor at a 12x burst, sent one tagged
         request, and got: `429` with `X-Meter-Breaker-Scope`/`-Mode` and `Retry-After`, the trip
@@ -372,12 +413,14 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     6.  ✅ **Feature-ceiling validation rule corrected — Shubh, 2026-08-01.** `ARCHITECTURE.md` §4 required rejecting a project whose feature ceilings *sum* past its own; that rule was a mis-restatement of the prior art it cited and inverted the failure mode. §4 now carries a per-feature rule plus a warn-only sum check, and a third rule the original omitted: the loader must replace rather than upsert, or a ceiling deleted from `meter.yaml` keeps being enforced. (`PROPOSALS.md` B17)
 
 *   **Open blockers/decisions:**
-    1.  **`docker compose up` is documented in `README.md` and owned by nobody** — it is the first command in our own quickstart. (`PROPOSALS.md` B10). *(`POST /v1/annotate`, the other half of this item, shipped 2026-08-01.)*
+    1.  ✅ **`docker compose up` shipped — Shubh, 2026-08-01.** Single-service `Dockerfile` (python:3.12-slim, uvicorn, named volume for `meter.db`) + `compose.yaml` (port 8080, `env_file: .env`, read-only mounts for `meter.yaml` and `pricing/`). The five-service version (postgres/redis/dashboard) remains future work. (`PROPOSALS.md` B10)
     2.  **The Visa VIC track has no architectural surface.** Tanay's Phase 0 confirmed the test-card requirements are covered by `docs/prava/api-reference/test-cards.md`, so the *docs* gap is closed — but nothing in `ARCHITECTURE.md` or the build actually targets VIC. We are still entered in a track no component is designed for. (`PROPOSALS.md` B14)
     3.  ✅ **Both providers are funded and verified live end to end** (moved here from blockers, 2026-08-01). Real completions and real streams through the proxy on OpenAI *and* Anthropic, all rows priced to the published rates exactly, cross-provider routing landing both in one ledger. The REAL LLM CALLS item in §3 is fully unblocked — `predictor/calibrate.py` and the Phase 3 cross-model comparison have both providers to run against. **Rotate all three keys** (2 Anthropic, 1 OpenAI) — they were shared over chat; the live ones exist only in the gitignored `.env`. (`PROPOSALS.md` C4)
     4.  **Cross-model routing is specified two ways** — §5A says the *proxy* sends the same prompt to both providers; PLAN.md Phase 3 has it as an offline script. The script is right: shadow-calling a second provider on live traffic doubles the customer's bill inside a cost-control tool. Left as a proposal pending Ammar. (`PROPOSALS.md` B11)
+    5.  **Prava rate limits are undocumented (researched 2026-08-01)** — no RPM/RPS anywhere in `docs.prava.space`; only `429 TRIES_EXHAUSTED` on `POST /v1/sessions` exists. C3 stays open: ask `support@prava.space` or measure empirically. Prava's own docs recommend a 3s poll cadence, which supports the demo-box `TREASURER_INTERVAL_S=3`. (`PROPOSALS.md` C3)
+    6.  **Linq sandbox rule to verify before demo day** — in sandbox, recipients must message the sending line first (error `2008`), or breaker alerts silently fail to deliver. (`PROPOSALS.md` C5)
 
-*   **`PROPOSALS.md`** collects 20 items from a full architecture read — contradictions between the three source-of-truth docs, and gaps they leave undefined. Four are now closed (pricing verified, Redis decided, budget enforcement owned, disconnect-capture and ledger idempotency shipped). The rest still need decisions. **`README.md` and `ARCHITECTURE.md` remain unedited** — proposals get approved there, not applied silently.
+*   **`PROPOSALS.md`** collects 33 items from full architecture and external research reads — contradictions between the three source-of-truth docs, gaps they leave undefined, and verification tasks. Most are now closed; the rest still need decisions. **`README.md` and `ARCHITECTURE.md` remain unedited** — proposals get approved there, not applied silently.
 
 ---
 
