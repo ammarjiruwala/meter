@@ -120,10 +120,34 @@ def test_phone_validation() -> None:
     check("rejects leading zero country code", not alerts_config.phone_is_valid("+04155551234"))
     check("rejects empty", not alerts_config.phone_is_valid(""))
 
+    # Regression: a real typo that got all the way to a live send attempt. One
+    # digit short of a US number still sits inside E.164's generic 8-15 range, so
+    # the generic rule alone let it through.
+    check(
+        "rejects a +1 number one digit short",
+        not alerts_config.phone_is_valid("+1217213007"),
+    )
+    check("accepts the corrected +1 number", alerts_config.phone_is_valid("+12177213007"))
+    check(
+        "rejects a +1 number one digit long",
+        not alerts_config.phone_is_valid("+121772130071"),
+    )
+    # Non-NANP country codes keep the generic rule — we cannot encode every plan.
+    check("accepts a UK number", alerts_config.phone_is_valid("+447911123456"))
+
     configure(phone="415-555-1234")
     ok, reason = alerts_config.is_configured()
     check("malformed number blocks the send", ok is False)
     check("and the reason names the problem", "E.164" in reason, reason)
+
+    configure(phone="+1217213007")
+    ok, reason = alerts_config.is_configured()
+    check("short +1 number blocks the send", ok is False)
+    check(
+        "and the reason says how many digits it wanted",
+        "exactly 10" in reason,
+        reason,
+    )
 
 
 def test_payload_shape() -> None:
