@@ -446,7 +446,17 @@ async def _forward_stream(
 
     async def stream_body():
         try:
-            async for chunk in upstream.aiter_raw():
+            # `aiter_bytes`, NOT `aiter_raw`. httpx puts `Accept-Encoding: gzip, deflate`
+            # on every outbound request by default, and real providers honour it — so the
+            # raw stream arrives gzipped. `aiter_raw` yields those compressed bytes, which
+            # breaks this two ways at once: the tap parses gzip as SSE and finds no usage
+            # (silently degrading every streamed row to a byte estimate), and we forward
+            # compressed bytes while stripping `content-encoding` as hop-by-hop below, so
+            # the client is handed gzip labelled as `text/event-stream` and cannot read the
+            # stream at all. `aiter_bytes` decompresses, which is what the headers we send
+            # actually promise. Keeping compression on the proxy↔provider hop is worth it;
+            # it is the one that crosses the internet.
+            async for chunk in upstream.aiter_bytes():
                 if state["ttft_ms"] is None:
                     state["ttft_ms"] = (time.perf_counter() - upstream_started) * 1000
                 forward = tap.feed(chunk)

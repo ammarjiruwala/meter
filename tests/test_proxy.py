@@ -209,6 +209,27 @@ def test_openai_stream() -> None:
     check("usage still captured after being stripped",
           tap.usage.input_tokens == 100 and tap.usage.output_tokens == 8)
 
+    # Anthropic's OpenAI-compatibility endpoint does NOT emit usage as a separate
+    # content-free chunk the way OpenAI does — it merges usage into the final content
+    # chunk, the one carrying finish_reason. This fixture is copied from a real response
+    # observed on 2026-08-01. Dropping this chunk would strip the client's end-of-stream
+    # signal, so it must be forwarded even though we injected the usage flag ourselves.
+    compat = (
+        b'data: {"id":"msg_1","choices":[{"index":0,"delta":{"content":"hi"}}],'
+        b'"object":"chat.completion.chunk"}\n\n'
+        b'data: {"id":"msg_1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],'
+        b'"object":"chat.completion.chunk",'
+        b'"usage":{"completion_tokens":13,"prompt_tokens":11,"total_tokens":24}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    tap = providers.StreamTap(providers.SHAPE_OPENAI, drop_injected_usage=True)
+    forwarded = tap.feed(compat) + tap.flush()
+    check("usage merged into a content chunk is still captured",
+          tap.usage.input_tokens == 11 and tap.usage.output_tokens == 13, f"{tap.usage}")
+    check("that chunk is NOT dropped — finish_reason must survive",
+          b'"finish_reason":"stop"' in forwarded, forwarded.decode())
+    check("compat stream is forwarded byte-identical", forwarded == compat)
+
     # The failure that only shows up on real networks: chunks do not arrive aligned to
     # SSE event boundaries. Feeding one byte at a time is the worst case.
     tap = providers.StreamTap(providers.SHAPE_OPENAI, drop_injected_usage=False)
@@ -516,6 +537,98 @@ def test_revocation_fails_closed() -> None:
         config.BREAKER_ENABLED = True
 
 
+def test_gzipped_upstream_stream() -> None:
+    """A compressed SSE stream must still be parsed AND forwarded readably.
+
+    This is the one test in this file that talks over a real socket, and it exists because
+    a fake upstream that does not compress cannot catch the bug it guards:
+
+    httpx puts `Accept-Encoding: gzip, deflate` on every outbound request by default, and
+    real providers honour it. Reading the response with `aiter_raw()` yields the still-
+    compressed bytes, which fails twice over — the tap parses gzip as SSE, finds no usage,
+    and silently downgrades the row to a byte estimate; and the proxy forwards compressed
+    bytes while stripping `content-encoding` as hop-by-hop, handing the client gzip
+    labelled `text/event-stream`. Both were invisible to every other test here, and both
+    would have surfaced live.
+    """
+    print("\ngzipped upstream stream")
+    import gzip, threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    payload = gzip.compress(OPENAI_STREAM)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length", 0) or 0))
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-encoding", "gzip")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):  # silence the default stderr access log
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    async def drive():
+        import httpx
+        from httpx import ASGITransport
+        from proxy.app import app as proxy_app
+
+        config.OPENAI_BASE_URL = f"http://127.0.0.1:{port}/v1"
+        config.OPENAI_API_KEY = "sk-fake"
+        config.BREAKER_ENABLED = False
+
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=proxy_app), base_url="http://meter"
+        ) as client:
+            proxy_app.state.http = httpx.AsyncClient(timeout=30)
+            body = b""
+            async with client.stream(
+                "POST", "/v1/chat/completions",
+                headers={"Authorization": "Bearer test_key_alpha",
+                         "X-Meter-Feature": "gzip-stream"},
+                json={"model": "gpt-4o", "stream": True,
+                      "messages": [{"role": "user", "content": "hi"}]},
+            ) as resp:
+                status = resp.status_code
+                async for chunk in resp.aiter_bytes():
+                    body += chunk
+            await asyncio.sleep(0.6)          # let the capture task land
+            await proxy_app.state.http.aclose()
+            return status, body
+
+    import asyncio
+    status, body = asyncio.run(drive())
+    server.shutdown()
+
+    check("gzipped upstream stream returns 200", status == 200, str(status))
+    check("client receives DECOMPRESSED SSE, not gzip bytes",
+          body.startswith(b"data:"), repr(body[:40]))
+    check("content survived decompression intact", b'"Hel"' in body and b"[DONE]" in body,
+          repr(body[:200]))
+
+    row = [r for r in _all_rows() if r["feature"] == "gzip-stream"]
+    check("gzipped stream produced a ledger row", len(row) == 1, str(len(row)))
+    if row:
+        r = row[0]
+        check("usage parsed from the COMPRESSED stream (not byte-estimated)",
+              r["estimated"] == 0, str(dict(r)))
+        check("real token counts recovered through gzip",
+              r["input_tokens"] == 100 and r["output_tokens"] == 8
+              and r["cache_read_tokens"] == 20, str(dict(r)))
+
+
+def _all_rows() -> list[dict]:
+    conn = db.connect()
+    with db._lock:
+        return [dict(r) for r in conn.execute("SELECT * FROM requests")]
+
+
 def _with_breaker_disabled(project: str, feature: str, key: dict) -> bool:
     config.BREAKER_ENABLED = False
     try:
@@ -540,6 +653,7 @@ def main() -> int:
         test_breaker,
         test_burst_detection,
         test_revocation_fails_closed,
+        test_gzipped_upstream_stream,
     ):
         suite()
     print(f"\n{PASSED} checks passed")
