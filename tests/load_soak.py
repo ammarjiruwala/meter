@@ -9,7 +9,7 @@ half: N concurrent clients driving the full enforced path while the Treasurer lo
 It exists to test a claim the docs make but nothing measured. CLAUDE.md says WAL plus
 `busy_timeout` covers two writers *because* every treasury write is a single statement
 with no transaction held open across a network call. That is an argument. This script is
-the evidence, and it checks four things the argument implies:
+the evidence:
 
   1. **No dropped ledger rows.** Every 2xx must leave a row in `requests`. A missing row
      understates spend, the one direction of error a budget tool cannot have.
@@ -17,28 +17,32 @@ the evidence, and it checks four things the argument implies:
      raise. Any occurrence means the timeout is too low or a transaction is held open.
   3. **The Treasurer actually wrote.** A soak where the second writer never ran proves
      nothing, so the run asserts `treasury_events` grew rather than assuming it did.
-  4. **The event loop never stalls.** The one that actually catches something — see below.
+  4. **The event loop never stalls.** A blocking SQLite call made from a coroutine holds
+     the only event loop and stalls every in-flight request, and nothing logs when it does.
+  5. **Every reservation is released.** A leaked hold spends the ceiling twice.
 
 Usage:
-    python tests/load_soak.py [--seconds 20] [--concurrency 16] [--tick-interval 0.5]
+    python tests/load_soak.py [--seconds 20] [--concurrency 16] [--tick-interval 1]
+    python tests/load_soak.py --stream            # the streamed path
+    python tests/load_soak.py --stream --break-heartbeat   # negative control, MUST fail
 
 `--tick-interval` is deliberately far below the 30s default: the point is to maximise the
 overlap between the two writers, not to reproduce production pacing. A soak that only
 collides once proves nothing either way.
 
-Two caveats, both load-bearing when quoting anything this prints:
+`--stream` adds five more checks. Responses are configured to run **longer than the
+reservation TTL**, which is the condition `budget.extend()`'s heartbeat exists for and
+ARCHITECTURE.md §2 flags as failing silently. `--break-heartbeat` disables the heartbeat
+and the reservation check must then fail — run it after touching that check, because the
+first version of it passed under this control and was therefore worthless.
 
-* **Non-streamed requests only.** The streamed path holds a reservation across the whole
-  response and heartbeats it, which ARCHITECTURE.md §2 flags as a silent failure if the
-  hold expires mid-flight — on the largest requests in the system. Exercising that needs
-  an SSE fake upstream this harness does not have. Nothing here says streams are safe
-  under load; it says non-streamed writes are.
-* **One process, one event loop.** Proxy, fake upstream, Treasurer and load generator all
-  share them, so this measures *contention* faithfully but not network behaviour. That is
-  what the baseline control run exists to separate: at high concurrency the harness
-  saturates itself, and without the control a collapse in throughput looks like the
-  proxy's fault. A stall reported here is real; an absence of stalls is not proof of
-  absence under TLS against a real provider.
+One caveat, load-bearing when quoting anything this prints: **one process, one event
+loop.** Proxy, fake upstream, Treasurer and load generator all share them, so this
+measures *contention* faithfully but not network behaviour. That is what the baseline
+control run exists to separate — at high concurrency the harness saturates itself, and
+without the control a collapse in throughput looks like the proxy's fault. A stall
+reported here is real; an absence of stalls is not proof of absence under TLS against a
+real provider.
 
 Owner: Shubh (Proxy & Infra), Phase 4.
 """
@@ -112,8 +116,12 @@ class LockErrorCounter(logging.Handler):
             self.messages.append(text[:300])
 
 
-async def heartbeat(stop: asyncio.Event, samples: list[float]) -> None:
+async def loop_stall_probe(stop: asyncio.Event, samples: list[float]) -> None:
     """Measure event-loop scheduling delay.
+
+    Named for what it measures, not "heartbeat" — this file already has a heartbeat, the
+    *reservation* one that `--break-heartbeat` disables, and two unrelated things by that
+    name in one harness is how a later reader breaks the wrong one.
 
     This is the check that actually earns its place. Row counts and lock errors test the
     *storage* layer, but the failure mode this codebase is genuinely exposed to is a
@@ -196,47 +204,60 @@ async def stream_worker(
             async with client.stream(
                 "POST",
                 f"http://127.0.0.1:{port}/v1/chat/completions",
-                headers={
-                    "Authorization": "Bearer mk_soak",
-                    "X-Meter-Feature": "soak",
-                    "X-Meter-Actor": "load-harness",
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "stream": True,
-                    "messages": [{"role": "user", "content": "hi"}],
-                },
+                headers=_SOAK_HEADERS,
+                json={**_SOAK_BODY, "stream": True},
             ) as r:
                 body = b""
                 async for piece in r.aiter_bytes():
                     body += piece
-        except Exception as exc:  # noqa: BLE001
-            stats["errors"] += 1
-            stats["error_detail"].append(repr(exc)[:200])
+        except Exception as exc:  # noqa: BLE001 - a transport error is a result here
+            _record_error(stats, exc)
             continue
 
-        stats["latency_ms"].append((time.perf_counter() - start) * 1000)
-        stats["sent"] += 1
-        if r.status_code != 200:
-            stats["non_200"] += 1
-            stats["status_codes"][r.status_code] = (
-                stats["status_codes"].get(r.status_code, 0) + 1
-            )
+        if not _record(stats, start, r.status_code):
             continue
-        stats["ok"] += 1
         # The client-visible contract: readable SSE, terminated, and the injected
         # usage chunk stripped back out rather than leaked to the caller.
         if b"data: " not in body or b"[DONE]" not in body:
-            stats["unreadable"] = stats.get("unreadable", 0) + 1
+            stats["unreadable"] += 1
         if b'"usage"' in body:
-            stats["usage_leaked"] = stats.get("usage_leaked", 0) + 1
+            stats["usage_leaked"] += 1
 
 
 def _new_stats() -> dict:
     return {
-        "sent": 0, "ok": 0, "non_200": 0, "errors": 0,
-        "error_detail": [], "status_codes": {}, "latency_ms": [],
+        "sent": 0, "ok": 0, "non_200": 0, "errors": 0, "unreadable": 0,
+        "usage_leaked": 0, "error_detail": [], "status_codes": {}, "latency_ms": [],
     }
+
+
+_SOAK_HEADERS = {
+    "Authorization": "Bearer mk_soak",
+    "X-Meter-Feature": "soak",
+    "X-Meter-Actor": "load-harness",
+}
+_SOAK_BODY = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]}
+
+
+def _record(stats: dict, start: float, status: int) -> bool:
+    """Book one completed request. Returns whether it was a 2xx.
+
+    Shared by both workers so the streamed and non-streamed runs cannot drift into
+    counting things differently — which would make their numbers quietly incomparable.
+    """
+    stats["latency_ms"].append((time.perf_counter() - start) * 1000)
+    stats["sent"] += 1
+    if status == 200:
+        stats["ok"] += 1
+        return True
+    stats["non_200"] += 1
+    stats["status_codes"][status] = stats["status_codes"].get(status, 0) + 1
+    return False
+
+
+def _record_error(stats: dict, exc: Exception) -> None:
+    stats["errors"] += 1
+    stats["error_detail"].append(repr(exc)[:200])
 
 
 async def worker(
@@ -248,35 +269,17 @@ async def worker(
     headers: dict | None = None,
 ) -> None:
     """Drive requests until told to stop, recording outcome per request."""
-    headers = headers if headers is not None else {
-        "Authorization": "Bearer mk_soak",
-        "X-Meter-Feature": "soak",
-        "X-Meter-Actor": "load-harness",
-    }
+    headers = _SOAK_HEADERS if headers is None else headers
     while not stop.is_set():
         start = time.perf_counter()
         try:
             r = await client.post(
-                f"http://127.0.0.1:{port}{url}",
-                headers=headers,
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [{"role": "user", "content": "hi"}],
-                },
+                f"http://127.0.0.1:{port}{url}", headers=headers, json=_SOAK_BODY
             )
         except Exception as exc:  # noqa: BLE001 - a transport error is a result here
-            stats["errors"] += 1
-            stats["error_detail"].append(repr(exc)[:200])
+            _record_error(stats, exc)
             continue
-        stats["latency_ms"].append((time.perf_counter() - start) * 1000)
-        stats["sent"] += 1
-        if r.status_code == 200:
-            stats["ok"] += 1
-        else:
-            stats["non_200"] += 1
-            stats["status_codes"][r.status_code] = (
-                stats["status_codes"].get(r.status_code, 0) + 1
-            )
+        _record(stats, start, r.status_code)
 
 
 async def main() -> int:
@@ -531,7 +534,7 @@ async def main() -> int:
     _section("Running")
     client = httpx.AsyncClient(timeout=60.0, limits=httpx.Limits(
         max_connections=args.concurrency * 2))
-    hb = asyncio.create_task(heartbeat(stop, stall_samples))
+    hb = asyncio.create_task(loop_stall_probe(stop, stall_samples))
     watcher = asyncio.create_task(watch_reservations())
     drive = stream_worker if args.stream else worker
     workers = [
@@ -669,8 +672,8 @@ async def main() -> int:
         print(f"  byte-estimated:  {byte_estimated} (want 0 — usage came off the wire)")
         print(f"  live holds:      peak {peak_holds}, floor {floor_holds} "
               f"(floor must stay >0 — every stream outlives its own TTL)")
-        print(f"  unreadable:      {stats.get('unreadable', 0)}")
-        print(f"  usage leaked:    {stats.get('usage_leaked', 0)}")
+        print(f"  unreadable:      {stats['unreadable']}")
+        print(f"  usage leaked:    {stats['usage_leaked']}")
 
         check("streamed rows were ledgered", streamed_rows == stats["ok"],
               f"{stats['ok']} streams served, {streamed_rows} rows")
@@ -682,14 +685,14 @@ async def main() -> int:
         )
         check(
             "every stream was readable SSE",
-            stats.get("unreadable", 0) == 0,
-            f"{stats.get('unreadable', 0)} response(s) had no 'data:'/[DONE] — "
+            stats["unreadable"] == 0,
+            f"{stats['unreadable']} response(s) had no 'data:'/[DONE] — "
             "status was 200 and the row was written, but no client could read it",
         )
         check(
             "injected usage chunk stripped from the client's stream",
-            stats.get("usage_leaked", 0) == 0,
-            f"{stats.get('usage_leaked', 0)} response(s) leaked the usage chunk the "
+            stats["usage_leaked"] == 0,
+            f"{stats['usage_leaked']} response(s) leaked the usage chunk the "
             "proxy injected for its own accounting",
         )
         check(
