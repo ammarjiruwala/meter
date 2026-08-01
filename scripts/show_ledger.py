@@ -85,7 +85,7 @@ def show_accuracy(conn: sqlite3.Connection) -> None:
     m, md, u = stats([x for v in by.values() for x in v])
     print("  " + "-" * 42)
     print(f"  {'OVERALL':<13}{len(rows):>4}{m:>7.0f}%{md:>8.0f}%{u:>7.0f}%")
-    print("\n  targets: MAPE <40%, median <30%, under-prediction <20%")
+    print(f"\n  targets: MAPE <40%, median <30%, under-prediction <20%")
     print("  under-prediction is the safety metric — it is the one that leaks a ceiling")
 
 

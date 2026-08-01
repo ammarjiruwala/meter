@@ -65,7 +65,7 @@ def load(split: str) -> List[dict]:
     path = DATA / f"{split}.jsonl"
     if not path.exists():
         sys.exit(f"missing {path} — run: python scripts/fetch_wildchat.py")
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
 
 
 def scope_and_bucket(prompt: str, cfg: ScopeConfig) -> Tuple[float, str]:

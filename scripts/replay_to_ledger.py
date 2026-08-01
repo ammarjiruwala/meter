@@ -53,7 +53,7 @@ def main() -> int:
     src = REPO / "data" / "wildchat" / f"{args.split}.jsonl"
     if not src.exists():
         sys.exit(f"missing {src} — run: python scripts/fetch_wildchat.py")
-    rows = [json.loads(line) for line in src.read_text().splitlines() if line.strip()]
+    rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
     if args.limit:
         rows = rows[: args.limit]
 
