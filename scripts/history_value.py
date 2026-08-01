@@ -71,7 +71,7 @@ def evaluate(rows: list[dict], keys: list[str]) -> tuple[float, float]:
 def main() -> int:
     if not SRC.exists():
         sys.exit(f"missing {SRC} — run: python scripts/templated_probe.py")
-    rows = [json.loads(l) for l in SRC.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in SRC.read_text().splitlines() if line.strip()]
     keys = [f"{r['project']}/{r['feature']}" for r in rows]
 
     print(f"{len(rows)} rows, {len(set(keys))} (project, feature) pairs, "
