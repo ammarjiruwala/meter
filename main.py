@@ -1,38 +1,16 @@
-import uuid
+"""Deprecated entrypoint — kept so `uvicorn main:app` keeps working.
 
-from fastapi import FastAPI
+The treasury and Prava routes that used to live here are now part of the proxy app
+(`proxy/app.py`), so the whole backend is one process on one port:
 
-from prava_service import charge_mandate, list_mandates
+    uvicorn proxy.app:app --port 8080
 
-app = FastAPI()
+This module re-exports that same app object. Nothing is lost by using it, but prefer
+the line above; this file goes away once nobody's notes point at it.
 
+Owner: Shivam (Payments & Agent).
+"""
 
-@app.get("/")
-def read_root():
-    return {"status": "Meter Proxy is running"}
+from proxy.app import app
 
-
-@app.get("/mandates")
-async def mandates():
-    data = await list_mandates()
-    return [
-        {
-            "id": m["id"],
-            "remaining": m["remaining"],
-            "approved": m["approvedAmount"],
-            "frequency": m["recurringFrequency"],
-            "status": m["status"],
-        }
-        for m in data["mandates"]
-    ]
-
-
-@app.post("/charge")
-async def charge(amount: float = 2.00):
-    return await charge_mandate(amount, f"api_{uuid.uuid4().hex[:8]}")
-
-
-@app.post("/charge-refusal")
-async def charge_refusal():
-    """Over the cap. Visa declines. This is the demo beat."""
-    return await charge_mandate(999.00, f"refuse_{uuid.uuid4().hex[:8]}")
+__all__ = ["app"]

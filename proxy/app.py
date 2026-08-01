@@ -32,6 +32,10 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from treasury import db as treasury_db
+from treasury import mock_provider
+from treasury import routes as treasury_routes
+
 from . import breaker, config, db, providers
 from .pricing import Usage, estimate_from_bytes, price
 
@@ -63,6 +67,14 @@ async def lifespan(app: FastAPI):
     db.connect()
     seeded = db.seed_keys(config.METER_KEYS)
     log.info("ledger ready at %s (%d meter key(s) seeded)", config.DB_PATH, seeded)
+
+    # Create the treasury tables at boot rather than on first use. `treasury.db.connect()`
+    # is lazy, so without this the `wallets` table does not exist until somebody happens to
+    # call a treasury route — and the dashboard reads that table directly and read-only
+    # (dashboard/src/lib/db.ts). It would fail with "no such table: wallets" on a machine
+    # where nobody had hit the endpoint yet, which is every teammate's machine.
+    treasury_db.connect()
+    log.info("treasury tables ready (wallets, mandates, treasury_events)")
 
     if not config.OPENAI_API_KEY and not config.ANTHROPIC_API_KEY:
         log.warning("no provider keys configured — every upstream call will 401")
@@ -110,6 +122,18 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Shivam's treasury surface, folded in so the backend is one process on one port rather
+# than the proxy plus a second app at repo root. Both packages already share `meter.db`;
+# sharing the process removes the port nobody remembers and the second thing to start
+# before a demo. `treasury.db` writes `wallets`/`treasury_events` to the same file the
+# ledger uses — the proxy is no longer its sole writer, which WAL and `busy_timeout`
+# handle (see treasury/db.py).
+#
+# Kept off the `/v1` prefix on purpose: `/v1` is the surface a caller's provider SDK
+# targets, and control-plane routes do not belong in it.
+app.include_router(treasury_routes.router)
+app.include_router(mock_provider.router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
