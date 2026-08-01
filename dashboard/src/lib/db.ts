@@ -35,6 +35,17 @@ function tableExists(conn: Database.Database, name: string): boolean {
   );
 }
 
+function columnExists(
+  conn: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  const rows = conn.prepare(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+  }[];
+  return rows.some((r) => r.name === column);
+}
+
 export type SpendRow = {
   project_id: string;
   actor: string | null;
@@ -136,10 +147,12 @@ export type LiveLogRow = {
   ts: string;
   actor: string | null;
   model: string | null;
-  // Not yet in the ledger — predictor/ exists but isn't wired into the proxy's
-  // request path yet (CONTEXT.md §6a). Column stays null until Shubh's Phase 2
-  // integration writes predicted_output_tokens/bucket at CAPTURE.
+  // Written at CAPTURE by the proxy, from the prediction made before the call.
+  // Null is meaningful and distinct from zero: it means the request was not
+  // predicted at all — Claude models raise rather than approximate with the wrong
+  // tokenizer, so those rows carry no forecast. `prediction_method` says which.
   predicted_cost_usd: number | null;
+  prediction_method: string | null;
   cost_usd: number;
   status: number | null;
 };
@@ -147,13 +160,25 @@ export type LiveLogRow = {
 export function getLiveLogs(limit = 50): LiveLogRow[] {
   const conn = getDb();
   if (!conn || !tableExists(conn, "requests")) return [];
+
+  // The prediction columns arrived with the predictor integration. A teammate's
+  // meter.db can predate that, and selecting a missing column throws — same class
+  // of failure as the missing-table case, so it gets the same treatment.
+  const predicted = columnExists(conn, "requests", "predicted_cost_usd")
+    ? "predicted_cost_usd"
+    : "NULL AS predicted_cost_usd";
+  const method = columnExists(conn, "requests", "prediction_method")
+    ? "prediction_method"
+    : "NULL AS prediction_method";
+
   return conn
     .prepare(
       `SELECT id,
               ts,
               actor,
               model,
-              NULL AS predicted_cost_usd,
+              ${predicted},
+              ${method},
               cost_usd,
               status
          FROM requests
