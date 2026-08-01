@@ -107,10 +107,28 @@ async def execute_topup(
                                   mandate_id=prava_mandate_id)
     txn_id = charge.get("transactionId")
 
-    if charge.get("status") == "failed" or charge.get("errorMessage"):
-        error = charge.get("errorMessage") or charge.get("errorCode") or "charge_failed"
-        db.settle_event(event["id"], "failed", prava_txn_id=txn_id, error=str(error))
-        return _refuse("charge_declined", error=error, event_id=event["id"])
+    # A timeout is not a refusal. The charge may have been accepted and only the reply
+    # lost, so the event stays `pending` — the next attempt resumes that row, reuses its
+    # idempotency key, and Prava returns the original charge as `deduplicated` instead of
+    # taking the money twice. Settling it `failed` here would throw away the only handle
+    # we have on a charge that might exist.
+    if charge.get("_transport"):
+        return _refuse("prava_unreachable", error=charge.get("_error"),
+                       detail=charge.get("_detail"), event_id=event["id"],
+                       hint="event left pending on purpose; retrying resumes it with "
+                            "the same idempotency key")
+
+    # Everything below is a definite answer from Prava: it did not happen.
+    if (not charge.get("_ok", True) or charge.get("status") == "failed"
+            or charge.get("errorMessage")):
+        error = (charge.get("errorMessage") or charge.get("errorCode")
+                 or charge.get("_error") or "charge_failed")
+        # Response id goes in the error column: it is what Prava support traces on, and
+        # discarding it at the exact moment something broke is a false economy.
+        detail = f"{error} (response-id {charge.get('_response_id')})"
+        db.settle_event(event["id"], "failed", prava_txn_id=txn_id, error=detail)
+        return _refuse("charge_declined", error=error, event_id=event["id"],
+                       response_id=charge.get("_response_id"))
 
     credentials = charge.get(_CRED) or {}
     if charge.get("simulated"):
@@ -151,7 +169,18 @@ async def execute_topup(
         return _refuse("provider_declined", reason_code=billing.decline_reason,
                        event_id=event["id"])
 
-    db.settle_event(event["id"], "settled", prava_txn_id=txn_id)
+    # The money moved and the wallet is credited, so the event is settled even if the
+    # report call failed — recording it as `failed` would be a lie about a charge that
+    # succeeded. But the unreported settlement is noted, because that charge is sitting
+    # at `awaiting_result` on Prava's side and someone has to finish it.
+    settle_error = None
+    if settlement and not settlement.get("_ok", True):
+        settle_error = (f"charged and credited, but report failed: "
+                        f"{settlement.get('_error')} "
+                        f"(response-id {settlement.get('_response_id')})")
+        log.warning("%s — txn %s", settle_error, txn_id)
+
+    db.settle_event(event["id"], "settled", prava_txn_id=txn_id, error=settle_error)
     log.info("topped up %s %s by $%.2f -> $%.2f", project_id, provider, amount_usd,
              billing.balance_usd or 0.0)
 

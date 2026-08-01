@@ -134,7 +134,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Known gap vs §5A:** §5A specifies a trailing-p95 cost fallback for `(project, endpoint, model)` at cold start. v1 uses static per-bucket priors instead — bucket-aware rather than project-aware, and available on request #1 rather than needing history. Not yet reconciled; **Ammar to raise in `PROPOSALS.md` rather than quietly treat §5A as satisfied.**
     *   **Two things block the feedback loop, both needed before we can claim any accuracy number:** (1) Shubh wiring `predict()` into the request path and writing `predicted_output_tokens` / `bucket` to the ledger at CAPTURE; (2) running `python -m predictor.calibrate` to replace the inherited priors with measured ones. `learner.py` stays dormant until ~30 rows/bucket exist.
 
-*   **Treasurer Agent / Prava: PAYMENT RAIL VERIFIED + TREASURY SCHEMA WORKING; AGENT LOOP NOT STARTED.**
+*   **Treasurer Agent / Prava: WORKING END TO END AGAINST SIMULATED PRAVA; ONE LIVE RUN OUTSTANDING.**
     `treasury/` — **mounted on Shubh's proxy app**, so there is one backend process on one port:
     `uvicorn proxy.app:app --port 8080`. The old root-level `main.py` is now a deprecation shim
     that re-exports the same app, so `uvicorn main:app` still works. Treasury routes are kept off
@@ -158,14 +158,38 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   `POST /mock-openai/billing` accepts minted credentials and credits the wallet
         (`treasury/mock_provider.py`). This is the one simulated component — everything on the Prava
         side of it is real. Say so in the demo.
-    *   **Not started:** the asyncio Treasurer loop itself (Phase 3) — burn rate, runway projection,
-        cap/cooldown checks, and the top-up decision. Schema and both endpoints it needs now exist.
-    *   ⚠ **`.env` `PRAVA_MANDATE_ID` points at the `one_time` mandate.** Reporting a one-time charge
-        as APPROVED moves it to `consumed` and every later charge 409s. Point it at the monthly
-        mandate `mdt_01KYXWSK8YNAMTPHNY9VWM1DAE` before running the loop.
-    *   **Open question:** docs say recurring mandates allow "one charge per cycle", but our sandbox
-        run put several charges through a monthly mandate. Unresolved, and the demo's repeat-top-up
-        narrative depends on it.
+    *   **Treasurer loop: WORKING** (`treasury/treasurer.py`). `assess()` reads balance and burn
+        (from `proxy/db.py:project_window_spend`, which Shubh wrote for exactly this) and projects
+        runway; `tick()` acts. **Two triggers, and the second is not redundant:** runway below
+        `TREASURER_TOPUP_WHEN_HOURS`, *or* balance below an absolute floor — at zero traffic burn is
+        0, runway is infinite, and a wallet at $0.00 would never trip the runway check.
+        Amount is shortfall + buffer toward `TREASURER_TARGET_HOURS` of runway.
+        `GET /treasury/assess` shows the decision without spending; `POST /treasury/tick` runs one
+        pass on demand, so the demo does not depend on a timer firing at the right moment.
+        Guarded by **two** switches: `TREASURER_ENABLED` (does the loop wake up) and
+        `TREASURER_DRY_RUN` (can it move money). `notify()` is a log-only seam mirroring
+        `breaker.notify` — **Tanay wires Poke to it.**
+    *   **Mandates are scoped per project** via `externalUserId` (`meter_{project_id}`), which Prava
+        echoes on every mandate. Selection also excludes `one_time` and checks remaining headroom.
+        This matters because judges create their own mandates on the *same* merchant account —
+        unscoped selection would let the Treasurer charge a stranger's card.
+    *   **Self-serve onboarding:** `POST /mandates/create` returns an approval URL (the session's
+        `iframe_url`); `GET /mandates/status` polls until `ready`. **Tanay: that is the two-call
+        "Connect your card" flow.** A mandate does not exist on Prava's side until approved, so the
+        pending row is held locally.
+    *   **Failure handling (Phase 4):** every Prava call goes through one helper and none of them
+        raise. A **timeout leaves the event `pending`** — it is not a refusal, the charge may have
+        landed — so a retry resumes the same row and the same idempotency key and Prava dedupes it.
+        A definite refusal settles `failed`. `X-Response-ID` is captured into the error column,
+        because that is what Prava support traces on.
+    *   ⚠ **Two settings before any live run**, both read at import so uvicorn must restart:
+        `TREASURER_DRY_RUN=false`, and `PRAVA_MANDATE_ID` still points at the `one_time` mandate
+        (only affects the bare `/charge` and `/report` endpoints — `/topup` reads the table).
+    *   ✅ **Resolved:** recurring mandates are a **pool that renews per cycle**, not one charge per
+        cycle — `renewsAt` is on the mandate object. The earlier open question is closed.
+    *   ⚠ **`remaining`, not `approvedAmount`, is the enforced cap.** The demo mandate has $45 of
+        $50 left, so a $50 top-up is refused. A fresh $500 monthly mandate is created but
+        **awaiting Shivam's passkey approval**.
 
 *   **Dashboard: LAYOUT + LIVE LOGS WORKING, RESTYLED.** `dashboard/` — Next.js (App Router) +
     Tailwind, `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only

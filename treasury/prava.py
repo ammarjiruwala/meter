@@ -5,6 +5,7 @@ the treasury routes folded into the proxy app.
 """
 
 import asyncio
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -27,6 +28,67 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
+log = logging.getLogger("meter.treasury.prava")
+
+# Connect fast, read patiently. A payment rail that is unreachable should say so in
+# seconds; one that is merely slow should be given a chance to answer, because the
+# alternative is abandoning a charge that may already have been accepted.
+_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+
+
+async def _request(method: str, path: str, json_body: dict | None = None) -> dict:
+    """Every Prava call goes through here, and none of them raise.
+
+    A Treasurer that dies on a socket error stops topping up, and the balance runs out
+    anyway — which is the failure the whole product exists to prevent. So transport
+    problems come back as data.
+
+    The `_transport` flag is the important one. A refusal (`THRESHOLD_EXCEEDED`, a 403,
+    a 409) is a definite answer: it did not happen. A timeout is *not* an answer — the
+    request may have been accepted and only the reply lost. Callers must treat the two
+    differently, and this flag is how they tell.
+
+    `_response_id` is Prava's `X-Response-ID`, captured on every response. It is what
+    their support needs to trace a failure, and it is useless if we discard it at the
+    moment things go wrong.
+    """
+    url = f"{PRAVA_API_BASE}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.request(method, url, headers=HEADERS, json=json_body)
+    except httpx.TimeoutException as exc:
+        log.warning("prava timeout on %s %s: %s", method, path, exc)
+        return {"_ok": False, "_transport": True, "_error": "timeout",
+                "_detail": str(exc)}
+    except httpx.RequestError as exc:
+        log.warning("prava unreachable on %s %s: %s", method, path, exc)
+        return {"_ok": False, "_transport": True, "_error": "unreachable",
+                "_detail": str(exc)}
+
+    meta = {"_http_status": r.status_code,
+            "_response_id": r.headers.get("x-response-id")}
+
+    try:
+        body = r.json()
+    except ValueError:
+        # An HTML error page or an empty body. Never let a JSON decode error surface as
+        # a 500 from a route that was asked a perfectly reasonable question.
+        log.warning("prava returned non-JSON on %s %s (HTTP %s)", method, path,
+                    r.status_code)
+        return {**meta, "_ok": False, "_error": "invalid_json",
+                "_detail": r.text[:200]}
+
+    if not isinstance(body, dict):
+        body = {"data": body}
+    body.update(meta)
+    body["_ok"] = r.status_code < 400
+    if not body["_ok"]:
+        err = body.get("error") or {}
+        body.setdefault("_error", err.get("code") or f"http_{r.status_code}")
+        log.warning("prava %s %s -> HTTP %s %s (response-id %s)", method, path,
+                    r.status_code, body["_error"], meta["_response_id"])
+    return body
+
 
 async def charge_mandate(amount_usd: float, reference: str,
                          mandate_id: str | None = None):
@@ -45,15 +107,12 @@ async def charge_mandate(amount_usd: float, reference: str,
 
     if not PRAVA_LIVE_MODE:
         await asyncio.sleep(1.2)
-        return {"status": "awaiting_result", "simulated": True,
+        return {"_ok": True, "status": "awaiting_result", "simulated": True,
                 "mandateId": target,
                 "transactionId": f"sim_{uuid.uuid4().hex[:8]}"}
 
-    url = f"{PRAVA_API_BASE}/v1/mandates/{target}/charge"
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, headers=HEADERS,
-                              json={"amount": amount, "reference": reference})
-    return r.json()
+    return await _request("POST", f"/v1/mandates/{target}/charge",
+                          {"amount": amount, "reference": reference})
 
 
 async def report_charge(transaction_id: str, approved: bool = True,
@@ -69,7 +128,7 @@ async def report_charge(transaction_id: str, approved: bool = True,
     """
     if not PRAVA_LIVE_MODE:
         await asyncio.sleep(0.4)
-        return {"status": "completed", "simulated": True,
+        return {"_ok": True, "status": "completed", "simulated": True,
                 "transactionId": transaction_id}
 
     body = {
@@ -80,10 +139,8 @@ async def report_charge(transaction_id: str, approved: bool = True,
         body["amount_paid"] = amount_paid
 
     target = mandate_id or PRAVA_MANDATE_ID
-    url = f"{PRAVA_API_BASE}/v1/mandates/{target}/charges/{transaction_id}/report"
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(url, headers=HEADERS, json=body)
-    return r.json()
+    return await _request(
+        "POST", f"/v1/mandates/{target}/charges/{transaction_id}/report", body)
 
 
 async def create_mandate_session(
@@ -139,19 +196,15 @@ async def create_mandate_session(
     if callback_url:
         payload["callback_url"] = callback_url
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.post(f"{PRAVA_API_BASE}/v1/sessions", headers=HEADERS,
-                              json=payload)
-    body = r.json()
-    # Keep the trace id: it is what Prava support needs, and it is the only useful
-    # handle on a failure that returns nothing else actionable.
-    body["_http_status"] = r.status_code
-    body["_response_id"] = r.headers.get("x-response-id")
-    return body
+    return await _request("POST", "/v1/sessions", payload)
 
 
 async def list_mandates():
-    """Check remaining headroom. The Treasurer calls this before deciding to charge."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{PRAVA_API_BASE}/v1/mandates", headers=HEADERS)
-    return r.json()
+    """Check remaining headroom. The Treasurer calls this before deciding to charge.
+
+    Returns `{"mandates": [...]}` on success. On a transport failure it returns an error
+    envelope with no `mandates` key, so callers must use `.get("mandates", [])` rather
+    than assume the list is there — a sync that raises would take the whole status
+    endpoint down every time Prava hiccups.
+    """
+    return await _request("GET", "/v1/mandates")
