@@ -150,6 +150,149 @@ export function getProviderBalances(): WalletRow[] | null {
     .all() as WalletRow[];
 }
 
+// ── Budgets ──────────────────────────────────────────────────────────────────
+
+/**
+ * The ceiling window, mirroring proxy/config.py's BUDGET_WINDOW_S (default 86400).
+ * Read from the environment for the same reason the proxy does: if someone shortens
+ * the window there, a dashboard hard-coding 24h would quietly show a different number
+ * than the one being enforced.
+ *
+ * Note this is a *rolling* window, not a calendar day — the column is named
+ * `ceiling_usd_day` but proxy/budget.py compares against `now - BUDGET_WINDOW_S`, and
+ * the 429 it returns says "in the last 24h". The card has to say the same thing.
+ */
+const BUDGET_WINDOW_S = Number(process.env.BUDGET_WINDOW_S ?? 86_400);
+
+/**
+ * The proxy writes `ts` with strftime("%Y-%m-%dT%H:%M:%S.%f+00:00") and compares it as
+ * TEXT, so the cutoff has to be byte-identical in shape or the comparison is wrong.
+ * `Date.toISOString()` is not: it emits 3 fractional digits and a "Z", so a stored
+ * "...123456+00:00" sorts *below* a cutoff of "...123Z" ("4" < "Z") and rows inside the
+ * window get dropped. Same format in, same rows out.
+ */
+function isoSecondsAgo(seconds: number): string {
+  const then = new Date(Date.now() - seconds * 1000);
+  const micros = String(then.getUTCMilliseconds()).padStart(3, "0") + "000";
+  return then.toISOString().replace(/\.\d+Z$/, `.${micros}+00:00`);
+}
+
+export type BudgetScope = {
+  project_id: string;
+  /** null is the project-wide ceiling — every feature plus untagged traffic. */
+  feature: string | null;
+  ceiling_usd: number;
+  spend_usd: number;
+};
+
+/**
+ * Daily ceilings and the spend measured against them.
+ *
+ * Returns null when no ceilings are configured at all, which is the normal state for a
+ * deployment with no meter.yaml — distinct from "configured and at zero spend". The
+ * card must not render an absent budget as $0.00 of $0.00, which reads as catastrophically
+ * over budget when it means the opposite.
+ *
+ * Two things this deliberately does NOT do:
+ *
+ * 1. It counts *settled* spend only. proxy/budget.py authorizes against settled + held,
+ *    but holds live in that process's memory and never touch SQLite (by design — a
+ *    restart is supposed to drop them). So this can read a shade under what is actually
+ *    being enforced, for the seconds a request is in flight. The card footnotes it.
+ * 2. It does not re-sort. Scopes come back in meter.yaml order (see the rowid note
+ *    below) so rows never move while someone is watching them.
+ */
+export function getBudgets(): BudgetScope[] | null {
+  const conn = getDb();
+  if (!conn) return null;
+  if (!tableExists(conn, "projects") && !tableExists(conn, "feature_budgets")) {
+    return null;
+  }
+
+  // ORDER BY rowid is meter.yaml order. proxy/db.py's replace_budgets() clears both
+  // tables and re-inserts every ceiling in file order on each boot, so insertion order
+  // *is* file order — and neither table is WITHOUT ROWID, so rowid records it. Without
+  // an ORDER BY, SQLite makes no promise at all.
+  const projectCeilings = tableExists(conn, "projects")
+    ? (conn
+        .prepare(
+          `SELECT id AS project_id, ceiling_usd_day
+             FROM projects
+            WHERE ceiling_usd_day IS NOT NULL
+            ORDER BY rowid`,
+        )
+        .all() as { project_id: string; ceiling_usd_day: number }[])
+    : [];
+
+  const featureCeilings = tableExists(conn, "feature_budgets")
+    ? (conn
+        .prepare(
+          `SELECT project_id, feature, ceiling_usd_day
+             FROM feature_budgets
+            WHERE ceiling_usd_day IS NOT NULL
+            ORDER BY rowid`,
+        )
+        .all() as {
+        project_id: string;
+        feature: string;
+        ceiling_usd_day: number;
+      }[])
+    : [];
+
+  if (projectCeilings.length === 0 && featureCeilings.length === 0) return null;
+  // Ceilings exist but there is nothing to measure them against yet.
+  if (!tableExists(conn, "requests")) return [];
+
+  const cutoff = isoSecondsAgo(BUDGET_WINDOW_S);
+
+  // Both statements mirror proxy/db.py's project_window_spend() and window_spend()
+  // verbatim. The card and the 429 a developer just got have to be answering with the
+  // same arithmetic, or the dashboard argues with the proxy about who is over budget.
+  const projectSpend = conn.prepare(
+    `SELECT COALESCE(SUM(cost_usd), 0) AS spend
+       FROM requests
+      WHERE project_id = ? AND ts >= ?`,
+  );
+  const featureSpend = conn.prepare(
+    `SELECT COALESCE(SUM(cost_usd), 0) AS spend
+       FROM requests
+      WHERE project_id = ? AND feature = ? AND ts >= ?`,
+  );
+
+  // Project order comes from `projects`; a project that only has feature ceilings still
+  // has to appear, so it is appended in the order its features were declared.
+  const order: string[] = projectCeilings.map((p) => p.project_id);
+  for (const f of featureCeilings) {
+    if (!order.includes(f.project_id)) order.push(f.project_id);
+  }
+
+  const scopes: BudgetScope[] = [];
+  for (const projectId of order) {
+    const ceiling = projectCeilings.find((p) => p.project_id === projectId);
+    if (ceiling) {
+      const { spend } = projectSpend.get(projectId, cutoff) as { spend: number };
+      scopes.push({
+        project_id: projectId,
+        feature: null,
+        ceiling_usd: ceiling.ceiling_usd_day,
+        spend_usd: spend,
+      });
+    }
+    for (const f of featureCeilings.filter((x) => x.project_id === projectId)) {
+      const { spend } = featureSpend.get(projectId, f.feature, cutoff) as {
+        spend: number;
+      };
+      scopes.push({
+        project_id: projectId,
+        feature: f.feature,
+        ceiling_usd: f.ceiling_usd_day,
+        spend_usd: spend,
+      });
+    }
+  }
+  return scopes;
+}
+
 export type LiveLogRow = {
   id: string;
   ts: string;

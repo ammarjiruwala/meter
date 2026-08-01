@@ -73,6 +73,34 @@ export function usdColumnFormatter(
   };
 }
 
+/**
+ * A formatter for configured limits rather than measured amounts.
+ *
+ * `usdColumnFormatter` scales precision by magnitude, which is right for spend: a figure
+ * below a cent needs six decimals or it reads as zero. A ceiling is not a measurement —
+ * it is a number someone typed into meter.yaml — so the same rule renders a $0.50 cap as
+ * "$0.5000" and drags every sibling to "$10.0000" with it. Trailing zeros on a limit are
+ * noise that makes it look computed.
+ *
+ * So: the fewest decimals (never under 2) that still represent every value exactly.
+ */
+export function usdCeilingFormatter(
+  values: (number | null | undefined)[],
+): (n: number | null | undefined) => string {
+  let decimals = 2;
+  for (const v of values) {
+    if (v === null || v === undefined) continue;
+    let d = 2;
+    // Grow only until the rounded value is indistinguishable from the real one at
+    // ledger resolution — a half-epsilon tolerance keeps binary float noise
+    // (0.1 + 0.2) from demanding six decimals it does not need.
+    while (d < 6 && Math.abs(Number(v.toFixed(d)) - v) > LEDGER_EPSILON / 2) d++;
+    decimals = Math.max(decimals, d);
+  }
+  return (n) =>
+    n === null || n === undefined ? "—" : usdAt(n, decimals);
+}
+
 // Providers are stored lowercase in the ledger (`openai`, `anthropic`). CSS
 // `capitalize` turns that into "Openai", which is wrong for a brand name shown to
 // the customer. Anything unmapped falls back to capitalize-first so a provider added
