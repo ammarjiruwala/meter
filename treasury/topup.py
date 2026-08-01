@@ -44,11 +44,13 @@ async def execute_topup(
     wallet_id = db.ensure_wallet(project_id, provider)
 
     # ── Rails, checked in order and all before any money moves ───────────────
-    mandate = db.chargeable_mandate(provider)
+    mandate = db.chargeable_mandate(project_id, provider)
     if not mandate:
         return _refuse(
             "no_chargeable_mandate",
-            hint="run POST /mandates/sync; one_time mandates are excluded on purpose",
+            project_id=project_id,
+            hint="POST /mandates/create to set one up, or POST /mandates/sync to claim "
+                 "an existing one; one_time mandates are excluded on purpose",
         )
 
     if amount_usd > mandate["max_per_txn_usd"]:
@@ -63,6 +65,18 @@ async def execute_topup(
     since = db.seconds_since_last_attempt(wallet_id)
     if since is not None and since < mandate["cooldown_s"]:
         return _refuse("cooldown", wait_s=round(mandate["cooldown_s"] - since, 1))
+
+    # Last, because it is the only rail that is not ours. `remaining` — not
+    # `approvedAmount` — is what the network enforces; the documented recovery for
+    # THRESHOLD_EXCEEDED is "charge within the remaining cap". Refusing here gives a
+    # reason and a number instead of a decline and a shrug. Kept after our own caps so a
+    # request that violates configured policy says so, rather than blaming the rail.
+    remaining = mandate.get("remaining_usd")
+    if remaining is not None and amount_usd > remaining:
+        return _refuse("insufficient_mandate_headroom", remaining_usd=remaining,
+                       requested=amount_usd,
+                       mandate=mandate.get("prava_mandate_id"),
+                       hint="charge less, or create a new mandate")
 
     # ── Write-ahead ──────────────────────────────────────────────────────────
     # Resume an unfinished attempt rather than opening a second one. A new row would mint

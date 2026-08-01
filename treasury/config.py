@@ -68,3 +68,20 @@ TREASURER_COOLDOWN_S = _int("TREASURER_COOLDOWN_S", 300)
 # Which provider's credits the mandate tops up. One provider in Phase 1; the column
 # exists so a second mandate for Anthropic is a row, not a migration.
 TREASURER_PROVIDER = _str("TREASURER_PROVIDER", "openai")
+
+# ── Mandate setup ────────────────────────────────────────────────────────────
+# The merchant a mandate is pinned to. This is the *destination* — the party being paid
+# — which for Meter is the provider's billing system, stood in for by
+# /mock-openai/billing. `merchant_scope: listed` locks every charge to it.
+MANDATE_MERCHANT_NAME = _str("MANDATE_MERCHANT_NAME", "Meter Mock Provider")
+MANDATE_MERCHANT_URL = _str("MANDATE_MERCHANT_URL", "https://example.com")
+MANDATE_MERCHANT_COUNTRY = _str("MANDATE_MERCHANT_COUNTRY", "US")
+
+# Default ceiling when a caller doesn't specify one. Deliberately well above the demo's
+# $50 top-up so rehearsals don't drain the headroom mid-weekend.
+MANDATE_DEFAULT_AMOUNT_USD = _float("MANDATE_DEFAULT_AMOUNT_USD", 500.0)
+
+# Where Prava returns the owner after they approve. Must be https, and without it a
+# hosted approval has nowhere to send them — they just stall on Prava's page. Point it
+# at the dashboard once it is deployed; empty means no redirect is requested.
+MANDATE_CALLBACK_URL = _str("MANDATE_CALLBACK_URL", "")

@@ -86,6 +86,70 @@ async def report_charge(transaction_id: str, approved: bool = True,
     return r.json()
 
 
+async def create_mandate_session(
+    user_id: str,
+    user_email: str,
+    amount_usd: float,
+    merchant_name: str,
+    merchant_url: str,
+    merchant_country: str = "US",
+    recurring_frequency: str = "monthly",
+    description: str = "Inference credit top-up",
+    callback_url: str | None = None,
+    currency: str = "USD",
+):
+    """Start mandate setup. Returns the session whose `iframe_url` the owner approves.
+
+    Mandate creation rides on `POST /v1/sessions` with a `mandate_setup` block — there
+    is no standalone create endpoint. This authorizes nothing by itself: the mandate
+    only exists once the owner opens the URL and approves with a passkey, and until then
+    it is absent from `GET /v1/mandates` entirely.
+
+    `total_amount` must equal the sum of unit_price x quantity across products or the
+    session is rejected, so the single line item is priced at the full amount.
+
+    `merchant_scope` is always `listed` — the scope that pins the mandate to this one
+    merchant. `any` exists but is one-time only, which is the opposite of what a
+    repeating treasury needs.
+    """
+    amount = f"{amount_usd:.2f}"
+    payload = {
+        "user_id": user_id,
+        "user_email": user_email,
+        "total_amount": amount,
+        "currency": currency,
+        "purchase_context": [{
+            "merchant_details": {
+                "name": merchant_name,
+                "url": merchant_url,
+                "country_code_iso2": merchant_country,
+            },
+            "product_details": [{
+                "description": description,
+                "unit_price": amount,
+                "quantity": 1,
+            }],
+        }],
+        "mandate_setup": {
+            "intent": "mandate_setup",
+            "recurring_frequency": recurring_frequency,
+            "merchant_scope": "listed",
+        },
+    }
+    if callback_url:
+        payload["callback_url"] = callback_url
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(f"{PRAVA_API_BASE}/v1/sessions", headers=HEADERS,
+                              json=payload)
+    body = r.json()
+    # Keep the trace id: it is what Prava support needs, and it is the only useful
+    # handle on a failure that returns nothing else actionable.
+    body["_http_status"] = r.status_code
+    body["_response_id"] = r.headers.get("x-response-id")
+    return body
+
+
 async def list_mandates():
     """Check remaining headroom. The Treasurer calls this before deciding to charge."""
     async with httpx.AsyncClient(timeout=30) as client:
