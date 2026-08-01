@@ -1,0 +1,65 @@
+# Prava Payments Docs
+
+## Docs
+
+- [Navigating These Docs](https://docs.prava.space/ai.md): How to read these docs as a human, and how to feed them to an AI tool or agent.
+- [Create Session](https://docs.prava.space/api-reference/create-session.md): Create a payment session for a customer and order — standard checkout or mandate setup.
+- [Delete Card](https://docs.prava.space/api-reference/delete-card.md): Delete a customer's enrolled card and retire its network token
+- [Errors](https://docs.prava.space/api-reference/errors.md): Every error code the Prava API can return — status, cause, and how to recover.
+- [Get Payment Result](https://docs.prava.space/api-reference/get-payment-result.md): Retrieve payment credentials and transaction status for a session
+- [List Cards](https://docs.prava.space/api-reference/list-cards.md): Retrieve enrolled cards for a customer
+- [Charge a Mandate](https://docs.prava.space/api-reference/mandate-charge.md): Mint single-use card credentials against an active mandate — no passkey.
+- [Get a Mandate](https://docs.prava.space/api-reference/mandate-get.md): Retrieve one mandate with its balance and full charge history.
+- [Pause, Resume & Cancel](https://docs.prava.space/api-reference/mandate-lifecycle.md): Lifecycle actions for a mandate — suspend, reactivate, or revoke.
+- [List Mandates](https://docs.prava.space/api-reference/mandate-list.md): List the standing mandates on an account, with approved and remaining amounts.
+- [Report a Mandate Charge](https://docs.prava.space/api-reference/mandate-report.md): Settle a mandate charge outcome (APPROVED / DECLINED) with the card network.
+- [API Reference](https://docs.prava.space/api-reference/overview.md): Server-side REST API for Prava Payments
+- [Report Status](https://docs.prava.space/api-reference/report-status.md): Report payment execution outcome back to Prava
+- [Revoke Session](https://docs.prava.space/api-reference/revoke-session.md): Revoke an active payment session
+- [Test Cards](https://docs.prava.space/api-reference/test-cards.md): Sandbox test card numbers and the test OTP, organized by card network.
+- [Testing in Sandbox](https://docs.prava.space/api-reference/testing.md): How to exercise the full payment flow in sandbox before going live.
+- [Authentication & Environments](https://docs.prava.space/authentication.md): Learn how to authenticate your requests and use Prava environments.
+- [Changelog](https://docs.prava.space/changelog.md): What's new in Prava and these docs.
+- [Choosing Your Integration](https://docs.prava.space/choosing-your-integration.md): Three ways to build on Prava — and exactly when to use each.
+- [Accounts & Agents](https://docs.prava.space/concepts/accounts.md): How an owner's Prava account holds cards and authorizes AI agents to pay — and the controls that keep it safe.
+- [Anatomy of a Checkout](https://docs.prava.space/concepts/checkout-flow.md): The full sequence behind a single payment — including the card-verification steps (passkey / device binding and issuer OTP) that a first-time integrator does not see coming.
+- [Glossary](https://docs.prava.space/concepts/glossary.md): Every Prava term in one place — and how the same thing is named across the API, CLI, and dashboard.
+- [Guardrails](https://docs.prava.space/concepts/guardrails.md): Rule-based controls that constrain what AI agents can spend and where.
+- [How Prava Works](https://docs.prava.space/concepts/how-it-works.md): The lifecycle behind every Prava payment — from intent to a completed checkout.
+- [Mandates](https://docs.prava.space/concepts/mandates.md): Standing spend authorizations — approve once with a passkey, let an agent charge later within caps.
+- [Payments](https://docs.prava.space/concepts/payments.md): Understand the payment lifecycle — from session creation to settlement.
+- [Your Developer Dashboard](https://docs.prava.space/dashboard.md): What dashboard.prava.space is for: keys, environments, and your payment activity.
+- [Developer FAQ](https://docs.prava.space/developer-faq.md): Common SDK and REST API integration questions, answered.
+- [Add Payments to Your AI App](https://docs.prava.space/guides/add-payments-to-your-ai-app.md): The end-to-end tutorial: from a fresh dashboard account to a completed, reported payment inside your own application.
+- [Compliance & Verification](https://docs.prava.space/guides/compliance.md): What verification each integration path needs, and what Prava is (and is not) as a regulated matter.
+- [Go-Live Checklist](https://docs.prava.space/guides/go-live-checklist.md): Everything between a working sandbox integration and live payments — and exactly which steps need Prava.
+- [REST Checkout Walkthrough](https://docs.prava.space/guides/rest-checkout-walkthrough.md): The complete payment flow with nothing but cURL — hosted card entry, zero frontend code.
+- [Introduction](https://docs.prava.space/index.md): An overview of the Prava Payments API
+- [Browser Harness](https://docs.prava.space/integration/browser-harness.md): Prava's checkout automation completes a real merchant checkout and confirms the true total before charging.
+- [Dining & Reservations](https://docs.prava.space/integration/dining.md): Agent-booked tables and food orders. Coming soon.
+- [Commerce & Merchant FAQ](https://docs.prava.space/integration/faqs.md): Common questions about agentic commerce, merchants, refunds, and security.
+- [For Merchants](https://docs.prava.space/integration/merchants.md): Selling to AI shoppers: what already works with zero changes, and what to request from Prava.
+- [Agentic Commerce](https://docs.prava.space/integration/overview.md): The commerce capabilities that let an AI application discover, quote, checkout, and pay.
+- [Travel](https://docs.prava.space/integration/travel.md): Agent-booked flights, hotels, and trips. Coming soon.
+- [UCP Integration](https://docs.prava.space/integration/ucp.md): How Prava discovers and prices products across Shopify merchants with the Universal Commerce Protocol.
+- [Connect Your Agent](https://docs.prava.space/mcp/connect.md): Add the Prava MCP to your client, sign in once, and your agent can pay.
+- [Prava MCP Overview](https://docs.prava.space/mcp/overview.md): Connect any MCP-capable AI agent to Prava payments. No CLI, no SDK, no card data.
+- [Tools Reference](https://docs.prava.space/mcp/tools.md): Every Prava MCP tool: parameters, scopes, and the order to call them in.
+- [Linking an Agent](https://docs.prava.space/prava-pay/linking.md): Connect an agent to a Prava account with a one-time, owner-approved link.
+- [Mandates](https://docs.prava.space/prava-pay/mandates.md): Authorize a card once, then charge it later within caps — no passkey per charge.
+- [Prava Pay Overview](https://docs.prava.space/prava-pay/overview.md): Give an AI agent the ability to pay at real merchants — safely, from the command line.
+- [Quickstart](https://docs.prava.space/prava-pay/quickstart.md): From zero to a completed purchase in one sitting.
+- [Payment Sessions](https://docs.prava.space/prava-pay/sessions.md): Create a payment for a known order and receive one-time card credentials.
+- [Agentic Shopping](https://docs.prava.space/prava-pay/shopping.md): Discover a product, compare offers, get a live quote, and pay — all from the CLI.
+- [Skills](https://docs.prava.space/prava-pay/skills.md): How Prava skills guide an AI agent to call the right CLI command at the right time.
+- [Troubleshooting](https://docs.prava.space/prava-pay/troubleshooting.md): What each message means and exactly how to recover.
+- [Your Prava Pay Dashboard](https://docs.prava.space/prava-pay/your-wallet.md): For agent owners: what your AI agent can and can't do with your card, and how you stay in control. No code required.
+- [Quickstart](https://docs.prava.space/quickstart.md): Start building with Prava
+- [Collect Card Details](https://docs.prava.space/sdk/cards/collect-pan.md): Securely collect and tokenize user payment cards
+- [Integration Modes](https://docs.prava.space/sdk/integration-modes.md): Two ways to collect a card from one session — embedded (SDK) or hosted (redirect).
+- [SDK Overview](https://docs.prava.space/sdk/overview.md): Embed secure, PCI-safe card collection into your web app with the Prava SDK.
+- [Use Cases](https://docs.prava.space/use-cases.md): What people build with Prava, shown as concrete flows.
+
+## OpenAPI Specs
+
+- [openapi](https://docs.prava.space/api-reference/openapi.json)

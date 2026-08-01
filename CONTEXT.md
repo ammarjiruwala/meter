@@ -89,7 +89,13 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — Shubh's Phase 1 proxy work merged.
+*   **Last updated:** 2026-08-01 — Shubh's Phase 1 proxy work merged; Tanay's Phase 0 setup merged.
+
+*   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
+    test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
+    top-up flow and Poke/Linq iMessage alert need. Visa VIC test-card requirements are covered by
+    `docs/prava/api-reference/test-cards.md` (no separate Visa doc set needed). `.env.example`
+    at repo root has placeholders for all provider/datastore/agent config keys.
 
 *   **Proxy: WORKING.** `proxy/` — FastAPI, run with `uvicorn proxy.app:app --port 8080`. Full detail in `proxy/README.md`.
     *   `POST /v1/chat/completions` (OpenAI-shaped) and `POST /v1/messages` (Anthropic-native); provider chosen by model prefix, overridable with `X-Meter-Provider`.
