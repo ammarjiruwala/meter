@@ -1,0 +1,34 @@
+tags to collect   17  (book-chapter-summary, dataset-profile, entity-tag, full-spec-draft, json-extract, legal-contract-review, log-anomaly-summary, migration-guide, multi-log-correlate, perf-analysis, readme-section, release-notes-bulk, schema-map, security-audit, severity-triage, tradeoff-analysis, unit-test-gen)
+calls             680
+hard spend cap    $4.00
+anthropic cap     $1.50
+stages            corpus -> shrinkage sweep -> cold-start refit -> cross-model
+                  -> prequential -> seed -> verify -> report
+report            /Users/ammar/Desktop/meter-project/meter/data/overnight-report.md
+[20:34:16] === overnight batch starting ===
+[20:34:16] corpus: 17 tags to collect -> book-chapter-summary, dataset-profile, entity-tag, full-spec-draft, json-extract, legal-contract-review, log-anomaly-summary, migration-guide, multi-log-correlate, perf-analysis, readme-section, release-notes-bulk, schema-map, security-audit, severity-triage, tradeoff-analysis, unit-test-gen
+model        gpt-4o-mini
+tags         17  x 40 calls  (8 held out each)
+calls        680
+input        10,625,269 tokens (counted exactly)
+WORST CASE   $2.25   (hard cap $4.00)
+ETA          65 min  (rate-limit bound 65m, generation bound 33m)
+               book-chapter-summary     ~ 35,000 in /    800 out
+               dataset-profile          ~ 25,000 in /  1,000 out
+               entity-tag               ~  3,000 in /    250 out
+               full-spec-draft          ~  3,000 in /  8,000 out
+               json-extract             ~  4,000 in /    400 out
+               legal-contract-review    ~ 25,000 in /  1,500 out
+               log-anomaly-summary      ~ 12,000 in /    900 out
+               migration-guide          ~  5,000 in /  2,500 out
+               multi-log-correlate      ~ 30,000 in /  1,500 out
+               perf-analysis            ~ 12,000 in /  1,400 out
+               readme-section           ~  4,000 in /    800 out
+               release-notes-bulk       ~ 10,000 in /  1,200 out
+               schema-map               ~  8,000 in /  1,200 out
+               security-audit           ~  8,000 in /  2,000 out
+               severity-triage          ~  3,000 in /    120 out
+               tradeoff-analysis        ~  6,000 in /  1,800 out
+               unit-test-gen            ~  4,000 in /  2,000 out
+    10/680  $0.057
+    20/680  $0.114

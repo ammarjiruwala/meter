@@ -269,7 +269,7 @@ async def _one(client, sem, rec, model, results, state, cap_usd, budget):
         cost = (u.prompt_tokens * 0.15 + u.completion_tokens * 0.60) / 1_000_000
         state["spend"] += cost
         state["done"] += 1
-        results.append({
+        row = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "model": model, "project": rec["project"], "feature": rec["feature"],
             "actor": rec["actor"], "prompt": rec["prompt"],
@@ -278,7 +278,13 @@ async def _one(client, sem, rec, model, results, state, cap_usd, budget):
             "finish_reason": resp.choices[0].finish_reason,
             "prompt_sha256": hashlib.sha256(rec["prompt"].encode()).hexdigest()[:16],
             "source": "corpus_probe",
-        })
+        }
+        results.append(row)
+        # Flushed here, not batched at the end. This runs unattended for hours; a crash
+        # at call 600 must not discard the 599 already paid for.
+        async with state["lock"]:
+            state["fh"].write(json.dumps(row) + "\n")
+            state["fh"].flush()
         if state["done"] % 10 == 0:
             print(f"    {state['done']}/{state['total']}  ${state['spend']:.3f}", flush=True)
 
@@ -291,10 +297,16 @@ async def _run(plan, model, conc, cap_usd, tpm):
     client = AsyncOpenAI(timeout=180.0, max_retries=2)
     sem = asyncio.Semaphore(conc)
     results = []
-    state = {"spend": 0.0, "done": 0, "total": len(plan), "errors": [], "throttled": 0}
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    fh = OUT.open("a", encoding="utf-8")
+    state = {"spend": 0.0, "done": 0, "total": len(plan), "errors": [], "throttled": 0,
+             "fh": fh, "lock": asyncio.Lock()}
     budget = TokenBudget(tpm)
-    await asyncio.gather(*[_one(client, sem, r, model, results, state, cap_usd, budget)
-                           for r in plan])
+    try:
+        await asyncio.gather(*[_one(client, sem, r, model, results, state, cap_usd, budget)
+                               for r in plan])
+    finally:
+        fh.close()
     return results, state
 
 
@@ -356,11 +368,6 @@ def main() -> int:
 
     t0 = time.time()
     results, state = asyncio.run(_run(plan, args.model, args.concurrency, args.cap_usd, args.tpm))
-
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    with OUT.open("a", encoding="utf-8") as fh:
-        for r in results:
-            fh.write(json.dumps(r) + "\n")
 
     import numpy as np
     print(f"\nwrote {len(results)} rows in {time.time()-t0:.0f}s  "
