@@ -43,15 +43,17 @@ export function TopNav() {
           Fixed takes the element out of flow unconditionally; the spacer below gives
           back the height it no longer occupies.
 
-          Genuinely translucent: a light 32% scrim over an 8px blur, so rows passing
-          underneath stay recognisable as rows rather than dissolving into frosted
-          grey. The two numbers trade against each other — more alpha or more blur
-          buys label legibility and costs exactly the see-through quality that is the
-          point of the bar. This is deliberately near the transparent end of that
-          trade; the labels survive because the page beneath is near-black and its
-          text is small enough that 8px spreads it well below the glyph weight of the
-          nav's own labels. */}
-      <nav className="fixed left-1/2 top-[16px] z-50 w-[calc(100%-32px)] max-w-[1200px] -translate-x-1/2 rounded-[59px] bg-[rgba(8,8,8,0.32)] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset] backdrop-blur-[8px] backdrop-saturate-150">
+          Genuinely translucent, and lit rather than shaded: a 10% *white* scrim over
+          a 6px blur. A dark scrim on a near-black page reads as a hole cut in the
+          canvas; a white one reads as a pane of glass lying on top of it, which is
+          what a floating bar should look like. Over black it settles to about #1a1a1a,
+          so white labels keep ~15:1 and the muted ones ~5.6:1.
+
+          Alpha and blur trade directly against the see-through quality that is the
+          point of the bar, and both are deliberately near the transparent end. If
+          labels ever fight bright content underneath, raise the alpha rather than the
+          blur — blur is what destroys the legibility of what is passing beneath. */}
+      <nav className="fixed left-1/2 top-[16px] z-50 w-[calc(100%-32px)] max-w-[1200px] -translate-x-1/2 rounded-[59px] bg-[rgba(255,255,255,0.10)] shadow-[rgba(255,255,255,0.18)_0px_0px_0px_1px_inset] backdrop-blur-[6px] backdrop-saturate-150">
         <div className="flex h-[64px] items-center justify-between px-[24px]">
         <a href="#top" className="flex items-center gap-[10px] text-paper">
           {/* Angular geometric mark — a gauge sweep with its needle. */}
