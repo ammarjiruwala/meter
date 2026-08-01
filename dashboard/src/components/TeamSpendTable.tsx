@@ -41,10 +41,10 @@ export function TeamSpendTable({ rows }: { rows: SpendRow[] }) {
                     <td className={`${TD} t-readout-sm text-ash`}>
                       {row.project_id}
                     </td>
-                    <td className={`${TD} t-body text-paper`}>
+                    <td className={`${TD} t-readout text-paper`}>
                       {row.actor ?? "—"}
                     </td>
-                    <td className={`${TD} t-body text-paper`}>
+                    <td className={`${TD} t-readout text-paper`}>
                       {row.feature ?? "—"}
                     </td>
                     <td

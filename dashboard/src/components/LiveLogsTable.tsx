@@ -76,7 +76,7 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
                     key={row.id}
                     className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.03]"
                   >
-                    <td className={`${TD} t-body text-paper`}>
+                    <td className={`${TD} t-readout text-paper`}>
                       {row.actor ?? "—"}
                     </td>
                     <td className={`${TD} t-readout-sm text-ash`}>
