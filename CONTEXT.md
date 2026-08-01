@@ -177,6 +177,17 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   `predict(payload, model, max_tokens, response_format=, project=, feature=, actor=) -> PredictionResult`. Deterministic, no I/O. Called from `proxy/app.py` at ESTIMATE; prediction stored beside the actual at CAPTURE.
     *   **Two numbers, not one.** `predicted_*` is the forecast (dashboard, treasurer runway). `bound_*` is what the call *cannot* exceed and is what a ceiling check must use. With `max_tokens` set the bound is exact, so the safety guarantee is structural, not statistical. **The forecast carries no safety buffer** — that would double-correct against the history factor.
     *   **Accuracy, measured on a locked test set never used for fitting:** median APE **49.2%**, 50.7% of predictions within a factor of 1.5, MAPE 310% → 175%. Baseline was 65.8% median.
+    *   **Do not quote median APE alone — `scripts/accuracy_report.py` prints the honest picture.** Median hides direction, money, and the tail, all three of which a budget tool cares about:
+
+        | | median | p90 | within 2x | token-weighted | portfolio bias |
+        | --- | --- | --- | --- | --- | --- |
+        | open-ended (WildChat test, n=75) | 49.2% | **829%** | 54.7% | 83.9% | +18.7% |
+        | templated, no history (n=200) | 82.6% | 903% | 40.0% | 103.6% | +36.3% |
+        | templated + history (n=200) | **28.8%** | **108%** | **89.0%** | **32.5%** | **−18.6%** |
+
+        *   The history correction's real win is the **tail**, not the median: p90 falls 903% → 108% and within-2x goes 40% → 89%. That is the difference between "usually about right" and "reliably about right".
+        *   **⚠ It also flips the portfolio bias negative (−18.6%).** In aggregate the corrected forecast now runs ~19% *light*. This does not leak ceilings — those hold `bound_cost_usd`, not the forecast — but the Treasurer's runway projection is ~19% optimistic and should carry a margin. Untested against a real top-up decision.
+        *   Token-weighted error (error across the whole bill, so big requests dominate) is the metric closest to what a treasurer feels: **32.5%** templated, 83.9% open-ended.
     *   **The <30% median target is NOT reachable from prompt text and should be retired.** `std(log(output)) = 1.16`; our features explain R² = 0.28. Hitting 30% needs R² ≈ 0.88. The same prompt genuinely produces different-length answers. **Recommended targets instead: median ≤ 50%, within-2x ≥ 60%.** Do not quote MAPE — a handful of 20-token answers dominate it permanently.
     *   **What the optimizer proved about our own design:** it drove nearly every hand-written cue to neutral. On real traffic, task keywords fire on 17.4% of prompts and CoT cues on 1.7%. Predicting a constant per bucket and ignoring the prompt scores 51.4% against 44.2% for the full machinery — the scope extraction is worth ~7 points, not the bulk of the estimate. Strongest real signals found by search: `is_very_short` (-0.40), `start_generate` (+0.35), `start_question` (-0.29).
     *   **Offline self-tuning works and is applied.** `python -m predictor.optimize --apply` (coordinate search over `ScopeConfig`) and `python -m predictor.discover --apply` (greedy feature selection over a log-linear model) write `data/fitted.json` and `data/model.json`, loaded automatically at `Predictor()` construction. Delete either file to revert.
