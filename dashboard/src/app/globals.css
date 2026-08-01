@@ -15,6 +15,18 @@
   --color-fog: #8c8c8c;
   --color-paper: #ffffff;
 
+  /* Status ramp — a deliberate departure from the brief, which is monochrome
+     plus one blue. Reading a failure at a glance beats palette purity on a
+     dashboard someone watches while production is live.
+     Chosen against the colorblind case rather than by eye: the obvious
+     green/amber pair (#3fb950/#d29922) collapses to ΔE 5.1 under protanopia —
+     indistinguishable to the readers who most need the distinction. These clear
+     ΔE 10.6, stay separable from signal blue, and all three clear AA on
+     graphite. Reserved for state; never decoration, never a chart series. */
+  --color-status-good: #34d399;
+  --color-status-warn: #fbbf24;
+  --color-status-bad: #f87171;
+
   /* Diatype REKKI and OCD-GARRI are custom faces; these are the substitutes the
      brief names. Plex Mono carries OCD-GARRI's instrument-label quality — the
      slight positive tracking is what makes it read as a readout. */

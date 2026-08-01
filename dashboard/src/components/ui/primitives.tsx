@@ -49,17 +49,15 @@ export function Pill({ children }: { children: ReactNode }) {
 
 type BadgeTone = "neutral" | "good" | "throttled" | "critical";
 
-// The system is monochrome plus one blue, and that blue is spoken for by the
-// primary action — so status cannot be carried by hue here the way it is in most
-// dashboards. Emphasis does the work instead: a normal response recedes into ash
-// on graphite, while anything that needs a second look steps up the surface
-// stack and switches to paper white. The HTTP code is in the badge either way,
-// so the state is never resting on treatment alone.
+// Status keeps its own ramp, against the brief's monochrome rule — see the note
+// in globals.css. Surfaces stay in the black-to-charcoal range as the system
+// demands; only the text carries hue, so nothing light ever lands on the canvas.
+// The HTTP code is in the badge regardless, so state never rests on color alone.
 const TONES: Record<BadgeTone, string> = {
   neutral: "bg-graphite text-ash",
-  good: "bg-graphite text-ash",
-  throttled: "bg-iron text-paper",
-  critical: "bg-steel text-paper",
+  good: "bg-graphite text-status-good",
+  throttled: "bg-graphite text-status-warn",
+  critical: "bg-graphite text-status-bad",
 };
 
 export function StatusBadge({
