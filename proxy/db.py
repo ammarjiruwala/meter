@@ -294,11 +294,20 @@ def seed_keys(spec: str) -> int:
             raw_key, project_id = parts[0], parts[1]
             environment = parts[2] if len(parts) > 2 else "dev"
             conn.execute(
-                "INSERT OR IGNORE INTO projects (id, name, environment) VALUES (?, ?, ?)",
+                # `ON CONFLICT DO NOTHING` with no conflict target, rather than
+                # `INSERT OR IGNORE`: same "skip any constraint violation" semantics, but
+                # it is standard SQL that Postgres also accepts. Part of moving the ledger
+                # off SQLite without a dialect fork.
+                "INSERT INTO projects (id, name, environment) VALUES (?, ?, ?)"
+                " ON CONFLICT DO NOTHING",
                 (project_id, project_id, environment),
             )
             conn.execute(
-                "INSERT OR IGNORE INTO meter_keys (id, project_id, hash) VALUES (?, ?, ?)",
+                # No conflict target on purpose: `meter_keys` can collide on either the
+                # primary key or the unique hash, and re-seeding must skip both without
+                # invalidating a key already in use.
+                "INSERT INTO meter_keys (id, project_id, hash) VALUES (?, ?, ?)"
+                " ON CONFLICT DO NOTHING",
                 (f"mk_{hash_key(raw_key)[:16]}", project_id, hash_key(raw_key)),
             )
             seeded += 1
@@ -352,6 +361,25 @@ _REQUEST_COLUMNS = (
     "predicted_scope_tokens", "bound_output_tokens", "bound_cost_usd", "history_factor",
 )
 
+# The `NOT NULL DEFAULT` columns of `requests`, and the defaults the schema declares.
+#
+# These must be applied in Python rather than left to the database. SQLite's
+# `INSERT OR REPLACE` silently swaps a NULL for the column default on a NOT NULL
+# constraint; a plain `INSERT ... ON CONFLICT` does not, and neither does Postgres — it
+# raises instead. Since `record_request` writes partial rows on purpose (truncated
+# streams, unknown providers, unpriced models all still get a row, flagged `estimated`),
+# leaving that substitution implicit would turn "never drop a ledger row" into "drop the
+# rows that matter most" the moment the ledger moved off SQLite.
+_REQUEST_NOT_NULL_DEFAULTS = {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "cost_usd": 0.0,
+    "is_stream": 0,
+    "estimated": 0,
+}
+
 
 def record_request(row: dict[str, Any]) -> None:
     """Write one priced ledger row.
@@ -362,12 +390,32 @@ def record_request(row: dict[str, Any]) -> None:
     caller-supplied id cannot double-count the same request as two.
     """
     conn = connect()
-    values = [row.get(col) for col in _REQUEST_COLUMNS]
+
+    # Substitute defaults for absent counters explicitly, rather than relying on a SQLite
+    # quirk. `INSERT OR REPLACE` treats a NULL against a `NOT NULL DEFAULT` column as "use
+    # the default"; a plain INSERT — and Postgres — raise `NOT NULL constraint failed`
+    # instead. A partial row (a truncated stream, an unpriced model) is a case this table
+    # must never drop, so the defaults are applied here where they are visible.
+    values = [
+        _REQUEST_NOT_NULL_DEFAULTS[col]
+        if row.get(col) is None and col in _REQUEST_NOT_NULL_DEFAULTS
+        else row.get(col)
+        for col in _REQUEST_COLUMNS
+    ]
     placeholders = ", ".join("?" * len(_REQUEST_COLUMNS))
+
+    # `ON CONFLICT (id) DO UPDATE` rather than `INSERT OR REPLACE`, so the statement is
+    # standard SQL Postgres accepts too. Every column is in the SET list, which is what
+    # makes it equivalent: SQLite's REPLACE deletes the row and re-inserts it, so any
+    # column left out of an upsert would silently revert to its default. Writing them all
+    # keeps the two forms identical rather than subtly different.
+    updates = ", ".join(f"{c} = excluded.{c}" for c in _REQUEST_COLUMNS if c != "id")
+
     with _lock:
         conn.execute(
-            f"INSERT OR REPLACE INTO requests ({', '.join(_REQUEST_COLUMNS)}) "
-            f"VALUES ({placeholders})",
+            f"INSERT INTO requests ({', '.join(_REQUEST_COLUMNS)}) "
+            f"VALUES ({placeholders}) "
+            f"ON CONFLICT (id) DO UPDATE SET {updates}",
             values,
         )
         conn.commit()

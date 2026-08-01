@@ -234,8 +234,12 @@ def ensure_wallet(project_id: str, provider: str, balance_usd: float = 0.0) -> s
     wallet_id = f"wal_{project_id}_{provider}"
     with _lock:
         conn.execute(
-            "INSERT OR IGNORE INTO wallets (id, project_id, provider, balance_usd, updated_at)"
-            " VALUES (?, ?, ?, ?, ?)",
+            # `ON CONFLICT DO NOTHING` rather than `INSERT OR IGNORE` — standard SQL that
+            # Postgres accepts, same "create only if absent" semantics. The conflict can be
+            # on the id or on the (project_id, provider) unique constraint; both mean the
+            # wallet exists, and neither may overwrite a live balance.
+            "INSERT INTO wallets (id, project_id, provider, balance_usd, updated_at)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
             (wallet_id, project_id, provider, balance_usd, now_iso()),
         )
         conn.commit()
@@ -390,12 +394,31 @@ def open_pending_mandate(project_id: str, session_id: str, provider: str,
     row_id = f"mnd_pending_{session_id}"
     with _lock:
         conn.execute(
-            "INSERT OR REPLACE INTO mandates"
+            # `ON CONFLICT (id) DO UPDATE` rather than `INSERT OR REPLACE`: standard SQL,
+            # and it re-arms an existing pending row for the same session rather than
+            # deleting and re-inserting it. Every column this statement sets is in the SET
+            # list, so re-opening the same session lands in exactly the state a fresh
+            # insert would.
+            "INSERT INTO mandates"
             " (id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,"
             "  prava_mandate_id, active, recurring_frequency, status,"
             "  approved_amount_usd, synced_at, project_id, external_user_id,"
             "  session_id)"
-            " VALUES (?, ?, ?, ?, ?, NULL, 0, ?, 'pending_approval', ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, NULL, 0, ?, 'pending_approval', ?, ?, ?, ?, ?)"
+            " ON CONFLICT (id) DO UPDATE SET"
+            "   provider = excluded.provider,"
+            "   max_per_txn_usd = excluded.max_per_txn_usd,"
+            "   max_daily_usd = excluded.max_daily_usd,"
+            "   cooldown_s = excluded.cooldown_s,"
+            "   prava_mandate_id = excluded.prava_mandate_id,"
+            "   active = excluded.active,"
+            "   recurring_frequency = excluded.recurring_frequency,"
+            "   status = excluded.status,"
+            "   approved_amount_usd = excluded.approved_amount_usd,"
+            "   synced_at = excluded.synced_at,"
+            "   project_id = excluded.project_id,"
+            "   external_user_id = excluded.external_user_id,"
+            "   session_id = excluded.session_id",
             (row_id, provider, amount_usd, amount_usd, 0, recurring_frequency,
              amount_usd, now_iso(), project_id, external_user_id_, session_id),
         )
