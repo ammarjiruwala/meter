@@ -99,8 +99,14 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — **full documentation review + external research (Shubh,
-    same day as phase3 merge):** Prava docs (`docs.prava.space`), Linq docs
+*   **Last updated:** 2026-08-01 — **`PLAN.md` reconciled against the code (Shubh).** Every phase
+    item is now marked ✅/🟡/⬜ with evidence. The result: **one lane is genuinely open — Ammar's
+    cross-model routing, the efficiency data it feeds, and Tanay's Model Efficiency view on top of
+    it (four plan items, one dependency, `PROPOSALS.md` B11)** — plus a sustained-load run (Shubh)
+    and the demo video/pitch rewrite (Tanay). The pitch script is flagged stale in three places:
+    it says "one-time card" where we ship a mandate, its repeat-top-up beat is blocked by the
+    one-charge-per-cycle limit, and its cross-model beat has no measurement behind it. Prior
+    entry — **full documentation review + external research (Shubh, same day as phase3 merge):** Prava docs (`docs.prava.space`), Linq docs
     (`docs.linqapp.com`), and the major open-source LLM gateways (LiteLLM, Helicone, Portkey,
     OpenRouter, one-api, Langfuse) were read for drift and gaps. Findings: Prava rate limits
     are **undocumented anywhere** (C3 researched, still open); recurring mandates are
@@ -493,9 +499,10 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         `requests` table, and the whole page 500'd with `no such table: requests`. Each read
         checks `sqlite_master` first and degrades to an empty state per card, so a half-built
         database shows what it has instead of nothing.
-    *   Not yet done: Model Efficiency view (Phase 3, needs Ammar's cross-model data — B11),
-        Agent Activity panel (Phase 3; the Treasurer loop it was waiting on exists since
-        2026-08-01, so this is unblocked and just needs the streaming-log wiring).
+    *   Not yet done: **Model Efficiency view only** (Phase 3, needs Ammar's cross-model data —
+        B11, and that data does not exist: nothing routes one prompt to two providers and there is
+        no `model_efficiency` table). The Agent Activity panel that used to sit on this line
+        **shipped** — see the "Treasurer Agent" panel entry above.
 
 *   **Alerts (Poke / Linq): WORKING, VERIFIED LIVE.** A real iMessage was delivered end to end
     through the shipping code path on 2026-08-01 (Linq returned `202 Accepted`). `alerts/` — a sibling
