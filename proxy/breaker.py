@@ -8,14 +8,40 @@ Two emergencies, two responses (README.md "Circuit breaker"):
 * **Revoke** — the Meter key is cut entirely with a ``403``. This is the right answer to
   a leaked credential, where every request under that key is suspect.
 
-⚠ **Unresolved spec conflict.** CONTEXT.md §5C specifies a flat "> $20 in 5 minutes" and
-a ``403``. ARCHITECTURE.md §6 instead specifies a *ratio* against the same tag's 7-day
-baseline, plus an absolute floor so low-traffic tags do not trip on noise, and a ``429``
-for throttle. These are different detectors that fire on different traffic. Phase 1
-implements the flat threshold from CONTEXT.md (it is the MVP document, and PLAN.md §3
-repeats the same number) while supporting both response modes, so neither document is
-contradicted by the response behaviour. The detector itself is still an open decision —
-see PROPOSALS.md item A1.
+**Detection: two conditions, both required.** (Resolves PROPOSALS.md A1, which was the
+conflict between CONTEXT.md §5C's flat "> $20 in 5 minutes" and ARCHITECTURE.md §6's ratio
+against a 7-day baseline.)
+
+1. **Floor** — trailing 5-minute spend clears an absolute dollar threshold. Fast, and it
+   is the number both CONTEXT.md §5C and PLAN.md §3 specify.
+2. **Burst** — that 5-minute window's spend *rate* exceeds the trailing 1-hour average
+   rate by a multiple. This is the anomaly test: it asks "is this tag spending unusually
+   fast *for itself*", which is the question the 7-day-baseline ratio was reaching for.
+
+Why both, and why not the textbook version. Google's SRE Workbook prescribes
+`multi-window multi-burn-rate alerting <https://sre.google/workbook/alerting-on-slos/>`_
+for exactly this precision-versus-detection-time tension: pair a short window with a long
+one and require both to breach. Ported literally — two absolute thresholds — it is wrong
+here. Those alerts are tuned for paging a human about SLO burn, where an hour of detection
+delay is acceptable. A 1-hour window at an equivalent dollar threshold cannot trip until a
+full hour of sustained burn has accumulated, because the early minutes of an incident are
+diluted by the quiet time in front of them. An hour is a fine delay for a pager and a
+catastrophic one for a leaked API key.
+
+So the long window is used as a **rate baseline** rather than a second absolute threshold.
+That keeps the property the SRE pattern exists to provide — a spend level that is normal
+*for this tag* stops producing alerts — while detection stays as fast as the floor allows:
+
+* A leaked key with no prior history trips the moment it clears the floor. All of the
+  hour's spend is in the last five minutes, so the ratio is at its 12x ceiling.
+* A feature that legitimately and steadily spends above the floor does **not** trip. Its
+  short-window rate equals its long-window rate, so the ratio is ~1.
+* A burst layered on top of that steady traffic still trips, because only the burst moves
+  the short-window rate.
+
+Neither source document is contradicted: the flat floor is CONTEXT.md's number, and the
+baseline comparison is ARCHITECTURE.md's ratio with a 1-hour lookback instead of 7 days —
+which needs no historical training data and works from the first hour of the demo.
 
 Owner: Shubh (Proxy & Infra).
 """
@@ -97,45 +123,112 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
         # verdict. The rolling window has been decaying the whole time, so a burst that
         # has genuinely stopped will now read under the threshold and the breaker closes
         # itself. Without this the demo trips the breaker once and never recovers.
-        spend = db.window_spend(project_id, feature, config.BREAKER_WINDOW_S)
-        if spend < config.BREAKER_WINDOW_USD:
+        tripped, metric = _evaluate(project_id, feature)
+        if not tripped:
             db.close_breaker(scope, reset_by="auto-half-open")
-            log.info("breaker %s closed automatically (window spend $%.4f)", scope, spend)
+            log.info(
+                "breaker %s closed automatically (%s)", scope, _describe(metric)
+            )
             return Decision(blocked=False)
 
-        metric = _metric(spend, feature)
         db.reopen_breaker(int(open_row["id"]), metric)
-        log.warning("breaker %s re-opened; still $%.4f over window", scope, spend)
+        log.warning("breaker %s re-opened; %s", scope, _describe(metric))
         return _blocked(open_row["mode"], scope, config.BREAKER_COOLDOWN_S, metric)
 
-    spend = db.window_spend(project_id, feature, config.BREAKER_WINDOW_S)
-    if spend < config.BREAKER_WINDOW_USD:
+    tripped, metric = _evaluate(project_id, feature)
+    if not tripped:
         return Decision(blocked=False)
 
     mode = config.BREAKER_MODE if config.BREAKER_MODE in (THROTTLE, REVOKE) else THROTTLE
-    metric = _metric(spend, feature)
     db.open_breaker(scope, mode, metric)
     if mode == REVOKE:
         db.revoke_key(key["key_id"])
-    log.warning("breaker TRIPPED scope=%s mode=%s spend=$%.4f", scope, mode, spend)
+    log.warning("breaker TRIPPED scope=%s mode=%s %s", scope, mode, _describe(metric))
     notify(scope, mode, metric)
     return _blocked(mode, scope, config.BREAKER_COOLDOWN_S, metric)
 
 
-def _metric(spend: float, feature: str | None) -> dict[str, Any]:
-    """Everything the decision compared, recorded alongside the decision.
+def _evaluate(project_id: str, feature: str | None) -> tuple[bool, dict[str, Any]]:
+    """Run both detection conditions for one attribution tag.
 
-    ARCHITECTURE.md §5 requires this for the Treasurer and the same reasoning applies
-    here: "the breaker tripped" is unfalsifiable on stage, whereas "$24.10 against a $20
-    threshold over 300s" can be checked by anyone in the room.
+    Returns ``(tripped, metric)``. The metric is returned either way so a decision *not*
+    to trip is as inspectable as a decision to trip — "why didn't the breaker fire" is a
+    question someone will ask on stage.
+
+    Two indexed reads on the hot path. The floor is evaluated first and short-circuits,
+    so the common case (a quiet tag) costs one query, not two.
     """
-    return {
-        "window_s": config.BREAKER_WINDOW_S,
-        "window_spend_usd": round(spend, 6),
-        "threshold_usd": config.BREAKER_WINDOW_USD,
+    short_spend = db.window_spend(project_id, feature, config.BREAKER_WINDOW_S)
+
+    metric: dict[str, Any] = {
+        "detector": "floor_and_burst",
         "feature": feature,
-        "detector": "flat_threshold",
+        "window_s": config.BREAKER_WINDOW_S,
+        "window_spend_usd": round(short_spend, 6),
+        "threshold_usd": config.BREAKER_WINDOW_USD,
     }
+
+    # Condition 1 — floor. Below this, nothing else matters: a low-traffic tag whose
+    # spend doubled is still spending almost nothing, and paging on it is noise.
+    if short_spend < config.BREAKER_WINDOW_USD:
+        metric["result"] = "below_floor"
+        return False, metric
+
+    # Condition 2 — burst. Disabled by setting the ratio to 0, which reverts to the flat
+    # detector CONTEXT.md §5C describes.
+    if config.BREAKER_BURST_RATIO <= 0:
+        metric["result"] = "floor_cleared_burst_check_disabled"
+        return True, metric
+
+    baseline_s = max(config.BREAKER_BASELINE_WINDOW_S, config.BREAKER_WINDOW_S)
+    baseline_spend = db.window_spend(project_id, feature, baseline_s)
+
+    # The baseline window contains the short window, so baseline_spend >= short_spend and
+    # a non-zero short window guarantees a non-zero divisor. Guarded anyway: a clock skew
+    # or a zero-length window should not raise inside the request path.
+    short_rate = short_spend / max(config.BREAKER_WINDOW_S, 1)
+    baseline_rate = baseline_spend / max(baseline_s, 1)
+    ratio = (short_rate / baseline_rate) if baseline_rate > 0 else float("inf")
+
+    metric.update(
+        baseline_window_s=baseline_s,
+        baseline_spend_usd=round(baseline_spend, 6),
+        # Normalised to $/hour so the two numbers are directly comparable by eye — the
+        # raw per-second rates are unreadable at these dollar amounts.
+        window_rate_usd_per_hour=round(short_rate * 3600, 6),
+        baseline_rate_usd_per_hour=round(baseline_rate * 3600, 6),
+        burst_ratio=round(ratio, 4) if ratio != float("inf") else None,
+        burst_ratio_threshold=config.BREAKER_BURST_RATIO,
+        # The ceiling this ratio can reach given the window sizes. A threshold above it
+        # makes the breaker unfirable, which is worth being able to see in the record.
+        burst_ratio_ceiling=round(baseline_s / max(config.BREAKER_WINDOW_S, 1), 4),
+    )
+
+    if ratio < config.BREAKER_BURST_RATIO:
+        # Over the floor but spending at its normal rate — an expensive tag, not a
+        # runaway one. This is the false positive the burst check exists to prevent.
+        metric["result"] = "steady_spend_not_a_burst"
+        return False, metric
+
+    metric["result"] = "tripped"
+    return True, metric
+
+
+def _describe(metric: dict[str, Any]) -> str:
+    """One-line human summary of an evaluation, for logs and alerts."""
+    parts = [
+        f"{metric['result']}",
+        f"spend=${metric['window_spend_usd']:.4f}/{metric['window_s']}s",
+        f"floor=${metric['threshold_usd']:.2f}",
+    ]
+    if "burst_ratio" in metric:
+        ratio = metric["burst_ratio"]
+        parts.append(
+            f"burst={'inf' if ratio is None else f'{ratio:.2f}'}x"
+            f" (need {metric['burst_ratio_threshold']:.2f}x,"
+            f" ceiling {metric['burst_ratio_ceiling']:.0f}x)"
+        )
+    return " ".join(parts)
 
 
 def _blocked(mode: str, scope: str, cooldown_left: float, metric: dict[str, Any] | None = None) -> Decision:

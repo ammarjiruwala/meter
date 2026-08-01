@@ -46,6 +46,23 @@ Then change one line in your app:
 That gets you metering, pricing, and project-level attribution with zero code changes.
 Everything past that is opt-in headers.
 
+### What goes in the Authorization header
+
+**Send your Meter key where your provider key used to go.** Meter resolves it to a project, then
+substitutes your provider key on the outbound request — so the key your SDK holds is a Meter
+credential, not an OpenAI or Anthropic one:
+
+```diff
+- apiKey: process.env.OPENAI_API_KEY
++ apiKey: process.env.METER_KEY        // Authorization: Bearer mk_...
+```
+
+Anthropic SDKs send `x-api-key` instead of `Authorization: Bearer`; Meter accepts either, so no SDK
+needs reconfiguring beyond the base URL. Provider keys live in Meter's own environment and never
+leave your VPC — which is the whole reason Meter is a control plane rather than a key custodian.
+Outbound headers are built from a whitelist, so a client's credential cannot reach the provider even
+by accident.
+
 ### Attribution ladder
 
 Each rung costs you a little more integration and buys you a lot more resolution.
@@ -90,9 +107,17 @@ Two modes, because "runaway loop" and "leaked key" are different emergencies:
   This is the right response to a retry storm in one feature.
 - **Revoke** — the key is cut entirely. This is the right response to a credential leak.
 
-Detection is deliberately dumb: trailing 5-minute spend for a tag versus its 7-day baseline for the
-same window, with an absolute floor so low-traffic tags don't trip on noise. Breakers auto half-open
-after a cooldown and can always be reset manually.
+Detection is two conditions, and both must hold:
+
+- **Floor** — trailing 5-minute spend clears an absolute threshold (default `$20`). Fast, and it
+  keeps low-traffic tags from tripping on noise: 12x of nothing is still nothing.
+- **Burst** — that window's spend *rate* is at least 3x the trailing hour's average rate. This is
+  what stops a feature that is simply expensive from tripping the breaker every five minutes
+  forever, which is the failure mode that makes teams turn a breaker off and never turn it back on.
+
+A leaked key with no prior history still trips on the first check — all of its hour's spend is in
+the last five minutes, so it sits at the ratio's 12x ceiling. Breakers auto half-open after a
+cooldown and can always be reset manually.
 
 ---
 
@@ -107,6 +132,11 @@ after a cooldown and can always be reset manually.
 | `TREASURER_MAX_TOPUP_USD` | Per-transaction ceiling |
 | `TREASURER_MAX_DAILY_USD` | Rolling 24h ceiling |
 | `BREAKER_ENABLED` | Master switch |
+| `BREAKER_WINDOW_S` / `BREAKER_WINDOW_USD` | Short window and its absolute spend floor (default `300` / `20`) |
+| `BREAKER_BASELINE_WINDOW_S` | Trailing window the burst ratio compares against (default `3600`) |
+| `BREAKER_BURST_RATIO` | How many times the baseline rate trips the breaker (default `3`; `0` disables the burst check) |
+| `BREAKER_MODE` | `throttle` (429, tag-scoped) or `revoke` (403, key-scoped) |
+| `TREASURER_INTERVAL_S` | Treasurer loop interval. `30` in production; lower it on a demo box |
 | `FAIL_MODE` | `open` (default) or `closed` — see below |
 
 Budgets live in `meter.yaml` in your repo, so spend limits are reviewed by pull request:

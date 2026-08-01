@@ -48,25 +48,53 @@ Heavily rate-limited. Every decision is logged with its inputs and thresholds.
 ```
 1. AUTHENTICATE   resolve Meter key → project, environment
 2. ATTRIBUTE      read X-Meter-Feature / X-Meter-Actor / X-Meter-Trace
-3. ESTIMATE       p95 cost for (project, endpoint, model) over trailing 7d, from Redis cache
-4. RESERVE        atomic Lua: if (balance - reserved - estimate) >= 0 then reserve, else reject
+3. ESTIMATE       exact input tokens via tiktoken + predicted output tokens (see below)
+4. RESERVE        atomic compare-and-set: if (balance - reserved - estimate) >= 0 then reserve
 5. BREAKER CHECK  is this tag throttled? is this key revoked?
 6. FORWARD        stream bytes to client unbuffered while teeing for usage extraction
 7. CAPTURE        price actual usage, release (estimate - actual), write ledger row
 ```
 
-Steps 1–5 are pure Redis and must complete in single-digit milliseconds. Step 7 is asynchronous —
-the client already has its bytes.
+Steps 1–5 must complete in single-digit milliseconds. Step 7 is asynchronous — the client already
+has its bytes.
+
+### The estimator is one design, not two
+
+Step 3 combines two mechanisms that earlier drafts of this document and `CONTEXT.md` §5A presented
+as competing options. They are not alternatives; they are halves of the same estimator, because
+each is useless for what the other does:
+
+- **Input tokens: `tiktoken`, exactly.** The prompt is in hand before the call. There is no reason
+  to predict a number that can simply be counted, and no historical model beats counting.
+- **Output tokens: a task-classification heuristic.** The response does not exist yet. This is
+  irreducibly a prediction, and it is where the predictor earns its place.
+- **Cold start: trailing p95 for (project, endpoint, model).** A fallback for the first calls of a
+  new feature, before there is any per-feature history for the heuristic to calibrate against.
+
+The feedback loop then compares predicted against actual output tokens per call and stores the
+variance, which is what makes the predictor's accuracy a number we can quote rather than a claim.
 
 ### Why authorize/capture
 
 A naive "check the balance, then call" is wrong under concurrency: a thousand simultaneous requests
 all read the same healthy balance and all proceed. Reserving up front makes the ceiling actually
-hold. Reservations carry a TTL (default 120s) so a crashed worker releases its holds automatically
-instead of deadlocking the wallet.
+hold. It is also, deliberately, the same primitive the payments world uses — free credibility in
+an agentic-commerce room.
 
-It is also, deliberately, the same primitive the payments world uses. The vocabulary is free
-credibility in an agentic-commerce room.
+**What makes this correct is serialization, not Redis.** Redis Lua is the right implementation once
+the proxy runs more than one replica, because Redis is then the only shared point and Lua is the
+only way to make the read-modify-write atomic across them. With a single proxy process — the
+default deployment and the whole demo — an in-process lock around the same read-modify-write gives
+an identical guarantee with no extra container, dependency, or in-path failure mode. Redis becomes
+load-bearing at replica #2; the upgrade is one function. See `PROPOSALS.md` A5.
+
+**Reservation TTL vs. streaming.** Reservations carry a short TTL (default 120s) so a crashed worker
+releases its holds instead of deadlocking the wallet. But this proxy holds SSE streams open for
+minutes at a time, so a naive fixed TTL expires *mid-flight* on exactly the longest and most
+expensive calls — and it fails silently, because nothing errors when a reservation quietly
+disappears; the ceiling just stops holding. The streaming loop must therefore **heartbeat-extend its
+reservation** (re-`EXPIRE` roughly every 30s) for as long as the stream is alive. Keep the TTL
+short and extend it; do not simply raise it, or a crashed worker's holds outlive the incident.
 
 ### Streaming is the hard part
 
@@ -84,6 +112,14 @@ Two cases will bite:
 | --- | --- |
 | Client disconnects mid-stream | Tokens were still burned. Estimate from chunks observed, write the row with `estimated = true`, capture against the reservation. |
 | Unknown provider shape | Fall back to byte-length heuristics, flag `estimated = true`. Never drop the row. |
+
+**Capture must be scheduled before the first `await` in the stream's teardown.** A client
+disconnect does not politely end the response generator — it *cancels* it, which cancels the
+capture path along with it. Any `await` in a `finally` block re-raises the cancellation and skips
+everything after it, so a capture written at the bottom of that block is exactly the row this
+table promises and never gets. Scheduling the write is synchronous; do that first, then close the
+upstream connection. Anyone tidying this ordering will silently delete the disconnect-handling
+behaviour above while every test still passes.
 
 The proxy is therefore not a passthrough — it is a stream parser that happens to forward bytes.
 Budget real engineering hours here; it is the single most underestimated part of the build.
@@ -131,6 +167,30 @@ breaker_events  (id, scope, mode, trigger_metric jsonb, opened_at, closed_at, re
 research project. `trace_id` is what makes cost-per-outcome possible: one resolved ticket is a dozen
 calls, so outcomes attach to traces, not requests.
 
+**What goes into `prompt_hash` is part of the schema, not an implementation detail.** The dedupe and
+cache-candidate features are only as good as the hash input, and every choice below changes the
+results:
+
+| Field | In the hash? | Why |
+| --- | --- | --- |
+| model | **yes** | The same prompt to two models is two different cache entries |
+| system prompt | **yes** | It is sent and paid for on every call |
+| message text | **yes**, whitespace-collapsed | A reindented prompt template is the same prompt |
+| image / non-text blocks | no | Hashing megabytes of base64 in the request path costs more than the feature is worth |
+| `temperature`, `top_p`, `seed` | **no** | See below — this one is load-bearing |
+
+Excluding sampling parameters is the choice that matters. A retry storm re-sends an identical prompt,
+very often with jittered temperature; including those fields would make every retry hash differently
+and break retry-loop detection in the exact scenario the feature exists to catch.
+
+**Budget source of truth: `meter.yaml` wins.** `projects.ceiling_usd_day` and the per-feature
+ceilings are a *read cache*, not the record. A loader parses `meter.yaml` at boot and upserts into
+these tables so the request path gets an indexed local read instead of a file parse; the file is
+what changes by pull request, and §9 explains why that placement is the point. Two rules follow:
+the loader must be idempotent, and it must reject a config whose feature ceilings sum to more than
+their project's ceiling — catching that in review is the whole of budget-as-code, and it is a
+five-line check.
+
 **The interesting join** is `requests × annotations` on `trace_id`. That is dollars per resolved
 ticket, per closed lead, per generated report. Cost-per-token is a commodity metric; cost-per-outcome
 is a margin metric, and it is roughly forty lines of code away.
@@ -151,6 +211,14 @@ every 30s:
       notify (iMessage / Slack)
 ```
 
+**On the 30-second interval.** 30s is the documented default and what a real deployment should run:
+the Treasurer is heavily rate-limited by design, and a tighter loop mostly buys extra calls against
+a payment provider's sandbox quota. The demo box is the exception — a 30-second silence on stage
+while everyone waits for the top-up is a bad 30 seconds — so the interval is configurable via
+`TREASURER_INTERVAL_S` and the demo runs it at 3s. Confirm the Prava sandbox's actual rate limit
+before settling on that number; if the sandbox throttles, the loop interval is the first thing to
+raise. See `PROPOSALS.md` A3 and C3.
+
 Safety rails, all enforced in code rather than trusted to the model:
 
 - `TREASURER_DRY_RUN=true` by default — rehearse the whole decision path without touching sandbox
@@ -167,9 +235,43 @@ ends any conversation about autonomous payments.
 
 ## 6. Circuit breaker
 
-**Detection.** For each `(project, feature)`: trailing 5-minute spend versus the 7-day baseline for
-the same window. Trip when the ratio exceeds a threshold *and* absolute spend clears a floor, so
-low-traffic tags don't trip on noise.
+**Detection.** For each `(project, feature)`, two conditions that must **both** hold:
+
+1. **Floor** — trailing 5-minute spend clears an absolute dollar threshold (default `$20`). This is
+   what makes detection fast, and it stops a low-traffic tag whose spend merely doubled from paging
+   anyone: 12x of nothing is still nothing.
+2. **Burst** — that 5-minute window's spend *rate* exceeds the trailing **1-hour** average rate by a
+   multiple (default 3x). This is the anomaly test: is this tag spending unusually fast *for itself*.
+
+Earlier drafts specified the baseline as 7 days. One hour is the better window for a system that has
+to work on its first day, needs no accumulated training data, and still cleanly separates the two
+cases that matter:
+
+| Traffic | 5-min spend | Ratio vs. 1-hour rate | Result |
+| --- | --- | --- | --- |
+| Leaked key, no prior history | over floor | at the 12x ceiling | **trips immediately** |
+| Legitimately expensive but steady feature | over floor | ~1x | does not trip |
+| Burst layered on steady traffic | over floor | >3x | **trips** |
+
+That middle row is the reason the second condition exists. With a floor alone, a feature that simply
+costs more than the threshold trips the breaker every five minutes forever, and the operator's only
+remedy is to raise the threshold until the breaker is useless for that project.
+
+**Why not the textbook multi-window alert.** Google's SRE Workbook prescribes
+[multi-window multi-burn-rate alerting](https://sre.google/workbook/alerting-on-slos/) for this exact
+precision-versus-detection-time tension — pair a short window with a long one and require both to
+breach. Ported literally, as two absolute thresholds, it is wrong here: those alerts page a human
+about SLO burn, where an hour of detection delay is acceptable, and a 1-hour window at an equivalent
+dollar threshold cannot trip until a full hour of burn has accumulated, because the opening minutes
+of an incident are diluted by the quiet period in front of them. An hour is a fine delay for a pager
+and a catastrophic one for a leaked API key. Using the long window as a *rate baseline* rather than a
+second absolute threshold keeps the property that pattern exists to provide while detection stays as
+fast as the floor allows.
+
+The ratio is bounded by the window sizes — a 5-minute window inside a 1-hour baseline can reach at
+most 12x — so a burst threshold above that makes the breaker unfirable. Setting it to `0` disables
+the burst check and reverts to the flat detector, which is the intended escape hatch if the anomaly
+test misbehaves in front of an audience.
 
 **Modes.**
 
@@ -196,6 +298,29 @@ you on stage.
 | Meter itself down | App falls back to the direct provider URL — document this. Trust requires an exit. |
 
 The stance to state before anyone asks: **a cost tool that takes down production is not a cost tool.**
+
+### Where fail-open and the circuit breaker disagree
+
+Fail-open and the breaker point in opposite directions, and it is better to say so than to let
+someone find it. Losing the datastore means losing enforcement — so during a datastore outage, a
+leaked key burns freely during precisely the incident the breaker exists to contain. That is a real
+gap, and it is an accepted one: an outage that also takes production down is strictly worse than an
+outage that only removes a safety net.
+
+Two things bound the exposure:
+
+- **Authentication never fails open.** It is not subject to `FAIL_MODE`. Fail-open exists so a
+  ledger outage does not take production down; it is not licence to serve a request that cannot be
+  attributed to anyone, which would be an unbounded call against someone else's provider key. If
+  the ledger cannot be reached to resolve a Meter key, the answer is `503`.
+- **Revocation therefore fails closed, by construction.** A key's `revoked_at` is read during
+  authentication, and the revocation check consults that already-resolved record rather than issuing
+  its own query. There is no datastore call in the revocation path that could fail open — a cut
+  credential stays cut even when everything else is degraded. This is the half of the breaker that
+  matters most during an incident, and it is the half that survives one.
+
+What genuinely degrades is *rate-anomaly* detection (the floor and burst conditions in §6), which
+needs the ledger to measure spend. Those fail open, loudly.
 
 ---
 

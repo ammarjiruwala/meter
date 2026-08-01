@@ -67,6 +67,22 @@ async def lifespan(app: FastAPI):
     if not config.OPENAI_API_KEY and not config.ANTHROPIC_API_KEY:
         log.warning("no provider keys configured — every upstream call will 401")
 
+    # A breaker that cannot fire is worse than no breaker, because everyone believes it is
+    # protecting them. The burst ratio is bounded by the window sizes, so a threshold above
+    # that ceiling silently disables detection — shout about it at boot rather than
+    # discovering it during the incident it was supposed to catch.
+    if config.BREAKER_ENABLED and config.BREAKER_BURST_RATIO > 0:
+        ceiling = config.BREAKER_BASELINE_WINDOW_S / max(config.BREAKER_WINDOW_S, 1)
+        if config.BREAKER_BURST_RATIO >= ceiling:
+            log.error(
+                "BREAKER CANNOT FIRE: BREAKER_BURST_RATIO=%.2f is at or above the %.2fx "
+                "ceiling implied by BREAKER_WINDOW_S=%ds inside "
+                "BREAKER_BASELINE_WINDOW_S=%ds. Lower the ratio, widen the baseline, or "
+                "set BREAKER_BURST_RATIO=0 to use the flat floor alone.",
+                config.BREAKER_BURST_RATIO, ceiling,
+                config.BREAKER_WINDOW_S, config.BREAKER_BASELINE_WINDOW_S,
+            )
+
     # One client for the process. Connection reuse is most of the reason the proxy can
     # claim single-digit-millisecond overhead: a fresh TLS handshake per request would
     # cost more than everything else in this file put together.
@@ -161,6 +177,19 @@ async def healthz() -> dict[str, Any]:
             "mode": config.BREAKER_MODE,
             "window_s": config.BREAKER_WINDOW_S,
             "threshold_usd": config.BREAKER_WINDOW_USD,
+            "baseline_window_s": config.BREAKER_BASELINE_WINDOW_S,
+            "burst_ratio": config.BREAKER_BURST_RATIO,
+            # Surfaced so a misconfiguration is visible from a health check rather than
+            # only from a log line someone missed at boot.
+            "burst_ratio_ceiling": round(
+                config.BREAKER_BASELINE_WINDOW_S / max(config.BREAKER_WINDOW_S, 1), 2
+            ),
+            "can_fire": (
+                not config.BREAKER_ENABLED
+                or config.BREAKER_BURST_RATIO <= 0
+                or config.BREAKER_BURST_RATIO
+                < config.BREAKER_BASELINE_WINDOW_S / max(config.BREAKER_WINDOW_S, 1)
+            ),
         },
         "providers": {
             "openai": bool(config.OPENAI_API_KEY),

@@ -283,11 +283,13 @@ def test_prompt_hash() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-def _spend(project: str, feature: str | None, cost: float, n: int = 1) -> None:
+def _spend(project: str, feature: str | None, cost: float, n: int = 1, age_s: float = 0) -> None:
+    """Write ledger rows. `age_s` backdates them, to build a trailing baseline."""
     for i in range(n):
         db.record_request({
             "id": f"req_{project}_{feature}_{cost}_{i}_{os.urandom(4).hex()}",
-            "ts": db.now_iso(), "project_id": project, "environment": "test",
+            "ts": db.now_iso() if age_s <= 0 else db.iso_seconds_ago(age_s),
+            "project_id": project, "environment": "test",
             "actor": None, "feature": feature, "trace_id": None,
             "provider": "openai", "model": "gpt-4o", "endpoint": "/v1/chat/completions",
             "input_tokens": 0, "output_tokens": 0,
@@ -398,6 +400,122 @@ def test_breaker() -> None:
           _with_breaker_disabled("proj-beta", "runaway", db.resolve_key("test_key_beta")))
 
 
+def test_burst_detection() -> None:
+    """The two-condition detector: absolute floor AND rate-vs-baseline burst.
+
+    This suite exists because the floor alone has a specific, expensive failure mode —
+    a feature that legitimately spends above the threshold trips the breaker every five
+    minutes forever, and the operator's only fix is to raise the threshold until the
+    breaker is useless for that project.
+    """
+    print("\ncircuit breaker — burst detection")
+    config.BREAKER_ENABLED = True
+    config.BREAKER_WINDOW_S = 300
+    config.BREAKER_WINDOW_USD = 5.0
+    config.BREAKER_BASELINE_WINDOW_S = 3600
+    config.BREAKER_BURST_RATIO = 3.0
+    config.BREAKER_COOLDOWN_S = 120
+    config.BREAKER_MODE = breaker.THROTTLE
+
+    key = db.resolve_key("test_key_alpha")
+
+    # A tag with no history at all: every dollar of the hour is in the last 5 minutes,
+    # so the ratio sits at its 12x ceiling. This is the leaked-key demo path — it must
+    # still trip immediately, which is exactly what a literal two-absolute-threshold
+    # port of the SRE pattern would have broken.
+    _spend("proj-alpha", "leaked-key", 9.0)
+    decision = breaker.check("proj-alpha", "leaked-key", key)
+    check("a cold tag over the floor trips immediately", decision.blocked is True)
+    check("cold tag ratio is at the window ceiling",
+          decision.metric["burst_ratio"] == decision.metric["burst_ratio_ceiling"],
+          str(decision.metric))
+    breaker.reset(breaker.scope_for("proj-alpha", "leaked-key"))
+
+    # A steady, legitimately expensive feature: $6 per 5 minutes, sustained for an hour.
+    # It clears the floor on every single check and must never trip.
+    # The +30s offset keeps bucket 1 clear of the 300s window edge. Without it, a row
+    # landing exactly on the boundary lands inside or outside depending on microseconds of
+    # clock drift between writing the row and computing the cutoff — which would make this
+    # assertion pass or fail at random.
+    _spend("proj-alpha", "steady", 6.0)
+    for bucket in range(1, 12):
+        _spend("proj-alpha", "steady", 6.0, age_s=bucket * 300 + 30)
+
+    decision = breaker.check("proj-alpha", "steady", key)
+    check("steady spend over the floor does NOT trip", decision.blocked is False,
+          str(decision.metric))
+
+    tripped, metric = breaker._evaluate("proj-alpha", "steady")
+    check("steady spend is recorded as such, not silently ignored",
+          metric["result"] == "steady_spend_not_a_burst", str(metric))
+    check("steady spend cleared the floor (so the floor alone would have tripped)",
+          metric["window_spend_usd"] >= config.BREAKER_WINDOW_USD, str(metric))
+    check("steady short-window rate ~= baseline rate",
+          abs(metric["burst_ratio"] - 1.0) < 0.05, str(metric))
+
+    # Same feature, now with a genuine burst layered on top of that steady traffic.
+    # Only the short window moves, so the ratio climbs past the threshold.
+    _spend("proj-alpha", "steady", 30.0)
+    decision = breaker.check("proj-alpha", "steady", key)
+    check("a burst on top of steady traffic DOES trip", decision.blocked is True,
+          str(decision.metric))
+    check("trip records both windows for auditability",
+          decision.metric["baseline_spend_usd"] > decision.metric["window_spend_usd"],
+          str(decision.metric))
+    breaker.reset(breaker.scope_for("proj-alpha", "steady"))
+
+    # Setting the ratio to 0 reverts to the flat detector CONTEXT.md §5C specifies, so
+    # the team can fall back without a code change if the burst check misbehaves live.
+    config.BREAKER_BURST_RATIO = 0
+    decision = breaker.check("proj-alpha", "steady", key)
+    check("burst_ratio=0 falls back to the flat floor detector",
+          decision.blocked is True
+          and decision.metric["result"] == "floor_cleared_burst_check_disabled",
+          str(decision.metric))
+    breaker.reset(breaker.scope_for("proj-alpha", "steady"))
+    config.BREAKER_BURST_RATIO = 3.0
+
+    # Below the floor, the burst check must not even run — a tag that went from $0.01 to
+    # $0.12 has a 12x ratio and is still spending nothing.
+    _spend("proj-alpha", "tiny", 0.01)
+    tripped, metric = breaker._evaluate("proj-alpha", "tiny")
+    check("below the floor never trips regardless of ratio", tripped is False)
+    check("below-floor short-circuits before the second query",
+          metric["result"] == "below_floor" and "burst_ratio" not in metric, str(metric))
+
+
+def test_revocation_fails_closed() -> None:
+    """A revoked key must be blocked even when the ledger is unreachable.
+
+    PROPOSALS.md B5 flagged that fail-open plus a breaker is contradictory: Redis/ledger
+    down means no enforcement, during precisely the incident the breaker exists for. The
+    revocation half is already safe by construction and this pins that down — the check
+    reads `revoked_at` off the key resolved during authentication, so it never issues a
+    query that could fail open.
+    """
+    print("\ncircuit breaker — revocation fails closed")
+    config.BREAKER_ENABLED = True
+    revoked_key = {"key_id": "mk_x", "project_id": "proj-gone", "revoked_at": db.now_iso()}
+
+    original = db.window_spend
+
+    def exploding_window_spend(*args, **kwargs):
+        raise RuntimeError("ledger unreachable")
+
+    db.window_spend = exploding_window_spend
+    try:
+        decision = breaker.check("proj-gone", "anything", revoked_key)
+        check("revoked key blocked with the ledger down", decision.blocked is True)
+        check("revoked key returns 403, not 429", decision.status_code == 403)
+        # And the breaker being disabled entirely must not resurrect a revoked key.
+        config.BREAKER_ENABLED = False
+        check("revoked key stays blocked even with the breaker disabled",
+              breaker.check("proj-gone", "anything", revoked_key).blocked is True)
+    finally:
+        db.window_spend = original
+        config.BREAKER_ENABLED = True
+
+
 def _with_breaker_disabled(project: str, feature: str, key: dict) -> bool:
     config.BREAKER_ENABLED = False
     try:
@@ -420,6 +538,8 @@ def main() -> int:
         test_prompt_hash,
         test_ledger,
         test_breaker,
+        test_burst_detection,
+        test_revocation_fails_closed,
     ):
         suite()
     print(f"\n{PASSED} checks passed")

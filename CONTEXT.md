@@ -32,7 +32,7 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 
 ## 4. Architecture & Tech Stack  
 *   **Backend:** Python + FastAPI (Handles async proxy routing and background agent loops).  
-*   **Database:** Postgres + Redis (Postgres stores users, wallets, transactions, and cross-model efficiency metrics; Redis holds wallet reservations, breaker state, and cached ceilings for in-path speed — see ARCHITECTURE.md #4).  
+*   **Database:** Postgres for the ledger — users, wallets, transactions, cross-model efficiency metrics (SQLite in Phase 1; column names already match so the port is a schema swap). **Redis is post-hackathon.** It is not what makes reservations correct — serialization is, and with a single proxy process an in-process lock is an identical guarantee for none of the operational cost. Redis becomes load-bearing at proxy replica #2. See ARCHITECTURE.md §2 and `PROPOSALS.md` A5.  
 *   **Frontend:** Next.js + Tailwind CSS (Dashboard for spend, balances, and live agent logs).  
 *   **Token Counting:** `tiktoken` library.  
 *   **Payments:** Prava Sandbox API (Using fake credit card info provided by organizers).  
@@ -45,15 +45,17 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 4. **Procure (The Magic):** If provider balance is too low, the Treasurer Agent calls Prava for a scoped card and hits the Mock Provider Billing endpoint to top up.  
 5. **Execute:** Forwards request to real OpenAI/Anthropic.  
 6. **Learn:** Logs actual vs. predicted token usage (Cross-Model Analysis).  
-7. **Protect:** If spend spikes abnormally (> $20 in 5 mins), the Circuit Breaker kills the API key and sends an iMessage via Poke.
+7. **Protect:** If spend spikes abnormally (> $20 in 5 mins **and** ≥ 3x the trailing hour's rate), the Circuit Breaker throttles the offending tag with `429` — or cuts the key entirely with `403` in revoke mode — and sends an iMessage via Poke.
 
 ---
 
 ## 5. Core Features to Implement
 
 ### A. Predictive Engine & Cross-Model Analysis  
-*   Use `tiktoken` for exact input token counting.  
-*   Use heuristics to predict output tokens (e.g., coding task = input * 2.0).  
+The estimator is **one design with three parts**, not competing options (ARCHITECTURE.md §2 says the same thing in the same words):
+*   Use `tiktoken` for exact input token counting. The prompt is in hand — there is no reason to predict a number that can be counted.
+*   Use heuristics to predict output tokens (e.g., coding task = input * 2.0). The response does not exist yet, so this is irreducibly a prediction and is where the predictor earns its place.
+*   Use trailing p95 cost for `(project, endpoint, model)` as the **cold-start fallback**, for the first calls of a new feature before there is per-feature history to calibrate the heuristic against.
 *   Implement Cross-Model Routing: Allow the proxy to send the same prompt to OpenAI and Anthropic to log efficiency differences.  
 *   Feedback Loop: Compare `predicted_output_tokens` vs `actual_output_tokens`. Save variance to DB to calculate predictor accuracy.
 
@@ -64,8 +66,16 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 *   Call Mock Provider Billing endpoint to process the card and update the balance.
 
 ### C. Circuit Breaker & Poke Alerts  
-*   Middleware that tracks spend in a rolling 5-minute window.  
-*   If a user spends > $20 in 5 mins, block their API key in the proxy (return `403 Forbidden`).  
+**Detection — two conditions, both must hold** (full reasoning in ARCHITECTURE.md §6):
+*   **Floor:** trailing 5-minute spend clears `> $20`. This is what makes detection fast.
+*   **Burst:** that 5-minute window's spend *rate* exceeds the trailing 1-hour average rate by 3x. Without this second condition, a feature that legitimately costs more than $20 per 5 minutes trips the breaker every five minutes forever, and the only fix is raising the threshold until the breaker is useless for that project.
+*   A leaked key with no prior history still trips *immediately* — all of its hour's spend is in the last five minutes, so the ratio is at its 12x ceiling. Setting the ratio to `0` reverts to the flat detector as an escape hatch.
+
+**Two response modes, because a retry storm and a leaked key are different emergencies:**
+*   **Throttle (default):** the offending attribution tag gets `429 Too Many Requests` + `Retry-After`; every other tag on the same key keeps flowing. This is the right answer to a runaway loop in one feature — and the better demo, since "one feature got cut off and everything else kept serving" is a stronger claim than "we turned it off". `429` also matters because provider SDKs already back off on it, whereas a `403` makes them treat a temporary condition as permanent.
+*   **Revoke:** the Meter key is cut entirely with `403 Forbidden`. This is the right answer to a leaked credential, where every request under that key is suspect.
+*   Breakers auto half-open after a cooldown and can always be reset manually at `POST /v1/breaker/reset` — without that, the demo trips the breaker once and strands us on stage.
+
 *   Trigger Poke API to send an iMessage to a hardcoded "CTO" phone number: *"🚨 Circuit Breaker Tripped! Spend threshold exceeded. API key revoked."*
 
 ### D. The Dashboard  
@@ -121,10 +131,10 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
     3.  ✅ **Budget enforcement is now owned — Shubh, Phase 2.** `meter.yaml` loader plus a pre-flight ceiling check in the request path. (`PROPOSALS.md` B7)
 
 *   **Open blockers/decisions:**
-    1.  **Two different circuit-breaker detectors are specified** — flat $20/5min here in §5C, ratio-vs-7-day-baseline in `ARCHITECTURE.md` §6. Shipped the flat one. Google's SRE Workbook says the answer is neither: pair a short and a long window and require both to trip. ~10 lines. (`PROPOSALS.md` A1)
-    2.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** The first is what turns a cost tool into a margin tool and is ~40 lines; the second is the first command in our own quickstart. (`PROPOSALS.md` B9, B10)
-    3.  **The Visa VIC track has no architectural surface.** Tanay's Phase 0 confirmed the test-card requirements are covered by `docs/prava/api-reference/test-cards.md`, so the *docs* gap is closed — but nothing in `ARCHITECTURE.md` or the build actually targets VIC. We are still entered in a track no component is designed for. (`PROPOSALS.md` B14)
-    4.  **Anthropic's OpenAI-compatibility path is unverified** — a `claude-*` model sent to `/v1/chat/completions` is forwarded to it and nobody has confirmed it exists. One live call with a real key settles it. (`PROPOSALS.md` B1, C2)
+    1.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** The first is what turns a cost tool into a margin tool and is ~40 lines; the second is the first command in our own quickstart. (`PROPOSALS.md` B9, B10)
+    2.  **The Visa VIC track has no architectural surface.** Tanay's Phase 0 confirmed the test-card requirements are covered by `docs/prava/api-reference/test-cards.md`, so the *docs* gap is closed — but nothing in `ARCHITECTURE.md` or the build actually targets VIC. We are still entered in a track no component is designed for. (`PROPOSALS.md` B14)
+    3.  **Anthropic's OpenAI-compatibility path is unverified** — a `claude-*` model sent to `/v1/chat/completions` is forwarded to it and nobody has confirmed it exists. **Needs one live call with a real `ANTHROPIC_API_KEY`, which nobody has put in a `.env` yet.** (`PROPOSALS.md` B1, C2)
+    4.  **Cross-model routing is specified two ways** — §5A says the *proxy* sends the same prompt to both providers; PLAN.md Phase 3 has it as an offline script. The script is right: shadow-calling a second provider on live traffic doubles the customer's bill inside a cost-control tool. Left as a proposal pending Ammar. (`PROPOSALS.md` B11)
 
 *   **`PROPOSALS.md`** collects 20 items from a full architecture read — contradictions between the three source-of-truth docs, and gaps they leave undefined. Four are now closed (pricing verified, Redis decided, budget enforcement owned, disconnect-capture and ledger idempotency shipped). The rest still need decisions. **`README.md` and `ARCHITECTURE.md` remain unedited** — proposals get approved there, not applied silently.
 

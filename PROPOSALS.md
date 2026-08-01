@@ -4,11 +4,17 @@ Open questions and suggested changes from a full read of `README.md`, `CONTEXT.m
 `ARCHITECTURE.md`, and `PLAN.md`, plus everything that surfaced while building the Phase 1
 proxy.
 
-**Nothing here has been applied.** The three source-of-truth documents are unchanged. Each
-item states what is wrong or missing, why it matters, and a recommendation — decide, then
-someone edits the docs.
+Each item states what is wrong or missing, why it matters, and a recommendation. Items are
+applied to `README.md` / `CONTEXT.md` / `ARCHITECTURE.md` **only after a human approves
+them** — this file is the staging area, not the record.
 
-Status key: **OPEN** — needs a decision · **DONE** — resolved, listed for the record.
+**Applied so far:** A1–A6, B2–B7, C1. Everything else is still a proposal; if you find a
+new contradiction, add it here and raise it rather than editing one source doc to match
+another (the one you "fixed" may have been the correct one).
+
+Status key: **OPEN** — needs a decision · **RESOLVED / DONE / SHIPPED** — closed, kept for the record.
+
+23 items total: A1–A6 (contradictions), B1–B14 (gaps), C1–C3 (verification).
 
 ---
 
@@ -18,7 +24,7 @@ These are places where two documents state different things, so no implementatio
 satisfy both. They matter more than the gaps in §B: a judge who reads two of our documents
 and finds them inconsistent stops trusting the third.
 
-### A1 — Circuit breaker detection: flat threshold or baseline ratio? · OPEN
+### A1 — Circuit breaker detection: flat threshold or baseline ratio? · **RESOLVED & SHIPPED**
 
 | Document | Specifies |
 | --- | --- |
@@ -30,38 +36,55 @@ These fire on completely different traffic. The flat threshold cannot distinguis
 legitimately expensive batch job from a runaway retry loop — both spend $20 fast. The ratio
 detector can, but it needs 7 days of baseline data that a 48-hour-old system does not have.
 
-**What Phase 1 shipped:** the flat threshold (it is the MVP document's number, and
-`PLAN.md` repeats it), with **both** response modes implemented so the response behaviour
-contradicts neither document. Threshold and window are env-configurable.
-
-**Recommendation:** keep the flat threshold for the demo and add the ratio as a second,
-AND-ed condition only if baseline data exists. Then edit `ARCHITECTURE.md` §6 to describe
-the flat detector as the shipped one and the ratio as the roadmap. Roughly 20 lines.
-
-**Why this ordering:** the demo script (`CONTEXT.md` §7 step 5) simulates a leaked key,
-which trips a flat threshold reliably and a ratio detector only if the baseline happens to
-be low. Betting the on-stage moment on a detector with no training data is the wrong risk.
-
-**Prior art — this is a solved problem, and the solution is neither of our two options.**
-Google's SRE Workbook chapter on
+**Prior art.** Google's SRE Workbook chapter on
 [alerting on SLOs](https://sre.google/workbook/alerting-on-slos/) documents exactly this
 tension: a single window either detects fast and produces false positives, or is precise
 and detects too late. The established fix is a **multi-window, multi-burn-rate** alert —
-require a short window *and* a long window to both exceed their thresholds before firing,
-with the short window roughly **1/12 the duration** of the long one. Google's reference
-config pairs a 1-hour window at 14.4x burn with a 6-hour window at 6x. Requiring both means
-a sharp spike that has already resolved does not page anyone, while a sustained burn still
-trips quickly.
+require a short window *and* a long window to both breach before firing, with the short
+window roughly **1/12 the duration** of the long one (reference config: 1h at 14.4x burn
+paired with 6h at 6x).
 
-Mapped onto Meter, that is a genuinely small change and strictly better than either
-document's proposal: keep the existing 5-minute window and add a 1-hour window, trip only
-when **both** clear their thresholds *and* absolute spend clears the floor. `db.window_spend()`
-already takes an arbitrary window, so it is one extra query and one extra `and` in
-`breaker.check()` — perhaps 10 lines. It also resolves the ratio-vs-flat argument without
-picking a side: the two windows *are* the sustained-burn check the ratio detector was
-reaching for, and neither needs 7 days of baseline data to work.
+**Where the textbook version breaks for us, and what shipped instead.** The first draft of
+this proposal said to port that literally: add a 1-hour window with its own absolute dollar
+threshold and require both. That is wrong here, and the reason is latency. MWMBR alerts page
+a *human* about SLO burn, where an hour of detection delay is acceptable. A 1-hour window
+carrying an equivalent dollar threshold cannot trip until a full hour of sustained burn has
+accumulated, because the opening minutes of an incident are diluted by the quiet period in
+front of them. An hour is a fine delay for a pager and a catastrophic one for a leaked API
+key — and it would have broken the demo, where the leaked-key moment has no prior history at
+all.
 
-### A2 — Breaker response code: `403` or `429`? · OPEN
+**Shipped:** the long window as a **rate baseline** rather than a second absolute threshold.
+Both conditions must hold:
+
+1. **Floor** — trailing 5-minute spend clears `BREAKER_WINDOW_USD` (default `$20`, the
+   number from `CONTEXT.md` §5C and `PLAN.md` §3). Detection stays as fast as this allows.
+2. **Burst** — that window's spend *rate* is at least `BREAKER_BURST_RATIO` (default 3x) the
+   trailing `BREAKER_BASELINE_WINDOW_S` (default 1h) average rate.
+
+| Traffic | Floor | Ratio | Result |
+| --- | --- | --- | --- |
+| Leaked key, no history | cleared | 12x (the ceiling) | **trips on the first check** |
+| Legitimately expensive but steady | cleared | ~1x | does not trip |
+| Burst on top of steady traffic | cleared | >3x | **trips** |
+
+The middle row is the entire point, and it is the failure mode a flat floor has: a feature
+that simply costs more than the threshold trips every five minutes forever, and the
+operator's only remedy is raising the threshold until the breaker is useless for that
+project. The suite has a dedicated assertion for it (`test_burst_detection`).
+
+This keeps both source documents true rather than picking a winner: the floor is
+`CONTEXT.md`'s flat threshold, and the baseline comparison is `ARCHITECTURE.md`'s ratio with
+a 1-hour lookback instead of 7 days — needing no accumulated training data and working from
+the first hour. The ratio is bounded by the window sizes (3600/300 = 12x max), so a
+threshold above the ceiling makes the breaker unfirable; `BREAKER_BURST_RATIO=0` reverts to
+the flat detector as a live escape hatch.
+
+**Applied to:** `ARCHITECTURE.md` §6, `CONTEXT.md` §5C and §4 system flow, `README.md`
+circuit-breaker section and config table, `.env.example`, `proxy/breaker.py`,
+`proxy/config.py`, `tests/test_proxy.py`.
+
+### A2 — Breaker response code: `403` or `429`? · **RESOLVED — both adopted, docs updated**
 
 `CONTEXT.md` §5C says `403 Forbidden` and only describes revocation. `ARCHITECTURE.md` §6
 describes two modes where throttle returns `429`.
@@ -76,7 +99,10 @@ clients treat a temporary condition as permanent.
 Throttle is also the better demo — "one feature got cut off and everything else kept
 serving" is a more interesting claim than "we turned it off".
 
-### A3 — Treasurer loop interval: 30s or 3s? · OPEN
+**Applied to:** `CONTEXT.md` §5C (throttle mode documented alongside revoke) and §4 system
+flow, `README.md` config table. The proxy already behaved this way; the docs now match.
+
+### A3 — Treasurer loop interval: 30s or 3s? · **RESOLVED in docs — 30s default, 3s demo box** (number still pending C3)
 
 `ARCHITECTURE.md` §5 and `README.md` say every 30 seconds. `PLAN.md` Phase 3 says every 3
 seconds. `CONTEXT.md` §5B says "every few seconds".
@@ -88,7 +114,12 @@ already anticipates sandbox rate limits as a plan-changing blocker.
 `TREASURER_INTERVAL_S` so the on-stage top-up is not a 30-second silence. Shivam should
 confirm the sandbox rate limit before this is settled. Owner: Shivam.
 
-### A4 — Cost estimation: `tiktoken` or historical p95? · OPEN
+**Applied to:** `ARCHITECTURE.md` §5 and `.env.example`, both stating 30s as the documented
+default with `TREASURER_INTERVAL_S` as the demo-box override, and both flagging that the
+number is unconfirmed until C3 lands. Nothing in the Treasurer is built yet, so this is a
+constraint recorded ahead of the code rather than a change to it.
+
+### A4 — Cost estimation: `tiktoken` or historical p95? · **RESOLVED — documented as one design**
 
 `ARCHITECTURE.md` §2 step 3 estimates from "p95 cost for (project, endpoint, model) over
 trailing 7d, from Redis cache". `CONTEXT.md` §5A estimates with `tiktoken` for input plus a
@@ -101,6 +132,10 @@ history predicts output well and is redundant for input.
 **Recommendation:** state it as one design — exact input via `tiktoken`, predicted output
 via heuristic, with trailing p95 as the cold-start fallback before per-feature history
 exists. This is a documentation fix, not a code change. Owner: Ammar + Shubh.
+
+**Applied to:** `ARCHITECTURE.md` §2 (new "The estimator is one design, not two" subsection,
+and step 3 of the lifecycle rewritten) and `CONTEXT.md` §5A. Zero code — the predictor is
+Ammar's Phase 2 work and now has an unambiguous spec to build against.
 
 ### A5 — Datastore: Postgres, SQLite, or Redis? · **DECIDED — Shubh, Phase 2**
 
@@ -128,16 +163,17 @@ demo can show a ceiling actually holding, and the upgrade path is one function m
 Lua script. That is ~40 lines instead of a new container, a new dependency, a new failure
 mode in the request path, and a `docker-compose` service nobody owns.
 
-**Doc changes this implies** (not yet applied): `CONTEXT.md` §4 should read "Postgres;
-Redis post-hackathon for multi-replica deploys", and `ARCHITECTURE.md` §2 should say the
-reservation primitive is process-local today and Redis Lua when horizontally scaled.
+**Applied to:** `CONTEXT.md` §4 (now reads "Postgres for the ledger; Redis is
+post-hackathon") and `ARCHITECTURE.md` §2, which now states that what makes authorize/capture
+correct is serialization rather than Redis, and that the primitive is process-local until
+replica #2.
 
 **Prior art:** [LiteLLM](https://docs.litellm.ai/docs/proxy/multi_tenant_architecture) —
 the closest open-source equivalent to Meter — does run FastAPI + Redis + Postgres. Worth
 knowing that the reference architecture agrees with `ARCHITECTURE.md` at scale; it just
 isn't what a 48-hour demo needs to prove the concept.
 
-### A6 — Budget source of truth: `meter.yaml` or the `projects` table? · OPEN
+### A6 — Budget source of truth: `meter.yaml` or the `projects` table? · **RESOLVED — YAML wins, documented**
 
 `README.md` and `ARCHITECTURE.md` §9 make budget-as-code a *lock-in mechanism* — limits live
 in the customer's repo and change by pull request. `ARCHITECTURE.md` §4 also has
@@ -146,6 +182,10 @@ in the customer's repo and change by pull request. `ARCHITECTURE.md` §4 also ha
 **Recommendation:** `meter.yaml` is the source of truth; a loader syncs it into the table at
 boot; the table is a read cache the hot path uses. Say so in `ARCHITECTURE.md` §4. Roughly
 40 lines of loader — see B7 for the enforcement half.
+
+**Applied to:** `ARCHITECTURE.md` §4, which now states the precedence explicitly and carries
+the two rules that follow from it: the loader must be idempotent, and it must reject a config
+whose feature ceilings exceed their project's.
 
 ---
 
@@ -169,7 +209,7 @@ an Anthropic key should confirm before the demo. The alternative — writing a b
 OpenAI↔Anthropic translator including for streams — is a multi-day job and would be the
 least reliable code in the build.
 
-### B2 — Nothing defines what the client puts in `Authorization` · OPEN (worked around)
+### B2 — Nothing defines what the client puts in `Authorization` · **RESOLVED — README quickstart updated**
 
 The entire trust story is that provider keys never leave the customer's VPC and Meter is
 "the control plane, not a key custodian" (`ARCHITECTURE.md` §8). That only works if the
@@ -182,7 +222,11 @@ this, and it is the first thing anyone integrating will ask.
 **Recommendation:** add three sentences to the `README.md` quickstart. It is the single
 most-asked integration question and currently has no written answer.
 
-### B3 — Reservation TTL contradicts streaming duration · OPEN
+**Applied to:** `README.md` quickstart — a new "What goes in the Authorization header"
+subsection with the diff a caller actually makes, the `x-api-key` note for Anthropic SDKs,
+and why the whitelist means a client credential cannot reach the provider.
+
+### B3 — Reservation TTL contradicts streaming duration · **SPEC'D in ARCHITECTURE §2; builds with reservations (Shubh, Phase 2)**
 
 `ARCHITECTURE.md` §2 sets a 120s reservation TTL "so a crashed worker releases its holds".
 `README.md` says the proxy holds SSE streams open "for minutes at a time".
@@ -193,7 +237,13 @@ failure is invisible, because nothing errors.
 
 **Recommendation:** heartbeat-extend the reservation while the stream is alive (re-`EXPIRE`
 every 30s from the streaming loop), and keep the TTL short so a genuine crash still
-releases quickly. Roughly 15 lines, but only once Redis exists — see A5. Owner: Shubh.
+releases quickly. Roughly 15 lines. Owner: Shubh.
+
+**Applied to:** `ARCHITECTURE.md` §2, which now spells out that the naive fixed TTL expires
+mid-flight on the longest calls *and fails silently* — nothing errors when a reservation
+disappears, the ceiling just stops holding. The requirement is recorded ahead of the
+reservations themselves (A5, Phase 2) so it lands with them rather than being discovered
+after.
 
 ### B4 — Client disconnect is harder than the doc implies · DONE
 
@@ -209,7 +259,11 @@ up after three chunks still produces a priced, `estimated`, status-499 ledger ro
 **Recommendation:** add a sentence to `ARCHITECTURE.md` §2 so the next person to touch the
 streaming path does not "clean up" the ordering.
 
-### B5 — Breaker and fail-open contradict each other during a Redis outage · OPEN
+**Applied to:** `ARCHITECTURE.md` §2 and `proxy/README.md`, both stating that scheduling is
+synchronous and must precede the first `await` in teardown. Worth the words because the
+tidied-up version passes every test — the failure only appears when a real client hangs up.
+
+### B5 — Breaker and fail-open contradict each other during a Redis outage · **RESOLVED — documented, and revocation already fails closed**
 
 `ARCHITECTURE.md` §7: Redis unreachable → fail-open, no enforcement, loud alert. But the
 breaker is the leaked-credential defence. Fail-open means a leaked key burns freely during
@@ -219,10 +273,21 @@ This is a defensible trade — availability over enforcement — but it is curre
 undocumented one, and a security-minded judge will find it.
 
 **Recommendation:** state it explicitly in §7 as an accepted risk, and consider making
-revocation the one check that fails *closed*. A revoked key is a small, cacheable set; it
-does not need the ledger to be reachable.
+revocation the one check that fails *closed*.
 
-### B6 — `prompt_hash` has no defined normalization · OPEN (worked around)
+**Finding while applying this: revocation already fails closed, by construction.** The
+`revoked_at` flag is read during authentication, and authentication is deliberately not
+subject to `FAIL_MODE` (serving a request nobody can be billed for is worse than a `503`).
+The revocation check then consults that already-resolved record instead of issuing its own
+query — so there is no datastore call in the revocation path that *could* fail open. The
+half of the breaker that matters most during an incident is the half that survives one.
+
+**Applied to:** `ARCHITECTURE.md` §7 (new "Where fail-open and the circuit breaker disagree"
+subsection) and `proxy/README.md`. Also pinned down by `test_revocation_fails_closed`, which
+monkeypatches the ledger to raise and asserts a revoked key is still blocked with `403` —
+including with the breaker disabled entirely.
+
+### B6 — `prompt_hash` has no defined normalization · **RESOLVED — written into ARCHITECTURE §4**
 
 `ARCHITECTURE.md` §4 calls `prompt_hash` what makes duplicate-call and cache-candidate
 detection "a single query rather than a research project" — but never says what goes into
@@ -239,6 +304,10 @@ feature — in the one scenario it exists for.
 
 **Recommendation:** write this into `ARCHITECTURE.md` §4 so the Analyst agent is built
 against a defined hash rather than reverse-engineering one.
+
+**Applied to:** `ARCHITECTURE.md` §4 as a field-by-field table with the reasoning per row,
+framed as part of the schema rather than an implementation detail — because changing it later
+silently changes every dedupe result computed before the change.
 
 ### B7 — Per-project ceilings are specified but nothing enforces them · **ASSIGNED — Shubh, Phase 2**
 
@@ -269,6 +338,11 @@ budget cannot exceed its parent's. Meter's `project → feature` nesting in `met
 the same shape, so the same rule applies: validate at load time that the feature ceilings
 sum to no more than the project ceiling, and reject the config if they don't. Catching that
 in a pull request is the entire pitch of budget-as-code, and it is a 5-line check.
+
+**Applied to:** `ARCHITECTURE.md` §4, which now records both constraints on the loader —
+idempotent, and rejects a config whose feature ceilings exceed their project's — alongside
+the `meter.yaml`-wins precedence from A6. The enforcement code is Phase 2; the spec it has to
+satisfy is now written down rather than living only in this file.
 
 ### B8 — Reconciliation after a ledger outage can double-count · DONE
 

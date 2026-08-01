@@ -79,7 +79,26 @@ METER_KEYS = _str("METER_KEYS", "mk_dev_local:demo-project:dev")
 
 # ── Circuit breaker ──────────────────────────────────────────────────────────
 BREAKER_ENABLED = _bool("BREAKER_ENABLED", True)
+
+# Detection is two conditions, both of which must hold — see proxy/breaker.py for the
+# full reasoning and ARCHITECTURE.md §6 for the spec.
+#
+# 1. FLOOR: trailing `BREAKER_WINDOW_S` spend must clear `BREAKER_WINDOW_USD`. This is
+#    CONTEXT.md §5C's "$20 in 5 minutes" and it is what makes detection fast.
 BREAKER_WINDOW_S = _int("BREAKER_WINDOW_S", 300)
 BREAKER_WINDOW_USD = _float("BREAKER_WINDOW_USD", 20.0)
+
+# 2. BURST: the short window's spend *rate* must exceed the trailing baseline window's
+#    average rate by this multiple. This is what stops a legitimately expensive but
+#    steady workload from tripping every five minutes forever.
+#
+# The ratio is capped by the window sizes: with a 300s short window inside a 3600s
+# baseline, the maximum achievable ratio is 3600/300 = 12 (every dollar of the hour
+# landed in the last five minutes). Set BREAKER_BURST_RATIO above that and the breaker
+# can never trip; set it to 0 to disable the burst check and fall back to the flat
+# floor alone.
+BREAKER_BASELINE_WINDOW_S = _int("BREAKER_BASELINE_WINDOW_S", 3600)
+BREAKER_BURST_RATIO = _float("BREAKER_BURST_RATIO", 3.0)
+
 BREAKER_MODE = _str("BREAKER_MODE", "throttle").strip().lower()
 BREAKER_COOLDOWN_S = _int("BREAKER_COOLDOWN_S", 120)

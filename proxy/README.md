@@ -123,6 +123,20 @@ for the `*` scope would let one tagged feature's burst trip the breaker for unta
 traffic — which is usually the traffic nobody has instrumented yet, i.e. production. The
 self-check has a dedicated assertion for this; it caught the bug once already.
 
+**The breaker needs two conditions, not one.** A floor alone (`>$20/5min`) trips forever on
+any feature that simply costs more than the floor, and the operator's only remedy is to
+raise the threshold until the breaker is useless for that project. The burst check — short
+window's spend *rate* vs. the trailing hour's average rate — is what separates "expensive"
+from "runaway". Note the long window is a **rate baseline, not a second absolute
+threshold**: two absolute thresholds is the textbook SRE multi-window alert, and it cannot
+trip until a full hour of burn accumulates, which is the wrong latency for a leaked key.
+
+**Revocation fails closed; rate detection fails open.** `revoked_at` is read during
+authentication, and the revocation check consults that already-resolved record instead of
+issuing its own query — so a cut credential stays cut even with the ledger unreachable.
+The floor and burst conditions do need the ledger and are subject to `FAIL_MODE`. Losing
+enforcement is a degradation; losing availability is an outage.
+
 **Authentication failures are never subject to `FAIL_MODE`.** Fail-open exists so a ledger
 outage does not take production down. It is not licence to serve a request we cannot
 attribute to anyone — that would be an unbounded call against someone else's provider key.
@@ -141,7 +155,7 @@ Each of these is a deliberate omission with a reason, not an oversight.
 | **Per-project daily ceilings** | `projects.ceiling_usd_day` and `db.project_window_spend()` both exist; nothing enforces them yet. Needs the `meter.yaml` loader, which no phase assigns to anyone | See PROPOSALS.md B7 |
 | **Postgres** | Shivam owns the schema. Column names here match ARCHITECTURE.md §4 verbatim so the port is a swap | Shivam, Phase 1–2 |
 | **`POST /v1/annotate`** | Documented in README.md as attribution rung 3 and called "the margin metric" in ARCHITECTURE.md §4, but assigned to nobody in PLAN.md | See PROPOSALS.md B9 |
-| **Ratio-based breaker detection** | ARCHITECTURE.md §6 and CONTEXT.md §5C specify different detectors. Phase 1 ships the flat threshold from CONTEXT.md | See PROPOSALS.md A1 |
+| **7-day breaker baseline** | Resolved differently: the burst check compares against the trailing *hour*, which needs no accumulated history and works on day one. See ARCHITECTURE.md §6 | Done |
 | **Poke/Linq alerts** | `breaker.notify()` is the seam, deliberately log-only. An awaited third-party HTTP call in the request path puts someone else's latency in front of production | Tanay, Phase 3 |
 | **`tiktoken` pre-flight estimate** | Ammar owns the predictor. The proxy prices *actual* usage after the fact; the predicted-vs-actual variance column lands when his engine does | Ammar, Phase 2 |
 | **Docker Compose** | README.md quickstart promises `docker compose up`; no phase assigns it | See PROPOSALS.md B10 |
