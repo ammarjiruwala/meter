@@ -42,6 +42,25 @@ the flat detector as the shipped one and the ratio as the roadmap. Roughly 20 li
 which trips a flat threshold reliably and a ratio detector only if the baseline happens to
 be low. Betting the on-stage moment on a detector with no training data is the wrong risk.
 
+**Prior art — this is a solved problem, and the solution is neither of our two options.**
+Google's SRE Workbook chapter on
+[alerting on SLOs](https://sre.google/workbook/alerting-on-slos/) documents exactly this
+tension: a single window either detects fast and produces false positives, or is precise
+and detects too late. The established fix is a **multi-window, multi-burn-rate** alert —
+require a short window *and* a long window to both exceed their thresholds before firing,
+with the short window roughly **1/12 the duration** of the long one. Google's reference
+config pairs a 1-hour window at 14.4x burn with a 6-hour window at 6x. Requiring both means
+a sharp spike that has already resolved does not page anyone, while a sustained burn still
+trips quickly.
+
+Mapped onto Meter, that is a genuinely small change and strictly better than either
+document's proposal: keep the existing 5-minute window and add a 1-hour window, trip only
+when **both** clear their thresholds *and* absolute spend clears the floor. `db.window_spend()`
+already takes an arbitrary window, so it is one extra query and one extra `and` in
+`breaker.check()` — perhaps 10 lines. It also resolves the ratio-vs-flat argument without
+picking a side: the two windows *are* the sustained-burn check the ratio detector was
+reaching for, and neither needs 7 days of baseline data to work.
+
 ### A2 — Breaker response code: `403` or `429`? · OPEN
 
 `CONTEXT.md` §5C says `403 Forbidden` and only describes revocation. `ARCHITECTURE.md` §6
@@ -83,19 +102,40 @@ history predicts output well and is redundant for input.
 via heuristic, with trailing p95 as the cold-start fallback before per-feature history
 exists. This is a documentation fix, not a code change. Owner: Ammar + Shubh.
 
-### A5 — Datastore: Postgres, SQLite, or Redis? · OPEN
+### A5 — Datastore: Postgres, SQLite, or Redis? · **DECIDED — Shubh, Phase 2**
 
 `CONTEXT.md` §4 says Postgres **and** Redis. `PLAN.md` Phase 1 says "Postgres/SQLite". The
 Redis Lua reservations in `ARCHITECTURE.md` §2 are meaningless against SQLite, and **no
-phase in `PLAN.md` assigns standing up Redis to anyone.**
+phase in `PLAN.md` assigned standing up Redis to anyone.**
 
 **What Phase 1 shipped:** SQLite, no Redis, `reservation_id` written NULL. This is the
 honest version — reservations without Redis would be theatre.
 
-**Recommendation:** decide explicitly whether Redis is in the 48-hour build. If yes, it
-needs an owner and a phase slot. If no, `CONTEXT.md` §4 should say "Postgres; Redis is
-post-hackathon" and `ARCHITECTURE.md` §2 should mark reservations as roadmap. Right now a
-judge reading §2 will ask to see the Lua script.
+**Decision: no Redis in the 48-hour build. Reservations get implemented anyway, in-process.
+Owner: Shubh, Phase 2.**
+
+The reasoning: Redis is not what makes authorize/capture correct — *serialization* is.
+`ARCHITECTURE.md` §2 reaches for a Lua script because Lua runs atomically inside Redis, and
+Redis is the only shared point between multiple proxy replicas. **With a single proxy
+process — which is the entire demo and most self-hosted installs — an `asyncio.Lock` around
+the same read-modify-write gives an identical guarantee for none of the operational cost.**
+Redis becomes load-bearing at replica #2, not before.
+
+So Phase 2 adds real reservations against the existing SQLite ledger: reserve the estimate
+before forwarding, release the difference on capture, TTL-expire abandoned holds. The
+thousand-simultaneous-requests failure mode §2 exists to prevent is genuinely fixed, the
+demo can show a ceiling actually holding, and the upgrade path is one function moving to a
+Lua script. That is ~40 lines instead of a new container, a new dependency, a new failure
+mode in the request path, and a `docker-compose` service nobody owns.
+
+**Doc changes this implies** (not yet applied): `CONTEXT.md` §4 should read "Postgres;
+Redis post-hackathon for multi-replica deploys", and `ARCHITECTURE.md` §2 should say the
+reservation primitive is process-local today and Redis Lua when horizontally scaled.
+
+**Prior art:** [LiteLLM](https://docs.litellm.ai/docs/proxy/multi_tenant_architecture) —
+the closest open-source equivalent to Meter — does run FastAPI + Redis + Postgres. Worth
+knowing that the reference architecture agrees with `ARCHITECTURE.md` at scale; it just
+isn't what a 48-hour demo needs to prove the concept.
 
 ### A6 — Budget source of truth: `meter.yaml` or the `projects` table? · OPEN
 
@@ -200,19 +240,35 @@ feature — in the one scenario it exists for.
 **Recommendation:** write this into `ARCHITECTURE.md` §4 so the Analyst agent is built
 against a defined hash rather than reverse-engineering one.
 
-### B7 — Per-project ceilings are specified but nothing enforces them · OPEN
+### B7 — Per-project ceilings are specified but nothing enforces them · **ASSIGNED — Shubh, Phase 2**
 
 `projects.ceiling_usd_day` is in the schema, `meter.yaml` is in the README, `CONTEXT.md`
 §3 "Check: verifies if the team has enough budget" is step 3 of the system flow — and no
-phase in `PLAN.md` assigns anyone to build it. Every phase task is about the Treasurer, the
-breaker, or the predictor.
+phase in `PLAN.md` assigned anyone to build it. Every phase task was about the Treasurer,
+the breaker, or the predictor.
 
-Budget enforcement is one of Meter's three pillars. It is currently the only one with no
-owner.
+Budget enforcement is one of Meter's three pillars ("Budget" in the README's own table).
+It was the only one with no owner.
 
-**Recommendation:** assign it. The query half already exists (`db.project_window_spend()`);
-what is missing is the `meter.yaml` loader (A6) and a pre-flight check in the request path.
-Estimated 60 lines total. Suggested owner: Shubh, Phase 2.
+**Owner: Shubh, Phase 2.** Scope, in dependency order:
+
+1. **`meter.yaml` loader** (resolves A6): parse the file at boot, upsert into `projects`
+   and a new `feature_budgets` table, treat the YAML as source of truth and the tables as
+   a read cache the hot path can hit. ~40 lines.
+2. **Pre-flight ceiling check** in `_proxy()`, between the breaker check and forwarding:
+   `db.project_window_spend(project_id, 86400)` against `ceiling_usd_day`, plus the
+   per-feature ceilings from `meter.yaml`. Reject with `429` and a header naming which
+   ceiling was hit. ~20 lines — the query half already exists.
+3. **Fold into the reservation** once A5's reservations land, so the check and the spend
+   are atomic rather than a read-then-call race.
+
+**Design note worth stealing:** [LiteLLM enforces budgets
+hierarchically](https://docs.litellm.ai/docs/proxy/multi_tenant_architecture) — key → user
+→ team → org, where a request is blocked if *any* level on its path is over, and a child
+budget cannot exceed its parent's. Meter's `project → feature` nesting in `meter.yaml` is
+the same shape, so the same rule applies: validate at load time that the feature ceilings
+sum to no more than the project ceiling, and reject the config if they don't. Catching that
+in a pull request is the entire pitch of budget-as-code, and it is a 5-line check.
 
 ### B8 — Reconciliation after a ledger outage can double-count · DONE
 
@@ -301,15 +357,31 @@ read the track rules. Owner: Tanay (owns the sponsor docs per `PLAN.md` Phase 0)
 
 Not design questions — things that are written down and might simply be wrong.
 
-### C1 — Pricing rates are unverified · OPEN · **blocks the demo**
+### C1 — Pricing rates · **DONE — verified 2026-08-01**
 
-`pricing/2026-08-01.yaml` was written from memory and has **not** been checked against any
-provider's live pricing page. Every dollar figure Meter displays is downstream of this file.
-Being visibly wrong about a published list price in front of judges is a worse failure than
-any missing feature, because it is checkable from a phone in the audience.
+Every rate in `pricing/2026-08-01.yaml` has been checked against the providers' own
+published rate cards
+([Anthropic](https://platform.claude.com/docs/en/about-claude/pricing),
+[OpenAI](https://developers.openai.com/api/docs/pricing)). The first draft was written from
+memory and was wrong in both directions — Haiku 4.5 was under-priced 20% and the generic
+"claude-opus" entry was priced 3x high against Opus 5. Both would have been checkable from
+a phone in the audience.
 
-Someone must diff every line against the provider's own pricing page and bump the version
-filename. Half an hour of work. Owner: anyone, before demo.
+**One dated item now carries a deadline.** Claude Sonnet 5 is on introductory pricing of
+**$2/$10 per MTok through 2026-08-31**; standard pricing of **$3/$15** takes effect
+2026-09-01 — a 50% jump, 30 days out. The file prices at the current intro rate.
+
+**On 2026-09-01, do not edit `2026-08-01.yaml`.** Copy it to `2026-09-01.yaml`, apply the
+standard Sonnet 5 rates, and bump `PRICING_VERSION`. Editing in place would silently
+reprice every historical row and destroy the reproducibility that versioned pricing exists
+to provide — which is the one property `ARCHITECTURE.md` §3 is explicit about.
+
+**Known, deliberate gap:** Anthropic charges 2x input for a 1-hour-TTL cache write versus
+1.25x for the 5-minute default. The proxy only sees the aggregate
+`cache_creation_input_tokens` and prices everything at the 5-minute rate, so a
+1-hour-TTL workload is under-billed by 0.75x input on its cache writes only. The 1-hour
+rates are already in the YAML as `cache_write_1h`, unused. Upgrade path is in the file's
+header comment; not worth building until someone actually runs 1-hour TTLs.
 
 ### C2 — Anthropic OpenAI-compatibility path is unverified · OPEN
 

@@ -103,7 +103,7 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
     *   SSE streaming with real usage extraction for both provider shapes (pulled forward from Phase 2). Non-streamed calls too.
     *   Attribution rungs 0–2 (`X-Meter-Feature` / `-Actor` / `-Trace`) recorded on every row.
     *   Measured overhead: **p50 +1.49 ms** wall-clock against a local fake upstream. Loopback, no TLS — a floor, not a production number.
-    *   Not yet done: reservations (needs Redis — see below), per-project daily ceilings, `POST /v1/annotate`.
+    *   Not yet done, all owned by Shubh in Phase 2: reservations (in-process, no Redis — see below), per-project daily ceilings, `POST /v1/annotate`.
 
 *   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
 
@@ -122,15 +122,18 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
     of crashing. Not yet done: live streaming/polling (Phase 2's Live Logs table), Poke alert
     wiring (Phase 3, hooks into `breaker.notify()`).
 
-*   **Open blockers/decisions:**
-    1.  **Pricing rates are unverified and this blocks the demo.** `pricing/2026-08-01.yaml` was written from memory. Every dollar Meter displays comes from it, and a wrong list price is checkable from the audience. ~30 min for someone to diff against the providers' pricing pages. (`PROPOSALS.md` C1)
-    2.  **Redis has no owner and no phase slot**, but `ARCHITECTURE.md` §2 builds reservations on it. Phase 1 shipped without it and writes `reservation_id` NULL. Decide whether Redis is in the 48-hour build. (`PROPOSALS.md` A5)
-    3.  **Two different circuit-breaker detectors are specified** — flat $20/5min here in §5C, ratio-vs-7-day-baseline in `ARCHITECTURE.md` §6. Shipped the flat one. (`PROPOSALS.md` A1)
-    4.  **Budget enforcement — one of the three pillars — is assigned to nobody** in any `PLAN.md` phase. (`PROPOSALS.md` B7)
-    5.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** (`PROPOSALS.md` B9, B10)
-    6.  **The Visa VIC track has no architectural surface.** We are entered in a track nothing in the build targets. (`PROPOSALS.md` B14)
+*   **Resolved since kickoff:**
+    1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)
+    2.  ✅ **Redis: not in the 48-hour build — Shubh, Phase 2.** Reservations still get built, in-process. Redis is not what makes authorize/capture correct; serialization is, and with one proxy process an `asyncio.Lock` is an identical guarantee for none of the operational cost. Redis becomes load-bearing at proxy replica #2. (`PROPOSALS.md` A5)
+    3.  ✅ **Budget enforcement is now owned — Shubh, Phase 2.** `meter.yaml` loader plus a pre-flight ceiling check in the request path. (`PROPOSALS.md` B7)
 
-*   **`PROPOSALS.md`** collects all 20 open items from a full architecture read. Nothing in it has been applied to this file, `README.md`, or `ARCHITECTURE.md` — they need decisions first.
+*   **Open blockers/decisions:**
+    1.  **Two different circuit-breaker detectors are specified** — flat $20/5min here in §5C, ratio-vs-7-day-baseline in `ARCHITECTURE.md` §6. Shipped the flat one. Google's SRE Workbook says the answer is neither: pair a short and a long window and require both to trip. ~10 lines. (`PROPOSALS.md` A1)
+    2.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** The first is what turns a cost tool into a margin tool and is ~40 lines; the second is the first command in our own quickstart. (`PROPOSALS.md` B9, B10)
+    3.  **The Visa VIC track has no architectural surface.** Tanay's Phase 0 confirmed the test-card requirements are covered by `docs/prava/api-reference/test-cards.md`, so the *docs* gap is closed — but nothing in `ARCHITECTURE.md` or the build actually targets VIC. We are still entered in a track no component is designed for. (`PROPOSALS.md` B14)
+    4.  **Anthropic's OpenAI-compatibility path is unverified** — a `claude-*` model sent to `/v1/chat/completions` is forwarded to it and nobody has confirmed it exists. One live call with a real key settles it. (`PROPOSALS.md` B1, C2)
+
+*   **`PROPOSALS.md`** collects 20 items from a full architecture read — contradictions between the three source-of-truth docs, and gaps they leave undefined. Four are now closed (pricing verified, Redis decided, budget enforcement owned, disconnect-capture and ledger idempotency shipped). The rest still need decisions. **`README.md` and `ARCHITECTURE.md` remain unedited** — proposals get approved there, not applied silently.
 
 ---
 
