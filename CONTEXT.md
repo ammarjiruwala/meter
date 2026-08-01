@@ -89,7 +89,12 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — project kickoff, no components built yet.
+*   **Last updated:** 2026-08-01 — Phase 0 (setup) complete.
+*   **Setup:** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
+    test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
+    top-up flow and Poke/Linq iMessage alert need. Visa VIC test-card requirements are covered by
+    `docs/prava/api-reference/test-cards.md` (no separate Visa doc set needed). `.env.example`
+    added at repo root with placeholders for all provider/datastore/agent config keys.
 *   **Proxy:** Not started.
 *   **Predictive Engine:** Not started.
 *   **Treasurer Agent / Prava:** Not started.
