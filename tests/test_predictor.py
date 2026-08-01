@@ -150,16 +150,120 @@ def test_classifier() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def test_max_tokens() -> None:
     print("\nmax_tokens")
-    # max_tokens is enforced by the provider, so it is a bound rather than an estimate and
-    # dominates any heuristic. The reference ignored the field entirely.
-    r = predict("Write an exhaustive 5000 word essay on Rome. " * 20, MODEL, max_tokens=50)
+    # max_tokens CLAMPS the estimate; it must never REPLACE it. Letting it short-circuit
+    # the pipeline measured 594% MAPE against 192% when clamping, because most SDKs set
+    # a default max_tokens as a safety valve rather than as a statement of intent -- so
+    # replacing collapses every prompt to one identical number.
+    r = predict("Write an exhaustive essay on Rome. " * 20, MODEL, max_tokens=50)
     check("hard cap is applied", r.predicted_output_tokens == 50)
     check("cap is flagged", r.capped_by_max_tokens is True)
-    check("method reports capped", r.method == "capped")
+    check("method records the cap", r.method.endswith("+capped"))
 
     r2 = predict("hi", MODEL, max_tokens=100_000)
     check("non-binding cap is ignored", r2.predicted_output_tokens < 100_000)
     check("non-binding cap not flagged", r2.capped_by_max_tokens is False)
+
+    # The decisive property: a generous max_tokens must NOT flatten distinct prompts
+    # into one prediction.
+    a = predict("Say hi.", MODEL, max_tokens=4096).predicted_output_tokens
+    b = predict("Write a complete production-ready web framework.", MODEL,
+                max_tokens=4096).predicted_output_tokens
+    check("max_tokens does not flatten distinct prompts", a != b, f"both {a}")
+
+    # bound is emitted alongside, and is exact when max_tokens is set
+    r3 = predict("hi", MODEL, max_tokens=250)
+    check("bound equals max_tokens", r3.bound_output_tokens == 250)
+    check("bound cost >= predicted cost", r3.bound_cost_usd >= r3.predicted_cost_usd)
+    check("bound exists without max_tokens", predict("hi", MODEL).bound_output_tokens > 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_scope_signals() -> None:
+    """DESIGN.md steps 2-3."""
+    print("\nscope signals")
+    from predictor import estimate_scope
+    from predictor.scope import cot_scale, task_scope, verb_scale
+
+    # Step 2 -- explicit length. Coverage here is the highest-value detail in the
+    # estimator: one missed hyphenated form moved overall error 84% -> 192% MAPE.
+    for text, lo, hi in [
+        ("Give me a two-sentence overview.", 40, 60),
+        ("Summarize in two sentences.", 40, 60),
+        ("Answer in 100 words.", 120, 145),
+        ("Reply in one word.", 1, 10),
+        ("Give a yes or no answer.", 1, 10),
+    ]:
+        got = estimate_scope(text)[0]
+        check(f"{text[:32]:<34} -> {got:.0f}", lo <= got <= hi, f"want {lo}-{hi}")
+
+    # Step 3A -- additive, so a two-task prompt exceeds either task alone
+    both = task_scope("summarize this and write the code")[0]
+    check("multi-task adds", both > task_scope("summarize this")[0], f"{both}")
+    check("scope is capped", task_scope("summarize code json browse " * 40)[0] <= 1500)
+
+    # Step 3B -- the button-vs-website case
+    check("high intensity raises", verb_scale("rewrite the entire module") > 1.0)
+    check("low intensity lowers", verb_scale("fix the typo") < 1.0)
+
+    # Step 3C -- reasoning models emit CoT regardless of prompt wording
+    check("CoT cue detected", cot_scale("think step by step") == 3.0)
+    check("reasoning model detected by name", cot_scale("just say hi", "o3-mini") == 3.0)
+
+    # Word boundaries. Naive substring matching made "create" fire inside "created_at"
+    # and "code" fire inside "status codes", scoring 975% error on a JSON probe.
+    check("'create' does not match in 'created_at'",
+          verb_scale("return json with id and created_at") == 1.0)
+    check("'code' does not match in 'status codes'",
+          "code" not in task_scope("list the http status codes")[1])
+
+    # A phrase must not fire two multipliers at once.
+    from predictor.scope import qualitative_scale
+    check("'step by step' is CoT only, not also verbose",
+          qualitative_scale("analyze this step by step") == 1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_cache() -> None:
+    print("\ncache")
+    from predictor import Predictor
+    p = Predictor()
+    a = p.predict("Write a function.", MODEL)
+    b = p.predict("Write a function.", MODEL)
+    check("repeat is served identically", a == b)
+    check("cache holds the entry", p.cache_stats()["entries"] >= 1)
+    # Different max_tokens is a different request and must not collide.
+    c = p.predict("Write a function.", MODEL, max_tokens=10)
+    check("max_tokens is part of the key", c.predicted_output_tokens != a.predicted_output_tokens)
+    # Refitting invalidates, since cached values used the old coefficients.
+    p.load_buffers({"code": [(100.0, 200)] * 12})
+    check("refit clears the cache", p.cache_stats()["entries"] == 0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def test_buffer_and_history() -> None:
+    """DESIGN.md steps 4-5."""
+    print("\nbuffer and history")
+    from predictor import Predictor
+    p = Predictor()
+
+    # Step 4 -- buffer fitted per bucket to a target under-prediction rate. Too few
+    # rows must keep the default rather than fit noise.
+    check("too few rows keeps default", p.load_buffers({"code": [(100.0, 150)] * 5}) == {})
+    fitted = p.load_buffers({"code": [(100.0, 100 + i * 10) for i in range(30)]})
+    check("fits with enough rows", "code" in fitted)
+
+    # Step 5 -- shrinkage. A factor from 2 observations must barely move; one from
+    # 200 should apply nearly in full.
+    weak = p.load_history({("proj",): (3.0, 2)})[("proj",)]
+    strong = p.load_history({("proj",): (3.0, 200)})[("proj",)]
+    check("small n is shrunk toward 1.0", weak < 1.3, f"got {weak:.2f}")
+    check("large n applies nearly in full", strong > 2.7, f"got {strong:.2f}")
+
+    # Most specific key wins.
+    p.load_history({("proj", "feat", "ammar"): (2.0, 500), ("proj",): (0.5, 500)})
+    specific = p.predict("hi", MODEL, project="proj", feature="feat", actor="ammar")
+    general = p.predict("hi", MODEL, project="proj", feature="other", actor="x")
+    check("most specific key wins", specific.history_factor > general.history_factor)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,7 +272,7 @@ def test_bias_direction() -> None:
     # Accuracy here is asymmetric: under-predicting lets a request through that should
     # have been blocked, while over-predicting holds budget released at CAPTURE seconds
     # later. So we aim high rather than accurate-on-average.
-    unbiased = Predictor(safety_margin=1.0).predict(PROMPT, MODEL).predicted_output_tokens
+    unbiased = Predictor(buffer=1.0).predict(PROMPT, MODEL).predicted_output_tokens
     biased = predict(PROMPT, MODEL).predicted_output_tokens
     check("default predictor over-predicts", biased > unbiased, f"{biased} vs {unbiased}")
 
@@ -206,14 +310,14 @@ def test_learner() -> None:
     # model that changes between runs is not auditable.
     check("fit is reproducible", fit_bucket(rows) == fit_bucket(rows))
 
-    p = Predictor(safety_margin=1.0)
+    # The estimator no longer regresses output on input length -- that feature carried
+    # R^2 = 0.009 -- so `method` now names the rule that fired (see DESIGN.md).
+    p = Predictor(buffer=1.0)
     before = p.predict(PROMPT, MODEL)
-    check("starts on priors", before.method == "prior")
-    p.load_fits({before.bucket: [(t, 5 * t + 500) for t in range(10, 800, 5)]})
-    after = p.predict(PROMPT, MODEL)
-    check("learned fit takes over", after.method == "learned")
-    check("learned fit changes the estimate",
-          after.predicted_output_tokens > before.predicted_output_tokens)
+    check("method names the rule that fired", before.method in ("stacked", "json_schema")
+          or before.method.endswith("s"), f"got {before.method!r}")
+    check("fit_all still available for per-bucket regression",
+          isinstance(p.load_fits({"code": [(t, 5 * t + 500) for t in range(10, 800, 5)]}), dict))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,7 +346,7 @@ def test_priors() -> None:
 
     # Every bucket must produce a positive prediction for a realistic prompt.
     for bucket in PRIORS:
-        p = Predictor(safety_margin=1.0).predict("word " * 40, MODEL)
+        p = Predictor(buffer=1.0).predict("word " * 40, MODEL)
         check(f"{bucket:<12} priors yield a positive estimate", p.predicted_output_tokens > 0)
 
 
@@ -288,6 +392,9 @@ def main() -> int:
         test_input_counting,
         test_classifier,
         test_max_tokens,
+        test_scope_signals,
+        test_cache,
+        test_buffer_and_history,
         test_bias_direction,
         test_pricing_integration,
         test_learner,

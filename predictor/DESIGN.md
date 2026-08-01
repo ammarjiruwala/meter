@@ -382,6 +382,16 @@ For calibration: published work on LLM output-length prediction typically lands 
 * **Reasoning-model output tokens are not yet handled** (§3C).
 * Keyword matching reads the whole prompt, so a long *pasted* passage can trigger
   keywords that belong to the content rather than the instruction.
+* **Trivial requests are badly over-predicted.** Measured live: *"Fix the typo in this
+  line: prnt(x)"* predicted 176, actual **11** (+1500%). Two compounding causes — the
+  `BASE_SCOPE` of 150 sets a floor no short answer can get under, and `instruction_scale`
+  awards short messages 1.5× on the assumption that short instruction means large
+  generation, which is false for trivial edits. The measured ratio for that request is
+  ~0.07 against a `LOW_INTENSITY_SCALE` of 0.6, so the low-intensity multiplier is an
+  order of magnitude too timid. This is an *efficiency* failure, not a safety one — it
+  over-reserves — but it makes trivial-request cost figures useless on the dashboard.
+  Candidate fixes: a much lower low-intensity scale, and making `instruction_scale`
+  conditional on the request being generative rather than an edit.
 
 ---
 

@@ -331,7 +331,7 @@ async def _proxy(request: Request, shape: str) -> Response:
     streaming = providers.is_streaming(body)
 
     # ── 3. ESTIMATE ──────────────────────────────────────────────────────────
-    prediction = _predict(body, model, shape)
+    prediction = _predict(body, model, shape, key, tags)
 
     # ── 4. BREAKER CHECK ─────────────────────────────────────────────────────
     try:
@@ -607,7 +607,9 @@ def _stamp(response: Response, request_id: str, started: float, latency_ms: floa
     response.headers["X-Meter-Overhead-Ms"] = f"{max(0.0, overhead):.2f}"
 
 
-def _predict(body: dict[str, Any], model: str | None, shape: str) -> Any | None:
+def _predict(body: dict[str, Any], model: str | None, shape: str,
+             key: dict[str, Any] | None = None,
+             tags: dict[str, str | None] | None = None) -> Any | None:
     """ESTIMATE — what will this call cost, before we make it (ARCHITECTURE.md §2).
 
     Returns None rather than raising, always. Three reasons a prediction is absent and
@@ -634,7 +636,22 @@ def _predict(body: dict[str, Any], model: str | None, shape: str) -> Any | None:
                 return None
             payload = prompt
         max_tokens = body.get("max_tokens")
-        return predict(payload, model, max_tokens if isinstance(max_tokens, int) else None)
+        response_format = None
+        rf = body.get("response_format")
+        if isinstance(rf, dict):
+            response_format = rf.get("type")
+        return predict(
+            payload,
+            model,
+            max_tokens if isinstance(max_tokens, int) else None,
+            response_format=response_format,
+            # Attribution keys the history correction (DESIGN.md §8), which is how the
+            # estimator learns a given team's prompting style rather than assuming one
+            # global average fits everybody.
+            project=key.get("project_id") if key else None,
+            feature=tags.get("feature") if tags else None,
+            actor=tags.get("actor") if tags else None,
+        )
     except Exception:
         # debug, not warning: an unsupported model is expected and would otherwise log
         # on every single Anthropic request.
