@@ -29,7 +29,7 @@ export function ProviderBalancesCard({
       ) : wallets.length === 0 ? (
         <p className="px-4 py-6 text-sm text-zinc-500">
           No wallets yet. Seed one with{" "}
-          <code className="text-xs">POST /treasury/wallets/seed</code>.
+          <code className="text-xs">POST /wallets/seed</code>.
         </p>
       ) : (
         <div className="divide-y divide-zinc-100 dark:divide-zinc-900">

@@ -137,7 +137,7 @@ exists. This is a documentation fix, not a code change. Owner: Ammar + Shubh.
 and step 3 of the lifecycle rewritten) and `CONTEXT.md` §5A. Zero code — the predictor is
 Ammar's Phase 2 work and now has an unambiguous spec to build against.
 
-### A5 — Datastore: Postgres, SQLite, or Redis? · **DECIDED — Shubh, Phase 2**
+### A5 — Datastore: Postgres, SQLite, or Redis? · **DECIDED & SHIPPED — Shubh, 2026-08-01**
 
 `CONTEXT.md` §4 says Postgres **and** Redis. `PLAN.md` Phase 1 says "Postgres/SQLite". The
 Redis Lua reservations in `ARCHITECTURE.md` §2 are meaningless against SQLite, and **no
@@ -173,7 +173,23 @@ the closest open-source equivalent to Meter — does run FastAPI + Redis + Postg
 knowing that the reference architecture agrees with `ARCHITECTURE.md` at scale; it just
 isn't what a 48-hour demo needs to prove the concept.
 
-### A6 — Budget source of truth: `meter.yaml` or the `projects` table? · **RESOLVED — YAML wins, documented**
+**Shipped 2026-08-01 (Shubh):** `proxy/budget.py`. Holds live in a process-local dict
+behind an `asyncio.Lock`; `authorize()` counts outstanding holds alongside settled ledger
+spend inside one critical section, and `reservation_id` is now written to every row
+instead of NULL. Two implementation notes that were not obvious from the design:
+
+* **Holds are deliberately not persisted.** A restart drops them, which is correct — a
+  restart also drops every in-flight request they were covering. Settled spend is in the
+  ledger; only the in-flight delta lives in memory.
+* **The release must happen after the ledger row lands, not alongside it.** Capture is
+  scheduled, not awaited, so releasing next to `_schedule_capture` leaves a window where
+  the cost is counted by neither the hold nor the ledger. The release is therefore done
+  *inside* the capture task.
+
+The self-check fires 40 concurrent authorizes at a ceiling admitting four and asserts
+exactly four pass — without serialisation all 40 do.
+
+### A6 — Budget source of truth: `meter.yaml` or the `projects` table? · **RESOLVED & SHIPPED — YAML wins**
 
 `README.md` and `ARCHITECTURE.md` §9 make budget-as-code a *lock-in mechanism* — limits live
 in the customer's repo and change by pull request. `ARCHITECTURE.md` §4 also has
@@ -186,6 +202,15 @@ boot; the table is a read cache the hot path uses. Say so in `ARCHITECTURE.md` �
 **Applied to:** `ARCHITECTURE.md` §4, which now states the precedence explicitly and carries
 the two rules that follow from it: the loader must be idempotent, and it must reject a config
 whose feature ceilings exceed their project's.
+
+**Shipped 2026-08-01 (Shubh):** `budget.load_meter_yaml()` at boot, feeding
+`db.replace_budgets()`. Both rules are implemented and asserted. One thing the design did
+not anticipate: **the loader has to REPLACE, not upsert.** Upserting makes deletion
+impossible — a ceiling removed from `meter.yaml` would keep being enforced from a stale
+row, which is precisely the failure budget-as-code exists to prevent, and it would be
+invisible because the file no longer mentions it. `replace_budgets` clears every ceiling
+and rebuilds from the file in one transaction, so what the file says is what is enforced,
+including when the file says nothing.
 
 ---
 
@@ -238,7 +263,7 @@ most-asked integration question and currently has no written answer.
 subsection with the diff a caller actually makes, the `x-api-key` note for Anthropic SDKs,
 and why the whitelist means a client credential cannot reach the provider.
 
-### B3 — Reservation TTL contradicts streaming duration · **SPEC'D in ARCHITECTURE §2; builds with reservations (Shubh, Phase 2)**
+### B3 — Reservation TTL contradicts streaming duration · **DONE — shipped with reservations, 2026-08-01**
 
 `ARCHITECTURE.md` §2 sets a 120s reservation TTL "so a crashed worker releases its holds".
 `README.md` says the proxy holds SSE streams open "for minutes at a time".
@@ -256,6 +281,15 @@ mid-flight on the longest calls *and fails silently* — nothing errors when a r
 disappears, the ceiling just stops holding. The requirement is recorded ahead of the
 reservations themselves (A5, Phase 2) so it lands with them rather than being discovered
 after.
+
+**Shipped 2026-08-01 (Shubh).** `budget.extend()` plus a heartbeat in `_forward_stream`'s
+chunk loop: `RESERVATION_TTL_S=120` kept short, pushed forward every
+`RESERVATION_HEARTBEAT_S=30` for as long as bytes keep arriving. The stream is its own
+clock, so no background task is needed. `extend()` is deliberately lock-free — a single
+float write on the single-threaded event loop — because taking the async lock per chunk
+would serialise every stream in the process against every authorize. Self-check asserts
+both halves: that `extend()` rescues a hold whose expiry has passed, and that the
+rescued hold still counts against the ceiling.
 
 ### B4 — Client disconnect is harder than the doc implies · DONE
 
@@ -321,7 +355,7 @@ against a defined hash rather than reverse-engineering one.
 framed as part of the schema rather than an implementation detail — because changing it later
 silently changes every dedupe result computed before the change.
 
-### B7 — Per-project ceilings are specified but nothing enforces them · **ASSIGNED — Shubh, Phase 2**
+### B7 — Per-project ceilings are specified but nothing enforces them · **DONE — shipped 2026-08-01 (Shubh)**
 
 `projects.ceiling_usd_day` is in the schema, `meter.yaml` is in the README, `CONTEXT.md`
 §3 "Check: verifies if the team has enough budget" is step 3 of the system flow — and no
@@ -356,6 +390,23 @@ idempotent, and rejects a config whose feature ceilings exceed their project's �
 the `meter.yaml`-wins precedence from A6. The enforcement code is Phase 2; the spec it has to
 satisfy is now written down rather than living only in this file.
 
+**Shipped 2026-08-01 (Shubh).** All three numbered steps, folded into the reservation as
+step 3 anticipated — the ceiling check and the hold happen in one critical section, so it
+is never a read-then-call race. Both loader constraints are implemented and asserted.
+Refusal is `429` with `X-Meter-Budget-Scope` / `-Ceiling-Usd` / `-Spend-Usd`, because a
+project can have several ceilings and the caller cannot see `meter.yaml`.
+
+Two behaviours chosen where the spec was silent, both erring toward availability, since
+Meter is in the critical path and a cost tool that takes down production is not a cost
+tool:
+
+* **A malformed `meter.yaml` boots with no ceilings** rather than refusing to boot.
+* **Ceilings of `0` or less are ignored,** not enforced literally. A `0` enforced as
+  written blocks every request in the project, and nobody commits that on purpose.
+
+Both are the same fail-open posture `FAIL_MODE` already takes, and both are loud in the
+log. See B17 for the one rule where erring toward availability was *not* chosen.
+
 ### B8 — Reconciliation after a ledger outage can double-count · DONE
 
 `ARCHITECTURE.md` §7 says to buffer writes durably and reconcile on recovery, but does not
@@ -368,7 +419,7 @@ rather than duplicates.
 
 **Recommendation:** note the constraint in §7 so the Postgres port keeps it.
 
-### B9 — `POST /v1/annotate` is documented but assigned to nobody · OPEN
+### B9 — `POST /v1/annotate` is documented but assigned to nobody · **DONE — built 2026-08-01 (Shubh)**
 
 `README.md` documents it as attribution rung 3 with a working `curl` example.
 `ARCHITECTURE.md` §4 calls the `requests × annotations` join on `trace_id` "the interesting
@@ -381,6 +432,25 @@ The proxy already records `trace_id` on every row, so the join's expensive half 
 query) and it is the difference between "another cost dashboard" and a margin tool. If it
 is being cut, cut it from `README.md` too; documenting an endpoint that 404s is worse than
 not having it. Suggested owner: Shubh or Tanay, Phase 3.
+
+**Built 2026-08-01 (Shubh), alongside the Phase 2 proxy work.** ⚠ **Nobody formally
+assigned this** — it was taken because it is proxy surface and the recommendation above
+had been sitting unactioned. Flagging rather than quietly closing, since the process here
+is meant to be human-decides-then-build. Say so if it should have waited.
+
+Two deliberate deviations from `ARCHITECTURE.md` §4's `annotations
+(id, trace_id, outcome, value_usd, ts)`:
+
+* **`project_id` added.** A `trace_id` is a caller-supplied string. Without scoping, any
+  key could annotate — or, via the returned totals, *read the cost of* — another
+  project's traces. The self-check plants an identical trace id under a second project
+  and asserts it is not counted.
+* **Response returns the trace's cost, request count and margin**, not just an ack. The
+  number the endpoint exists to produce is dollars-per-outcome, and making the caller run
+  a second query to see what they just annotated is a worse API for no saving.
+
+`value_usd` is optional; when it is absent `margin_usd` comes back `null` rather than `0`,
+because "broke even" and "we don't know the value" are different facts.
 
 ### B10 — `docker compose up` does not exist · OPEN
 
@@ -477,6 +547,47 @@ chunk shape.
 
 The consequence we accept: on that endpoint the caller sees a `usage` field it did not request.
 Forwarding an extra field is a much smaller sin than deleting the end-of-stream signal.
+
+### B17 — Rejecting an over-allocated project removes all its enforcement · OPEN · **raised by Shubh, 2026-08-01**
+
+`ARCHITECTURE.md` §4 (via A6/B7) requires the loader to "reject a config whose feature
+ceilings sum to more than their project's ceiling". **This is implemented as specified**
+and the self-check asserts it. Raising it rather than quietly reinterpreting it, because
+building it surfaced two problems the rule's one-line statement hides.
+
+**1. "Reject" is the most dangerous possible outcome here.** A rejected project gets *no*
+ceilings at all — not the project one, not the feature ones. So the response to "you
+allocated slightly too much" is to switch budget enforcement **off** for that project. The
+failure mode is inverted: a config that is too restrictive on paper results in nothing
+being restricted. An operator who fat-fingers `500` to `5000` on one feature loses the
+project ceiling that would have caught it. The alternative — apply the project ceiling,
+warn about the features — keeps the outer limit intact, which is the one that actually
+bounds spend.
+
+**2. Over-allocation is a legitimate pattern, not only a typo.** The rule assumes feature
+ceilings are a partition of the project budget. In practice they are usually *independent
+caps on unrelated things*: "no single feature may exceed \$200/day, and the project may not
+exceed \$800/day" is a coherent policy with six features at \$200 each. Every feature
+maxing out simultaneously is exactly what the project ceiling exists to stop, and it stops
+it correctly — the two limits are checked independently, so nothing can actually breach the
+project total no matter what the features sum to. The validation forbids a configuration
+the runtime handles correctly.
+
+Worth noting the cited prior art does not do this either: LiteLLM's rule is that a *child*
+budget cannot exceed its *parent's* — a per-feature check (`feature <= project`), not a sum
+across siblings. That check has neither problem above.
+
+**Recommendation:** replace the sum rule with LiteLLM's actual one — reject a config where
+any single feature ceiling exceeds its project's, and *warn* (do not reject) when the
+siblings sum to more. That keeps the review-time catch for the mistake that matters,
+preserves the outer ceiling when the config is merely generous, and stops the loader from
+disabling enforcement as a response to over-restriction. ~3 lines changed in
+`budget.load_meter_yaml`, plus one line in `ARCHITECTURE.md` §4.
+
+**Not changed pending a human decision** — the current rule is what the docs specify, so
+it is what shipped.
+
+---
 
 ## C. Verification tasks
 

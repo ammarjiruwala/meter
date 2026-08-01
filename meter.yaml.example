@@ -1,0 +1,39 @@
+# Meter budgets.
+#
+# Copy to `meter.yaml` at the repo root. Ceilings live in the repo, not in the database
+# and not in .env, so a change to a spend limit is reviewed by pull request like any
+# other change (README.md "Configuration"). The proxy reads this at boot and projects it
+# into the `projects` / `feature_budgets` tables; nothing at runtime writes back, so this
+# file is the source of truth and the tables are a read-optimised copy (PROPOSALS.md A6).
+#
+# No meter.yaml means no ceilings and nothing enforced. Restart the proxy after editing.
+# Check what actually loaded with:  curl localhost:8080/healthz | jq .budget
+
+projects:
+  # Project ids are the ones in METER_KEYS (`key:project:environment`).
+  demo-project:
+    # Rolling 24h ceiling across every feature in the project, untagged traffic included.
+    # A request is refused with 429 when settled spend + in-flight reservations + this
+    # request's own estimate would exceed it.
+    ceiling_usd_per_day: 800
+
+    features:
+      # Per-feature ceilings, matched against the X-Meter-Feature header. Whichever
+      # ceiling binds first refuses the request, and the 429 names which one it was in
+      # `X-Meter-Budget-Scope`.
+      #
+      # These must sum to no more than the project ceiling above (ARCHITECTURE.md §4).
+      # A project that allocates more to its features than it has is REJECTED at boot —
+      # not clamped, not warned about: none of its ceilings are enforced, and the proxy
+      # logs an error saying so. 200 + 500 <= 800 here.
+      summarize: { ceiling_usd_per_day: 200 }
+      chat:      { ceiling_usd_per_day: 500 }
+
+# Two things README.md shows in this file are NOT implemented yet, and are ignored
+# rather than silently half-enforced:
+#
+#   features.<name>.models  — an allowlist of models a feature may call. Not built; a
+#                             feature can currently call any model the project can.
+#   treasury:               — topup_when_hours_remaining / topup_amount_usd. The
+#                             Treasurer loop reads TREASURER_* from .env instead
+#                             (Shivam, Phase 3).

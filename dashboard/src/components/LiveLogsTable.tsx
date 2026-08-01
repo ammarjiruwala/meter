@@ -91,8 +91,8 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
         </table>
       )}
       <p className="border-t border-zinc-200 px-4 py-2 text-xs text-zinc-500 dark:border-zinc-800">
-        Predicted Cost is blank until the predictor is wired into the proxy
-        request path — see CONTEXT.md §6a.
+        Predicted Cost is the proxy&rsquo;s pre-flight estimate. It is blank for
+        Claude models, which have no local tokenizer to count them exactly.
       </p>
     </div>
   );

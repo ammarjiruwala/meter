@@ -623,6 +623,485 @@ def test_gzipped_upstream_stream() -> None:
               and r["cache_read_tokens"] == 20, str(dict(r)))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+def test_meter_yaml() -> None:
+    """The loader, including the malformed inputs that must not disable enforcement quietly."""
+    print("\nmeter.yaml loader")
+    import textwrap
+
+    from proxy import budget
+
+    path = Path(_TMP) / "meter.yaml"
+    path.write_text(textwrap.dedent("""
+        projects:
+          proj-alpha:
+            ceiling_usd_per_day: 100
+            features:
+              summarize: { ceiling_usd_per_day: 10 }
+              chat:      { ceiling_usd_per_day: 50 }
+          proj-beta:
+            ceiling_usd_per_day: 5
+    """))
+    loaded = budget.load_meter_yaml(path)
+    check("both projects loaded", loaded == 2, str(loaded))
+    ceilings = budget.active_ceilings()
+    check("project ceiling registered", ceilings.get("project:proj-alpha") == 100.0)
+    check("feature ceiling registered", ceilings.get("feature:proj-alpha/summarize") == 10.0)
+    check("second project's ceiling registered", ceilings.get("project:proj-beta") == 5.0)
+
+    # Re-loading must not accumulate. An operator lowering a ceiling and restarting has to
+    # get the lower number, not the union of every ceiling the file ever had.
+    path.write_text("projects:\n  proj-alpha:\n    ceiling_usd_per_day: 42\n")
+    budget.load_meter_yaml(path)
+    check("reload replaces rather than merges",
+          budget.active_ceilings().get("project:proj-alpha") == 42.0,
+          str(budget.active_ceilings()))
+    # The half that upserting would get wrong: a ceiling DELETED from the file has to stop
+    # being enforced, or a limit lives on that appears nowhere in the repo — the exact
+    # failure budget-as-code exists to prevent.
+    check("a feature ceiling removed from the file stops being enforced",
+          "feature:proj-alpha/summarize" not in budget.active_ceilings(),
+          str(budget.active_ceilings()))
+    check("and a whole project removed from the file stops being enforced",
+          "project:proj-beta" not in budget.active_ceilings(),
+          str(budget.active_ceilings()))
+
+    # ARCHITECTURE.md §4: features may not allocate more than their project has. Rejected
+    # outright rather than clamped, so the mistake is caught in review.
+    path.write_text(textwrap.dedent("""
+        projects:
+          proj-alpha:
+            ceiling_usd_per_day: 100
+            features:
+              a: { ceiling_usd_per_day: 80 }
+              b: { ceiling_usd_per_day: 80 }
+    """))
+    budget.load_meter_yaml(path)
+    check("a project whose features over-allocate is rejected entirely",
+          budget.active_ceilings() == {}, str(budget.active_ceilings()))
+
+    path.write_text(textwrap.dedent("""
+        projects:
+          proj-alpha:
+            ceiling_usd_per_day: 100
+            features:
+              a: { ceiling_usd_per_day: 60 }
+              b: { ceiling_usd_per_day: 40 }
+    """))
+    budget.load_meter_yaml(path)
+    check("allocating exactly the project ceiling is allowed",
+          budget.active_ceilings().get("project:proj-alpha") == 100.0,
+          str(budget.active_ceilings()))
+
+    # A ceiling of 0 or a negative one is always a typo, and enforcing it literally would
+    # block every request in the project — a self-inflicted outage from a cost tool.
+    path.write_text("projects:\n  proj-gamma:\n    ceiling_usd_per_day: 0\n")
+    budget.load_meter_yaml(path)
+    check("a zero ceiling is rejected, not enforced as block-everything",
+          "project:proj-gamma" not in budget.active_ceilings(),
+          str(budget.active_ceilings()))
+
+    path.write_text("projects:\n  proj-gamma:\n    ceiling_usd_per_day: not-a-number\n")
+    budget.load_meter_yaml(path)
+    check("a non-numeric ceiling is ignored", "project:proj-gamma" not in budget.active_ceilings())
+
+    # A malformed file must not stop the proxy booting — Meter is in the critical path.
+    path.write_text("projects: [this is: not, valid: yaml\n")
+    budget.load_meter_yaml(path)
+    check("malformed yaml degrades to no ceilings instead of raising",
+          budget.active_ceilings() == {})
+
+    missing = Path(_TMP) / "absent.yaml"
+    check("a missing meter.yaml is not an error", budget.load_meter_yaml(missing) == 0)
+    check("no meter.yaml means no ceilings", budget.active_ceilings() == {})
+
+
+def test_reservations() -> None:
+    """Authorize/capture — the concurrency hole ARCHITECTURE.md §2 says a plain read leaves open."""
+    print("\nbudget reservations")
+    import asyncio
+    import textwrap
+
+    from proxy import budget
+
+    path = Path(_TMP) / "meter-rsv.yaml"
+    path.write_text(textwrap.dedent("""
+        projects:
+          proj-rsv:
+            ceiling_usd_per_day: 10
+            features:
+              tight: { ceiling_usd_per_day: 1 }
+    """))
+    budget.load_meter_yaml(path)
+
+    async def scenarios() -> None:
+        # No ceiling configured for this project at all -> free pass, no hold taken.
+        d = await budget.authorize("proj-unbudgeted", "anything", 5.0)
+        check("a project with no ceiling is never blocked", d.blocked is False)
+        check("and takes no reservation", d.reservation_id is None)
+
+        d = await budget.authorize("proj-rsv", "tight", 0.5)
+        check("an estimate under the ceiling is authorized", d.blocked is False)
+        check("an authorized request holds a reservation", d.reservation_id is not None)
+        check("the hold is counted as outstanding",
+              abs(budget.outstanding()["held_usd"] - 0.5) < 1e-9,
+              str(budget.outstanding()))
+
+        # THE test for this module. The hold from the first request must make the second
+        # fail even though *nothing has been written to the ledger yet* — that gap is
+        # exactly what a read-then-call check misses.
+        d2 = await budget.authorize("proj-rsv", "tight", 0.75)
+        check("a second request is blocked by the first's UNSETTLED hold",
+              d2.blocked is True, str(d2))
+        check("the 429 names the ceiling that was hit",
+              d2.scope == "feature:proj-rsv/tight", d2.scope)
+        check("and reports that ceiling's value", d2.ceiling_usd == 1.0, str(d2.ceiling_usd))
+
+        await budget.release(d.reservation_id)
+        check("releasing frees the held budget",
+              budget.outstanding()["held_usd"] == 0.0, str(budget.outstanding()))
+        d3 = await budget.authorize("proj-rsv", "tight", 0.75)
+        check("the same request succeeds once the hold is released", d3.blocked is False)
+        await budget.release(d3.reservation_id)
+
+        # The project ceiling has to bind independently of any feature ceiling, or a
+        # project could exceed its own total by spreading spend across untagged features.
+        held = []
+        for _ in range(10):
+            dn = await budget.authorize("proj-rsv", None, 1.0)
+            if not dn.blocked:
+                held.append(dn.reservation_id)
+        check("the project ceiling caps the total across untagged traffic",
+              len(held) == 10, str(len(held)))
+        over = await budget.authorize("proj-rsv", None, 1.0)
+        check("the 11th request exceeds the $10 project ceiling", over.blocked is True)
+        check("and is attributed to the project scope, not a feature",
+              over.scope == "project:proj-rsv", over.scope)
+        for rid in held:
+            await budget.release(rid)
+
+        # Concurrency: fire many authorizes simultaneously against a ceiling that admits
+        # only four. Without serialisation every one of them reads the same empty ledger
+        # and all 40 are allowed — the exact failure the module exists to prevent.
+        results = await asyncio.gather(
+            *(budget.authorize("proj-rsv", None, 2.5) for _ in range(40))
+        )
+        allowed = [r for r in results if not r.blocked]
+        check("concurrent authorizes cannot all pass a $10 ceiling at $2.50 each",
+              len(allowed) == 4, f"{len(allowed)} of 40 allowed")
+        for r in allowed:
+            await budget.release(r.reservation_id)
+        check("everything is released afterwards",
+              budget.outstanding()["reservations"] == 0, str(budget.outstanding()))
+
+        # TTL: a hold whose owner never released it must not strand the ceiling forever.
+        d4 = await budget.authorize("proj-rsv", None, 9.0)
+        budget._holds[d4.reservation_id].expires_at = 0.0  # pretend the TTL elapsed
+        d5 = await budget.authorize("proj-rsv", None, 9.0)
+        check("an expired hold is reaped rather than blocking forever", d5.blocked is False)
+        await budget.release(d5.reservation_id)
+
+        # Heartbeat: the ARCHITECTURE.md §2 failure mode is a stream outliving its TTL and
+        # silently dropping out of the ceiling. extend() is what stops that.
+        d6 = await budget.authorize("proj-rsv", None, 1.0)
+        budget._holds[d6.reservation_id].expires_at = 0.0
+        budget.extend(d6.reservation_id)
+        check("extend() pushes an expiring hold back out of reach",
+              budget._holds[d6.reservation_id].expires_at > 0.0)
+        d7 = await budget.authorize("proj-rsv", None, 9.5)
+        check("a heartbeaten hold still counts against the ceiling", d7.blocked is True)
+        await budget.release(d6.reservation_id)
+
+        # Settled ledger spend and live holds have to be summed together, not either/or.
+        _spend("proj-rsv", None, 9.0)
+        d8 = await budget.authorize("proj-rsv", None, 2.0)
+        check("settled ledger spend counts toward the ceiling too", d8.blocked is True,
+              str(d8))
+        check("extend() on an unknown reservation is a no-op, not a crash",
+              budget.extend("rsv_does_not_exist") is None)
+        check("release() of None is a no-op", await budget.release(None) is None)
+
+    asyncio.run(scenarios())
+    budget.load_meter_yaml(Path(_TMP) / "absent.yaml")  # leave no ceilings behind
+
+
+def test_prediction() -> None:
+    """The ESTIMATE step must degrade to 'no prediction' rather than ever failing a request."""
+    print("\npre-flight estimate")
+    from proxy.app import _estimate
+
+    messages = [{"role": "user", "content": "Write a python function that sorts a list."}]
+    got = _estimate(providers.SHAPE_OPENAI, {"messages": messages}, "gpt-4o")
+    check("a supported model produces a token prediction",
+          isinstance(got["predicted_output_tokens"], int)
+          and got["predicted_output_tokens"] > 0, str(got))
+    check("and a dollar figure to reserve", got["reserve_usd"] > 0, str(got))
+    check("and records which bucket it classified into", bool(got["bucket"]), str(got))
+    check("and how it arrived at the number", got["prediction_method"] in
+          {"prior", "learned", "capped"}, str(got))
+
+    capped = _estimate(
+        providers.SHAPE_OPENAI, {"messages": messages, "max_tokens": 5}, "gpt-4o")
+    check("a caller's max_tokens is a hard cap on the prediction",
+          capped["predicted_output_tokens"] == 5, str(capped))
+
+    # Claude has no tiktoken vocabulary and the predictor raises rather than guessing
+    # (predictor/README.md). The proxy must absorb that, not 500.
+    claude = _estimate(providers.SHAPE_ANTHROPIC, {"messages": messages}, "claude-sonnet-5")
+    check("an unsupported model yields no prediction instead of raising",
+          claude["predicted_cost_usd"] is None, str(claude))
+    check("and reserves nothing", claude["reserve_usd"] == 0.0, str(claude))
+
+    check("a body with no messages is handled",
+          _estimate(providers.SHAPE_OPENAI, {}, "gpt-4o")["predicted_cost_usd"] is None)
+    check("a missing model is handled",
+          _estimate(providers.SHAPE_OPENAI, {"messages": messages}, None)
+          ["predicted_cost_usd"] is None)
+    # Non-string content blocks (multimodal) must not raise on the way to a count.
+    blocks = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    check("structured message content does not crash the estimator",
+          _estimate(providers.SHAPE_OPENAI, {"messages": blocks}, "gpt-4o") is not None)
+
+    prev = config.PREDICT_ENABLED
+    config.PREDICT_ENABLED = False
+    try:
+        check("PREDICT_ENABLED=false disables prediction entirely",
+              _estimate(providers.SHAPE_OPENAI, {"messages": messages}, "gpt-4o")
+              ["predicted_cost_usd"] is None)
+    finally:
+        config.PREDICT_ENABLED = prev
+
+
+def test_annotate() -> None:
+    """Attribution rung 3 — the requests x annotations join that yields cost per outcome."""
+    print("\nannotations")
+    import asyncio
+
+    import httpx
+    from httpx import ASGITransport
+
+    from proxy.app import app as proxy_app
+
+    # Two priced calls under one trace: the whole point is that an outcome spans calls.
+    db.record_request({
+        **_row_template("ann-1", "proj-alpha"), "trace_id": "tkt_9812", "cost_usd": 1.25,
+    })
+    db.record_request({
+        **_row_template("ann-2", "proj-alpha"), "trace_id": "tkt_9812", "cost_usd": 0.75,
+    })
+    # Another project's row on the SAME trace id, to prove scoping.
+    db.record_request({
+        **_row_template("ann-3", "proj-beta"), "trace_id": "tkt_9812", "cost_usd": 99.0,
+    })
+
+    async def drive():
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=proxy_app), base_url="http://meter"
+        ) as client:
+            ok = await client.post(
+                "/v1/annotate",
+                headers={"Authorization": "Bearer test_key_alpha"},
+                json={"trace_id": "tkt_9812", "outcome": "resolved", "value_usd": 40},
+            )
+            no_auth = await client.post("/v1/annotate", json={"trace_id": "t"})
+            bad_key = await client.post(
+                "/v1/annotate", headers={"Authorization": "Bearer nope"},
+                json={"trace_id": "t"})
+            no_trace = await client.post(
+                "/v1/annotate", headers={"Authorization": "Bearer test_key_alpha"},
+                json={"outcome": "resolved"})
+            bad_value = await client.post(
+                "/v1/annotate", headers={"Authorization": "Bearer test_key_alpha"},
+                json={"trace_id": "t", "value_usd": "forty"})
+            no_value = await client.post(
+                "/v1/annotate", headers={"Authorization": "Bearer test_key_alpha"},
+                json={"trace_id": "tkt_9812", "outcome": "resolved"})
+            return ok, no_auth, bad_key, no_trace, bad_value, no_value
+
+    ok, no_auth, bad_key, no_trace, bad_value, no_value = asyncio.run(drive())
+
+    check("annotate accepts a valid outcome", ok.status_code == 200, ok.text)
+    payload = ok.json()
+    check("the trace's cost is summed across all of its requests",
+          abs(payload["cost_usd"] - 2.0) < 1e-9, str(payload))
+    check("another project's identical trace id is not counted",
+          payload["request_count"] == 2, str(payload))
+    check("margin is value minus cost — the cost-per-outcome number",
+          abs(payload["margin_usd"] - 38.0) < 1e-9, str(payload))
+    check("annotation without a value reports no margin rather than zero",
+          no_value.json()["margin_usd"] is None, no_value.text)
+    check("missing meter key is rejected", no_auth.status_code == 401)
+    check("unknown meter key is rejected", bad_key.status_code == 401)
+    check("trace_id is required", no_trace.status_code == 400, no_trace.text)
+    check("a non-numeric value_usd is rejected", bad_value.status_code == 400)
+
+
+def test_end_to_end_budget_and_prediction() -> None:
+    """The wiring, through the real request path against a fake upstream.
+
+    The unit tests above prove `_estimate`, `budget.authorize` and the migration each work.
+    This proves `_proxy` actually *calls* them and that what they return reaches the ledger
+    — the failure mode where every part is correct and none of them are connected.
+    """
+    print("\nend to end — prediction and ceilings")
+    import asyncio
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from proxy import budget
+    from proxy.app import app as proxy_app
+
+    body = _json.dumps({
+        "id": "chatcmpl-x", "object": "chat.completion", "model": "gpt-4o",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+    }).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length", 0) or 0))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    config.OPENAI_BASE_URL = f"http://127.0.0.1:{port}/v1"
+    config.OPENAI_API_KEY = "sk-fake"
+    config.BREAKER_ENABLED = False
+
+    async def drive():
+        import httpx
+        from httpx import ASGITransport
+
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=proxy_app), base_url="http://meter"
+        ) as client:
+            proxy_app.state.http = httpx.AsyncClient(timeout=30)
+            call = lambda feature: client.post(  # noqa: E731
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer test_key_alpha",
+                         "X-Meter-Feature": feature},
+                json={"model": "gpt-4o",
+                      "messages": [{"role": "user", "content": "Summarize this text."}]},
+            )
+            priced = await call("e2e-priced")
+            await asyncio.sleep(0.4)
+
+            # Now impose a ceiling far below what this call already spent, and confirm
+            # the next one is refused with the headers that name what it hit.
+            path = Path(_TMP) / "meter-e2e.yaml"
+            path.write_text(
+                "projects:\n  proj-alpha:\n    features:\n"
+                "      e2e-blocked: { ceiling_usd_per_day: 0.000001 }\n"
+            )
+            budget.load_meter_yaml(path)
+            _spend("proj-alpha", "e2e-blocked", 0.01)
+            blocked = await call("e2e-blocked")
+            await asyncio.sleep(0.4)
+
+            await proxy_app.state.http.aclose()
+            return priced, blocked
+
+    priced, blocked = asyncio.run(drive())
+    server.shutdown()
+
+    check("a normal call still succeeds with budgets wired in",
+          priced.status_code == 200, priced.text[:200])
+
+    rows = {r["feature"]: r for r in _all_rows() if r["feature"] in
+            {"e2e-priced", "e2e-blocked"}}
+    row = rows.get("e2e-priced")
+    check("the served call produced a ledger row", row is not None)
+    if row:
+        check("the prediction reached the ledger",
+              row["predicted_output_tokens"] is not None
+              and row["predicted_cost_usd"] is not None, str(dict(row)))
+        check("with the bucket it classified into", bool(row["bucket"]), str(row["bucket"]))
+        check("and the method it used",
+              row["prediction_method"] in {"prior", "learned", "capped"},
+              str(row["prediction_method"]))
+        check("actual cost is priced from the provider's real usage, not the prediction",
+              row["output_tokens"] == 50 and row["estimated"] == 0, str(dict(row)))
+        check("predicted and actual are both present, so variance is a subtraction",
+              isinstance(row["cost_usd"] - row["predicted_cost_usd"], float))
+
+    check("a call over its feature ceiling is refused", blocked.status_code == 429,
+          str(blocked.status_code))
+    check("the refusal names the ceiling that was hit",
+          blocked.headers.get("X-Meter-Budget-Scope") == "feature:proj-alpha/e2e-blocked",
+          str(dict(blocked.headers)))
+    check("and reports the ceiling's value",
+          blocked.headers.get("X-Meter-Budget-Ceiling-Usd") is not None)
+    check("a budget refusal is ledgered too, at zero cost",
+          "e2e-blocked" in rows and rows["e2e-blocked"]["cost_usd"] == 0.0)
+    check("the refused call never reached a provider",
+          rows["e2e-blocked"]["provider"] == "-", str(dict(rows["e2e-blocked"])))
+
+    # The hold taken by the served request must be gone once its row landed. A leak here
+    # would silently shrink every subsequent ceiling until the TTL reaped it.
+    check("no reservation leaked after the requests completed",
+          budget.outstanding()["reservations"] == 0, str(budget.outstanding()))
+    budget.load_meter_yaml(Path(_TMP) / "absent.yaml")
+    config.BREAKER_ENABLED = True
+
+
+def _row_template(request_id: str, project: str) -> dict:
+    return {
+        "id": request_id, "ts": db.now_iso(), "project_id": project,
+        "environment": "test", "actor": None, "feature": None, "trace_id": None,
+        "provider": "openai", "model": "gpt-4o", "endpoint": "/v1/chat/completions",
+        "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_write_tokens": 0,
+        "pricing_version": "test", "cost_usd": 0.0,
+        "latency_ms": 1.0, "ttft_ms": 1.0, "overhead_ms": 0.5,
+        "status": 200, "is_stream": 0, "estimated": 0,
+        "prompt_hash": None, "reservation_id": None,
+    }
+
+
+def test_ledger_migration() -> None:
+    """An existing meter.db from Phase 1 must gain the new columns, not break on them."""
+    print("\nledger migration")
+    import sqlite3
+
+    legacy = Path(_TMP) / "legacy.db"
+    conn = sqlite3.connect(str(legacy))
+    # The Phase 1 `requests` table, before any prediction column existed.
+    conn.execute(
+        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts TEXT NOT NULL, "
+        "project_id TEXT NOT NULL, provider TEXT NOT NULL, endpoint TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO requests VALUES ('old_1', '2026-01-01T00:00:00.000000+00:00', "
+        "'proj-alpha', 'openai', '/v1/chat/completions')"
+    )
+    conn.commit()
+
+    db._migrate(conn)
+    conn.commit()
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    for column in db._ADDED_REQUEST_COLUMNS:
+        check(f"migration adds requests.{column}", column in columns)
+    check("the pre-existing row survives the migration",
+          conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1)
+    check("and its new columns read as NULL, not as a wrong number",
+          conn.execute("SELECT predicted_cost_usd FROM requests").fetchone()[0] is None)
+
+    db._migrate(conn)  # idempotent — a second boot must not fail on duplicate columns
+    check("re-running the migration is a no-op", True)
+    conn.close()
+
+
 def _all_rows() -> list[dict]:
     conn = db.connect()
     with db._lock:
@@ -654,6 +1133,12 @@ def main() -> int:
         test_burst_detection,
         test_revocation_fails_closed,
         test_gzipped_upstream_stream,
+        test_ledger_migration,
+        test_meter_yaml,
+        test_reservations,
+        test_prediction,
+        test_annotate,
+        test_end_to_end_budget_and_prediction,
     ):
         suite()
     print(f"\n{PASSED} checks passed")

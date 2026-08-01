@@ -35,6 +35,25 @@ function tableExists(conn: Database.Database, name: string): boolean {
   );
 }
 
+// Same reasoning one level down. The prediction columns are added to `requests` by an
+// ALTER in proxy/db.py's connect(), so a meter.db whose proxy has not been restarted
+// since that shipped has the table but not the columns — and SELECTing a missing column
+// throws rather than returning null. Checked once per column, then cached: this is on
+// the 3-second live-logs poll.
+const columnCache = new Map<string, boolean>();
+
+function columnExists(conn: Database.Database, table: string, column: string): boolean {
+  const cacheKey = `${table}.${column}`;
+  const cached = columnCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+  const found = conn
+    .prepare(`PRAGMA table_info(${table})`)
+    .all()
+    .some((row) => (row as { name: string }).name === column);
+  columnCache.set(cacheKey, found);
+  return found;
+}
+
 export type SpendRow = {
   project_id: string;
   actor: string | null;
@@ -81,7 +100,7 @@ export type WalletRow = {
 
 /**
  * Provider balances, mirroring treasury.db.list_wallets() — same ordering, so the
- * card and the /treasury/wallets route can never disagree about row order.
+ * card and the /wallets route can never disagree about row order.
  *
  * Returns null (rather than []) when the treasury tables have not been created yet,
  * so the card can say "run the proxy" instead of "you have no money".
@@ -104,9 +123,10 @@ export type LiveLogRow = {
   ts: string;
   actor: string | null;
   model: string | null;
-  // Not yet in the ledger — predictor/ exists but isn't wired into the proxy's
-  // request path yet (CONTEXT.md §6a). Column stays null until Shubh's Phase 2
-  // integration writes predicted_output_tokens/bucket at CAPTURE.
+  // Written at CAPTURE by the proxy's ESTIMATE step. Stays null for models with no
+  // local tokenizer — every Claude model, since tiktoken has no Anthropic vocabulary
+  // and the predictor refuses to guess (predictor/README.md) — so a blank cell here is
+  // a real state to render, not a missing feature.
   predicted_cost_usd: number | null;
   cost_usd: number;
   status: number | null;
@@ -115,13 +135,16 @@ export type LiveLogRow = {
 export function getLiveLogs(limit = 50): LiveLogRow[] {
   const conn = getDb();
   if (!conn || !tableExists(conn, "requests")) return [];
+  const predicted = columnExists(conn, "requests", "predicted_cost_usd")
+    ? "predicted_cost_usd"
+    : "NULL AS predicted_cost_usd";
   return conn
     .prepare(
       `SELECT id,
               ts,
               actor,
               model,
-              NULL AS predicted_cost_usd,
+              ${predicted},
               cost_usd,
               status
          FROM requests

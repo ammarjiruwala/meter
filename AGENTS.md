@@ -52,19 +52,28 @@ describe current reality, not a changelog. If you want a changelog, that's what 
 
 ## Running what exists
 
-The proxy (`proxy/`) is the only component built so far. Owner: Shubh.
+One command starts the whole backend — the proxy (Shubh) with Shivam's treasury routes
+mounted onto it, one process on one port. The dashboard (Tanay) runs separately.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                              # add provider keys
-uvicorn proxy.app:app --port 8080 --reload        # run it
-python tests/test_proxy.py                        # 78 assertions, no framework, ~1s
+uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
+python tests/test_proxy.py                        # 202 assertions, no framework, ~3s
+python tests/test_predictor.py                    # 64 assertions, same convention
+
+cd dashboard && npm install && npm run dev        # reads ../meter.db, read-only
 ```
 
-Run the self-check before you commit anything under `proxy/`. It is plain asserts, so it
-needs no pytest and no fixtures — if you add non-trivial logic, add an assertion to it
-rather than starting a second test system.
+Run the matching self-check before you commit: `test_proxy.py` for anything under
+`proxy/` or `treasury/`, `test_predictor.py` for anything under `predictor/`. They are
+plain asserts, so they need no pytest and no fixtures — if you add non-trivial logic, add
+an assertion rather than starting a second test system.
+
+Daily spend ceilings are declared in `meter.yaml` at the repo root (see
+`meter.yaml.example`), deliberately in the repo so a limit changes by pull request. No
+file means no ceilings.
 
 `proxy/README.md` documents the module map, the request lifecycle, and — importantly — the
 list of things deliberately *not* implemented in Phase 1 and why. Read that before

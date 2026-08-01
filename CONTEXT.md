@@ -99,10 +99,11 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — Shivam's treasury schema (`wallets`, `mandates`, `treasury_events`)
-    and mock provider billing landed, then folded into the proxy app: one process, one port.
-    `proxy/README.md` refreshed to match (routes, the shared-writer note, boot-time table
-    creation) — done with Shubh's sign-off.
+*   **Last updated:** 2026-08-01 — **Shubh's Phase 2 landed** (branch `shubh/phase2`): the
+    predictor is wired into the request path, daily ceilings are enforced with real
+    authorize/capture reservations, and `POST /v1/annotate` exists. Detail under Proxy below.
+    Previously: Shivam's treasury schema (`wallets`, `mandates`, `treasury_events`) and mock
+    provider billing landed, then folded into the proxy app: one process, one port.
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -116,14 +117,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   SSE streaming with real usage extraction for both provider shapes (pulled forward from Phase 2). Non-streamed calls too.
     *   Attribution rungs 0–2 (`X-Meter-Feature` / `-Actor` / `-Trace`) recorded on every row.
     *   **Verified against the real Anthropic API** (2026-08-01): real completions, real SSE streams, usage parsed from the actual wire format, costs matching the published haiku-4-5 rates to 8 decimal places, on both `/v1/messages` and the OpenAI-compat path. That run found two bugs no fake upstream could (`PROPOSALS.md` B15, B16) — most seriously, streamed responses arrive **gzipped**, and reading them raw left every streamed row byte-estimated *and* handed clients unreadable compressed SSE.
-    *   Measured overhead: **p50 +1.49 ms** wall-clock against a local fake upstream. Loopback, no TLS — a floor, not a production number.
-    *   Not yet done, all owned by Shubh in Phase 2: reservations (in-process, no Redis — see below), per-project daily ceilings, `POST /v1/annotate`.
+    *   Measured overhead: **p50 +1.49 ms** wall-clock against a local fake upstream. Loopback, no TLS — a floor, not a production number. ⚠ **Measured before ESTIMATE and RESERVE existed and not yet re-run** — re-measure with a ceiling configured before quoting it again.
+    *   **Phase 2 done (2026-08-01):** ESTIMATE, RESERVE and `POST /v1/annotate` all landed. `python tests/test_proxy.py` is now **202 checks**.
+    *   **Predictive engine wired in.** Every row now carries `predicted_output_tokens`, `predicted_cost_usd`, `bucket`, `prediction_method` alongside the actuals, so predicted-vs-actual variance is a subtraction. **This closes Ammar's feedback loop** — the rows `load_fits()` needs now exist; nothing calls it on a schedule yet. Prediction degrades to NULL rather than erroring on anything unsupported, **which includes every Claude model** (no tiktoken vocabulary; the predictor refuses to guess).
+    *   **Daily ceilings enforced** from `meter.yaml` at the repo root (`meter.yaml.example` is the template), project-level and per-feature. Refusal is `429` with `X-Meter-Budget-Scope` / `-Ceiling-Usd` / `-Spend-Usd` naming the ceiling hit. No `meter.yaml` = no ceilings and no added latency, which is the Phase 1 behaviour exactly.
+    *   **Reservations are real** (`proxy/budget.py`), in-process per the A5 decision. Holds are counted alongside settled spend inside one `asyncio.Lock`, so concurrent requests cannot all pass the same ceiling — the self-check fires 40 at a ceiling admitting 4. Released *inside* the capture task so the hold never disappears before the row lands, and **heartbeat-extended during streams**, which ARCHITECTURE.md §2 flags as a silent failure if skipped. `reservation_id` is no longer written NULL.
+    *   **`POST /v1/annotate`** (attribution rung 3, was PROPOSALS.md B9 and owned by nobody). Returns the trace's total cost, request count and margin, scoped to the calling key's project.
+    *   **Ledger migration:** `proxy/db.py` now ALTERs the four prediction columns onto an existing `requests` table at boot. A teammate with a Phase 1 `meter.db` just needs to pull and restart — no manual step, no dropped database.
+    *   Not yet done, Shubh: Redis-backed reservations (only needed at proxy replica #2), the `features.<name>.models` allowlist README.md shows in `meter.yaml`, and re-measuring overhead.
 
 *   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
+    *   **Phase 2 additions to carry into the port:** four prediction columns on `requests` (`predicted_output_tokens`, `predicted_cost_usd`, `bucket`, `prediction_method`), plus two new tables — `annotations` (§4's, with a `project_id` added so one project cannot annotate another's traces) and `feature_budgets` (not in §4; §4 has ceilings only at project level, but README.md's own `meter.yaml` example sets them per feature).
 
 *   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are NOT wired** — `breaker.notify()` is a log-only seam waiting on Tanay.
 
-*   **Predictive Engine: WORKING (v1), NOT YET WIRED INTO THE PROXY.** `predictor/` — full detail in `predictor/README.md`, self-check `python tests/test_predictor.py` (43 checks).
+*   **Predictive Engine: WORKING (v1), NOW WIRED INTO THE PROXY.** `predictor/` — full detail in `predictor/README.md`, self-check `python tests/test_predictor.py` (64 checks).
     *   `predict(payload, model, max_tokens) -> PredictionResult` — the ESTIMATE step of ARCHITECTURE.md §2. Deterministic, no I/O, **p50 0.031ms** (~0.6% of the 5ms pre-flight budget).
     *   Exact `tiktoken` input counting including chat framing overhead. **Raises on Claude** rather than silently approximating with the wrong vocabulary — see §6b.
     *   8-bucket prompt classifier; `max_tokens` honoured as a hard cap (a provider-enforced bound beats any heuristic).
@@ -131,7 +139,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   Priced through `proxy/pricing.py`, so predictions and ledger rows cannot disagree on rates.
     *   **Deferred, decided 2026-08-01 (Ammar):** the `translation` bucket is knowingly mis-calibrated (ratio 0.26, 331% MAPE) and **we are not fixing it during the hackathon.** Our users are engineering teams; their traffic is code/reasoning/summary and effectively none of it is translation. It is also genuinely harder than the other buckets — the ratio depends on language pair *and* direction, which one bucket cannot represent. Detail and the two fixes in `predictor/buckets.py`. Every other bucket is unaffected, and input counting is exact regardless of language.
     *   **Known gap vs §5A:** §5A specifies a trailing-p95 cost fallback for `(project, endpoint, model)` at cold start. v1 uses static per-bucket priors instead — bucket-aware rather than project-aware, and available on request #1 rather than needing history. Not yet reconciled; **Ammar to raise in `PROPOSALS.md` rather than quietly treat §5A as satisfied.**
-    *   **Two things block the feedback loop, both needed before we can claim any accuracy number:** (1) Shubh wiring `predict()` into the request path and writing `predicted_output_tokens` / `bucket` to the ledger at CAPTURE; (2) running `python -m predictor.calibrate` to replace the inherited priors with measured ones. `learner.py` stays dormant until ~30 rows/bucket exist.
+    *   **Feedback loop: half closed as of 2026-08-01.** (1) ✅ Shubh wired `predict()` into the request path; `predicted_output_tokens`, `predicted_cost_usd`, `bucket` and `prediction_method` are written to the ledger at CAPTURE, so the rows `load_fits()` needs are accumulating now. (2) ⬜ **Still outstanding, Ammar:** run `python -m predictor.calibrate` to replace the inherited priors with measured ones, and call `load_fits()` on a schedule — nothing does yet, so `learner.py` remains dormant regardless of row count. **No accuracy number can be quoted until (2) is done.**
 
 *   **Treasurer Agent / Prava: PAYMENT RAIL VERIFIED + TREASURY SCHEMA WORKING; AGENT LOOP NOT STARTED.**
     `treasury/` — **mounted on Shubh's proxy app**, so there is one backend process on one port:
@@ -172,16 +180,19 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   "Team Spend" table (grouped by project/actor/feature from `requests`).
     *   "Provider Balances" card — **now reading the real `wallets` table** (`treasury/db.py`,
         same `meter.db`). Ordering mirrors `treasury.db.list_wallets()` so the card and
-        `GET /treasury/wallets` cannot disagree. Each row shows how stale the balance is, because
+        `GET /wallets` cannot disagree. Each row shows how stale the balance is, because
         "$4.00" and "$4.00, three hours ago" call for different reactions. The project name is
         shown only when more than one project has wallets, so it stays out of the way in the
-        single-project demo. Seed with `POST /treasury/wallets/seed` (defaults to `$4.00`, the
+        single-project demo. Seed with `POST /wallets/seed` (defaults to `$4.00`, the
         demo's "too low" state). The old `dashboard/src/lib/wallets.ts` placeholder is deleted.
     *   "Live Logs" table (`User | Model | Predicted Cost | Actual Cost | Status`), polling
-        `GET /api/live-logs` every 3s. **Predicted Cost is always blank** — the ledger has no
-        `predicted_output_tokens`/`bucket` columns yet; wire it for real once Shubh's predictor
-        integration lands (see Predictive Engine entry above). Verified end-to-end against a
-        seeded SQLite file: a row inserted mid-session shows up on the next poll with no restart.
+        `GET /api/live-logs` every 3s. **Predicted Cost now reads the real column** (wired
+        2026-08-01 once Shubh's predictor integration landed). It stays blank for Claude
+        models, which have no local tokenizer — that is a real state to render, not a missing
+        feature, and the table's footnote says so. The query degrades to `NULL` when the column
+        is absent, so a `meter.db` whose proxy has not been restarted since the migration still
+        renders instead of throwing. Verified end-to-end against a seeded SQLite file: a row
+        inserted mid-session shows up on the next poll with no restart.
     *   **Every query guards on the table existing, not just the file.** `meter.db` can now be
         created by either side — `treasury/db.py` makes it with only the treasury tables, so
         running any treasury script before the proxy left a file that existed but had no
@@ -193,11 +204,13 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 
 *   **Resolved since kickoff:**
     1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)
-    2.  ✅ **Redis: not in the 48-hour build — Shubh, Phase 2.** Reservations still get built, in-process. Redis is not what makes authorize/capture correct; serialization is, and with one proxy process an `asyncio.Lock` is an identical guarantee for none of the operational cost. Redis becomes load-bearing at proxy replica #2. (`PROPOSALS.md` A5)
-    3.  ✅ **Budget enforcement is now owned — Shubh, Phase 2.** `meter.yaml` loader plus a pre-flight ceiling check in the request path. (`PROPOSALS.md` B7)
+    2.  ✅ **Redis: not in the 48-hour build — Shubh, Phase 2. SHIPPED.** Reservations are built and in-process (`proxy/budget.py`). Redis is not what makes authorize/capture correct; serialization is, and with one proxy process an `asyncio.Lock` is an identical guarantee for none of the operational cost. Redis becomes load-bearing at proxy replica #2. (`PROPOSALS.md` A5)
+    3.  ✅ **Budget enforcement is now owned — Shubh, Phase 2. SHIPPED.** `meter.yaml` loader plus a pre-flight ceiling check in the request path, project-level and per-feature. (`PROPOSALS.md` B7)
+    4.  ✅ **`meter.yaml` vs. the database as source of truth — resolved by the loader's direction of travel.** The file is authoritative; it is projected into `projects`/`feature_budgets` at boot and nothing at runtime writes back, so the request path still reads a table without the file ever being second-hand. (`PROPOSALS.md` A6)
+    5.  ✅ **`POST /v1/annotate` shipped — Shubh, 2026-08-01.** Was owned by nobody despite being documented in both `README.md` and `ARCHITECTURE.md`. (`PROPOSALS.md` B9)
 
 *   **Open blockers/decisions:**
-    1.  **`POST /v1/annotate` and `docker compose up` are both documented in `README.md` and owned by nobody.** The first is what turns a cost tool into a margin tool and is ~40 lines; the second is the first command in our own quickstart. (`PROPOSALS.md` B9, B10)
+    1.  **`docker compose up` is documented in `README.md` and owned by nobody** — it is the first command in our own quickstart. (`PROPOSALS.md` B10). *(`POST /v1/annotate`, the other half of this item, shipped 2026-08-01.)*
     2.  **The Visa VIC track has no architectural surface.** Tanay's Phase 0 confirmed the test-card requirements are covered by `docs/prava/api-reference/test-cards.md`, so the *docs* gap is closed — but nothing in `ARCHITECTURE.md` or the build actually targets VIC. We are still entered in a track no component is designed for. (`PROPOSALS.md` B14)
     3.  ✅ **Both providers are funded and verified live end to end** (moved here from blockers, 2026-08-01). Real completions and real streams through the proxy on OpenAI *and* Anthropic, all rows priced to the published rates exactly, cross-provider routing landing both in one ledger. The REAL LLM CALLS item in §3 is fully unblocked — `predictor/calibrate.py` and the Phase 3 cross-model comparison have both providers to run against. **Rotate all three keys** (2 Anthropic, 1 OpenAI) — they were shared over chat; the live ones exist only in the gitignored `.env`. (`PROPOSALS.md` C4)
     4.  **Cross-model routing is specified two ways** — §5A says the *proxy* sends the same prompt to both providers; PLAN.md Phase 3 has it as an offline script. The script is right: shadow-calling a second provider on live traffic doubles the customer's bill inside a cost-control tool. Left as a proposal pending Ammar. (`PROPOSALS.md` B11)

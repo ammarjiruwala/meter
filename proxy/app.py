@@ -3,17 +3,20 @@
 Implements PLAN.md Phase 1 for Shubh (Proxy & Infra), plus the Phase 3 circuit breaker
 pulled forward, plus SSE usage extraction.
 
-The request lifecycle here is ARCHITECTURE.md §2 minus the reservation steps, which are
-Redis Lua and therefore out of the Phase 1 dependency set:
+The request lifecycle here is ARCHITECTURE.md §2, with reservations held in-process
+rather than in Redis (PROPOSALS.md A5):
 
     1. AUTHENTICATE   resolve Meter key -> project, environment
     2. ATTRIBUTE      read X-Meter-Feature / X-Meter-Actor / X-Meter-Trace
-    3. (RESERVE)      not implemented in Phase 1 — see the note on `reservation_id`
+    3. ESTIMATE       predicted output tokens and cost, via predictor/
     4. BREAKER CHECK  rolling-window spend for this attribution tag
-    5. FORWARD        stream bytes to the client unbuffered while teeing for usage
-    6. CAPTURE        price actual usage, write the ledger row — off the hot path
+    5. RESERVE        hold the estimate against the daily ceiling (proxy/budget.py)
+    6. FORWARD        stream bytes to the client unbuffered while teeing for usage
+    7. CAPTURE        price actual usage, write the ledger row, release the hold
 
-Step 6 never blocks the client. By the time it runs, the caller already has every byte.
+Step 7 never blocks the client. By the time it runs, the caller already has every byte.
+Steps 4 and 5 are swapped relative to ARCHITECTURE.md's numbering — see the comment at
+the breaker check for why.
 
 Owner: Shubh (Proxy & Infra).
 """
@@ -36,8 +39,22 @@ from treasury import db as treasury_db
 from treasury import mock_provider
 from treasury import routes as treasury_routes
 
-from . import breaker, config, db, providers
+from . import breaker, budget, config, db, providers
 from .pricing import Usage, estimate_from_bytes, price
+
+# Optional at import time on purpose. `predictor` pulls in tiktoken and numpy, and a
+# teammate whose virtualenv predates Phase 2 would otherwise find the whole proxy refusing
+# to boot over a pre-flight estimate that is allowed to be absent. Degrade to no
+# prediction — the same state PREDICT_ENABLED=false produces — and say so once.
+try:
+    from predictor import UnsupportedModelError, predict, supports
+except ImportError as _exc:  # pragma: no cover - depends on the local venv
+    predict = None
+    supports = None
+    UnsupportedModelError = Exception
+    _PREDICTOR_IMPORT_ERROR = str(_exc)
+else:
+    _PREDICTOR_IMPORT_ERROR = ""
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +92,19 @@ async def lifespan(app: FastAPI):
     # where nobody had hit the endpoint yet, which is every teammate's machine.
     treasury_db.connect()
     log.info("treasury tables ready (wallets, mandates, treasury_events)")
+
+    # Budgets are declared in meter.yaml and projected into the ledger at boot, so the
+    # file stays the reviewable source of truth and the request path still reads a table
+    # (PROPOSALS.md A6). No file means no ceilings, which is exactly Phase 1 behaviour.
+    await asyncio.to_thread(budget.load_meter_yaml)
+
+    if config.PREDICT_ENABLED and predict is None:
+        log.warning(
+            "PREDICT_ENABLED is on but the predictor could not be imported (%s). "
+            "Running without pre-flight estimates: predicted_* columns stay NULL and "
+            "reservations hold $0. Fix with `pip install -r requirements.txt`.",
+            _PREDICTOR_IMPORT_ERROR,
+        )
 
     if not config.OPENAI_API_KEY and not config.ANTHROPIC_API_KEY:
         log.warning("no provider keys configured — every upstream call will 401")
@@ -219,6 +249,21 @@ async def healthz() -> dict[str, Any]:
             "openai": bool(config.OPENAI_API_KEY),
             "anthropic": bool(config.ANTHROPIC_API_KEY),
         },
+        # A ceiling nobody can see is a ceiling nobody trusts. Surfacing the loaded set
+        # makes "is meter.yaml actually being read?" answerable without a test request —
+        # the question every misconfigured budget starts with.
+        "budget": {
+            "meter_yaml": str(config.METER_YAML_PATH),
+            "meter_yaml_found": config.METER_YAML_PATH.exists(),
+            "window_s": config.BUDGET_WINDOW_S,
+            "ceilings": budget.active_ceilings(),
+            **budget.outstanding(),
+        },
+        "predictor": {
+            "enabled": config.PREDICT_ENABLED,
+            "available": predict is not None,
+            "reservation_ttl_s": config.RESERVATION_TTL_S,
+        },
     }
 
 
@@ -237,6 +282,90 @@ async def messages(request: Request):
     `x-api-key` header. Without this route "every provider" means "OpenAI".
     """
     return await _proxy(request, providers.SHAPE_ANTHROPIC)
+
+
+@app.post("/v1/annotate")
+async def annotate(request: Request):
+    """Attribution rung 3 — attach a business outcome to a trace.
+
+        curl -X POST localhost:8080/v1/annotate -H 'Authorization: Bearer mk_...' \
+             -d '{"trace_id":"tkt_9812","outcome":"resolved","value_usd":40}'
+
+    The proxy structurally cannot know whether a support ticket was resolved, so this is
+    how that fact gets in. `requests × annotations` on `trace_id` is then dollars per
+    resolved outcome — the margin metric of ARCHITECTURE.md §4, and the difference
+    between a cost tool and a margin tool.
+
+    Owned by nobody in PLAN.md despite being documented in both README.md and
+    ARCHITECTURE.md; picked up here because it is proxy surface (PROPOSALS.md B9).
+
+    On `/v1` unlike the treasury routes: this is called by the caller's own application
+    with the caller's own Meter key, so it belongs on the same surface as the proxied
+    calls it annotates.
+    """
+    raw_key = _presented_key(request)
+    if not raw_key:
+        return _error(401, "Missing Meter key.", "authentication_error")
+    try:
+        key = await asyncio.to_thread(db.resolve_key, raw_key)
+    except Exception:
+        log.exception("ledger unreachable during annotate")
+        return _error(503, "Ledger unreachable.", "service_unavailable")
+    if key is None:
+        return _error(401, "Unknown Meter key.", "authentication_error")
+    if key.get("revoked_at"):
+        # A revoked key is cut for writes too. Annotations are cheap, but they are still
+        # writes against a credential someone deliberately killed.
+        return _error(403, "This Meter key has been revoked.", "key_revoked")
+
+    body = await _json_body(request)
+    if body is None:
+        return _error(400, "Request body must be a JSON object.", "invalid_request_error")
+
+    trace_id = body.get("trace_id")
+    if not isinstance(trace_id, str) or not trace_id.strip():
+        return _error(
+            400, "`trace_id` is required and must be a non-empty string.",
+            "invalid_request_error",
+        )
+    trace_id = trace_id.strip()
+
+    outcome = body.get("outcome")
+    if outcome is not None and not isinstance(outcome, str):
+        return _error(400, "`outcome` must be a string.", "invalid_request_error")
+
+    value_usd = body.get("value_usd")
+    if value_usd is not None:
+        try:
+            value_usd = float(value_usd)
+        except (TypeError, ValueError):
+            return _error(400, "`value_usd` must be a number.", "invalid_request_error")
+
+    try:
+        annotation_id = await asyncio.to_thread(
+            db.record_annotation, key["project_id"], trace_id, outcome, value_usd
+        )
+        # Returned so the caller sees the cost-per-outcome number immediately instead of
+        # having to query the ledger to find out what it just annotated.
+        totals = await asyncio.to_thread(db.trace_cost, key["project_id"], trace_id)
+    except Exception:
+        log.exception("failed to record annotation for trace %s", trace_id)
+        return _error(503, "Ledger unreachable.", "service_unavailable")
+
+    margin_usd = None if value_usd is None else round(value_usd - totals["cost_usd"], 6)
+    return JSONResponse(
+        {
+            "id": annotation_id,
+            "trace_id": trace_id,
+            "outcome": outcome,
+            "value_usd": value_usd,
+            "cost_usd": totals["cost_usd"],
+            "request_count": totals["request_count"],
+            # None when the caller sent no `value_usd` — the trace's cost is still known,
+            # but its margin is not, and reporting 0 would read as "broke even".
+            "margin_usd": margin_usd,
+        }
+    )
 
 
 @app.post("/v1/breaker/reset")
@@ -281,6 +410,54 @@ async def _json_body(request: Request) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _estimate(shape: str, body: dict[str, Any], model: str | None) -> dict[str, Any]:
+    """ESTIMATE — ARCHITECTURE.md §2 step 3. Never raises, never blocks.
+
+    Returns the four `predicted_*` ledger fields plus the dollar figure to reserve. Every
+    failure mode degrades to "no prediction" rather than to an error, because a request
+    the proxy could have served must not die over a number that only informs a
+    reservation. `predicted_cost_usd` staying NULL is itself the signal, and it is
+    countable from the ledger.
+
+    Anthropic models take this path routinely, not exceptionally: `tiktoken` has no Claude
+    vocabulary and the predictor raises rather than returning a number that is quietly
+    10-20% wrong (predictor/README.md). Those requests reserve $0, so a ceiling still
+    stops them — just one request later than it stops an OpenAI one, since there is no
+    estimate to anticipate with.
+    """
+    blank: dict[str, Any] = {
+        "predicted_output_tokens": None,
+        "predicted_cost_usd": None,
+        "bucket": None,
+        "prediction_method": None,
+        "reserve_usd": 0.0,
+    }
+    if not config.PREDICT_ENABLED or predict is None or not model:
+        return blank
+
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return blank
+
+    try:
+        if not supports(model):
+            return blank
+        result = predict(messages, model=model, max_tokens=body.get("max_tokens"))
+    except UnsupportedModelError:
+        return blank
+    except Exception:  # noqa: BLE001 - see the docstring: estimation is never fatal
+        log.exception("prediction failed for model %r; continuing without an estimate", model)
+        return blank
+
+    return {
+        "predicted_output_tokens": result.predicted_output_tokens,
+        "predicted_cost_usd": result.predicted_cost_usd,
+        "bucket": result.bucket,
+        "prediction_method": result.method,
+        "reserve_usd": result.predicted_cost_usd,
+    }
+
+
 async def _proxy(request: Request, shape: str) -> Response:
     started = time.perf_counter()
     request_id = f"req_{uuid.uuid4().hex}"
@@ -314,7 +491,14 @@ async def _proxy(request: Request, shape: str) -> Response:
     model = body.get("model") if isinstance(body.get("model"), str) else None
     streaming = providers.is_streaming(body)
 
+    # ── 3. ESTIMATE ──────────────────────────────────────────────────────────
+    prediction = _estimate(shape, body, model)
+
     # ── 4. BREAKER CHECK ─────────────────────────────────────────────────────
+    # ARCHITECTURE.md §2 numbers RESERVE before BREAKER CHECK. Swapped deliberately: the
+    # breaker is the cheaper check and it is a pure rejection, so running it first keeps
+    # a revoked key or a throttled tag from taking — and immediately releasing — a budget
+    # hold on every attempt. Nothing outside this function can observe the difference.
     try:
         decision = await asyncio.to_thread(breaker.check, key["project_id"], tags["feature"], key)
     except Exception:
@@ -341,36 +525,85 @@ async def _proxy(request: Request, shape: str) -> Response:
                 is_stream=streaming, latency_ms=0.0, ttft_ms=None,
                 overhead_ms=(time.perf_counter() - started) * 1000,
                 prompt_hash=providers.prompt_hash(shape, body),
+                prediction=prediction,
             )
         )
         return response
 
-    # ── 5. FORWARD ───────────────────────────────────────────────────────────
-    provider_name = providers.route(model, shape, request.headers.get("x-meter-provider"))
-    provider = providers.providers()[provider_name]
-    if not provider.api_key:
-        return _error(
-            502,
-            f"No upstream API key configured for provider {provider_name!r}.",
-            "upstream_configuration_error",
+    # ── 5. RESERVE ───────────────────────────────────────────────────────────
+    # Holds the estimate against the daily ceiling before the call goes out, so a burst
+    # of concurrent requests cannot each read the same under-ceiling total and all be
+    # let through (ARCHITECTURE.md §2). Free when no meter.yaml is configured.
+    try:
+        budget_decision = await budget.authorize(
+            key["project_id"], tags["feature"], prediction["reserve_usd"]
+        )
+    except Exception:
+        # Same posture as the breaker: enforcement is degradable, availability is not.
+        log.exception("budget authorization failed")
+        if config.FAIL_MODE == "closed":
+            return _error(503, "Ledger unreachable; failing closed.", "service_unavailable")
+        budget_decision = budget.Decision(blocked=False)
+
+    if budget_decision.blocked:
+        response = _error(429, budget_decision.detail, "budget_exceeded")
+        # Naming the ceiling that was hit is the difference between an actionable 429 and
+        # a mystery: a project can have several, and the caller cannot see meter.yaml.
+        response.headers["X-Meter-Budget-Scope"] = budget_decision.scope
+        response.headers["X-Meter-Budget-Ceiling-Usd"] = f"{budget_decision.ceiling_usd:.2f}"
+        response.headers["X-Meter-Budget-Spend-Usd"] = f"{budget_decision.spend_usd:.6f}"
+        response.headers["Retry-After"] = str(config.BUDGET_WINDOW_S)
+        _schedule_capture(
+            _row(
+                request_id, key, tags, provider_name="-", model=model,
+                endpoint=request.url.path, usage=Usage(), status=429,
+                is_stream=streaming, latency_ms=0.0, ttft_ms=None,
+                overhead_ms=(time.perf_counter() - started) * 1000,
+                prompt_hash=providers.prompt_hash(shape, body),
+                prediction=prediction,
+            )
+        )
+        return response
+
+    reservation_id = budget_decision.reservation_id
+
+    # ── 6. FORWARD ───────────────────────────────────────────────────────────
+    # Past this point every exit path must release the hold, including the error ones —
+    # a leaked hold counts against the ceiling until its TTL reaps it.
+    try:
+        provider_name = providers.route(model, shape, request.headers.get("x-meter-provider"))
+        provider = providers.providers()[provider_name]
+        if not provider.api_key:
+            await budget.release(reservation_id)
+            return _error(
+                502,
+                f"No upstream API key configured for provider {provider_name!r}.",
+                "upstream_configuration_error",
+            )
+
+        outbound, injected_usage = providers.prepare_body(body, shape, streaming)
+        url = providers.upstream_url(provider, providers.upstream_path(provider_name, shape))
+        headers = providers.upstream_headers(provider, request.headers.items())
+
+        common = dict(
+            request_id=request_id, key=key, tags=tags, provider_name=provider_name,
+            model=model, endpoint=request.url.path, started=started,
+            prompt_hash=providers.prompt_hash(shape, body),
+            prompt_chars=providers.prompt_chars(outbound),
+            prediction=prediction, reservation_id=reservation_id,
         )
 
-    outbound, injected_usage = providers.prepare_body(body, shape, streaming)
-    url = providers.upstream_url(provider, providers.upstream_path(provider_name, shape))
-    headers = providers.upstream_headers(provider, request.headers.items())
-
-    common = dict(
-        request_id=request_id, key=key, tags=tags, provider_name=provider_name,
-        model=model, endpoint=request.url.path, started=started,
-        prompt_hash=providers.prompt_hash(shape, body),
-        prompt_chars=providers.prompt_chars(outbound),
-    )
-
-    if streaming:
-        return await _forward_stream(
-            request.app.state.http, url, headers, outbound, shape, injected_usage, common
+        if streaming:
+            # The streamed path releases inside its own generator, after the last byte.
+            return await _forward_stream(
+                request.app.state.http, url, headers, outbound, shape, injected_usage, common
+            )
+        return await _forward_unary(
+            request.app.state.http, url, headers, outbound, shape, common
         )
-    return await _forward_unary(request.app.state.http, url, headers, outbound, shape, common)
+    except Exception:
+        await budget.release(reservation_id)
+        raise
 
 
 async def _forward_unary(
@@ -408,7 +641,9 @@ async def _forward_unary(
             is_stream=False, latency_ms=latency_ms, ttft_ms=latency_ms,
             overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
             prompt_hash=common["prompt_hash"],
-        )
+            prediction=common["prediction"], reservation_id=common["reservation_id"],
+        ),
+        release=common["reservation_id"],
     )
 
     response = Response(
@@ -457,7 +692,9 @@ async def _forward_stream(
                 is_stream=True, latency_ms=latency_ms, ttft_ms=None,
                 overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
                 prompt_hash=common["prompt_hash"],
-            )
+                prediction=common["prediction"], reservation_id=common["reservation_id"],
+            ),
+            release=common["reservation_id"],
         )
         return Response(
             content=content,
@@ -466,7 +703,11 @@ async def _forward_stream(
         )
 
     tap = providers.StreamTap(shape, drop_injected_usage=injected_usage)
-    state: dict[str, Any] = {"ttft_ms": None, "status": upstream.status_code}
+    state: dict[str, Any] = {
+        "ttft_ms": None,
+        "status": upstream.status_code,
+        "last_heartbeat": time.monotonic(),
+    }
 
     async def stream_body():
         try:
@@ -483,6 +724,18 @@ async def _forward_stream(
             async for chunk in upstream.aiter_bytes():
                 if state["ttft_ms"] is None:
                     state["ttft_ms"] = (time.perf_counter() - upstream_started) * 1000
+
+                # Heartbeat the reservation (ARCHITECTURE.md §2). Reservation TTLs are
+                # short so a crashed worker releases its holds, but streams routinely run
+                # for minutes — longer than the TTL — and a hold that expires mid-flight
+                # fails *silently*: nothing raises, the ceiling simply stops counting the
+                # largest request in the system. The stream is its own clock, so no
+                # background task is needed; the monotonic compare is the cost.
+                now = time.monotonic()
+                if now - state["last_heartbeat"] >= config.RESERVATION_HEARTBEAT_S:
+                    state["last_heartbeat"] = now
+                    budget.extend(common["reservation_id"])
+
                 forward = tap.feed(chunk)
                 if forward:
                     yield forward
@@ -514,7 +767,13 @@ async def _forward_stream(
                     ttft_ms=state["ttft_ms"],
                     overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
                     prompt_hash=common["prompt_hash"],
-                )
+                    prediction=common["prediction"],
+                    reservation_id=common["reservation_id"],
+                ),
+                # Same reason `_schedule_capture` is first in this block: releasing here
+                # is synchronous scheduling, so it survives the client-disconnect
+                # cancellation that skips everything after the next `await`.
+                release=common["reservation_id"],
             )
 
             # Shielded so the close still completes on the background task even though
@@ -558,7 +817,9 @@ def _upstream_failure(
             is_stream=is_stream, latency_ms=latency_ms, ttft_ms=None,
             overhead_ms=(time.perf_counter() - common["started"]) * 1000 - latency_ms,
             prompt_hash=common["prompt_hash"],
-        )
+            prediction=common["prediction"], reservation_id=common["reservation_id"],
+        ),
+        release=common["reservation_id"],
     )
     return _error(502, f"Upstream provider error: {exc}", "upstream_error")
 
@@ -597,9 +858,12 @@ def _row(
     ttft_ms: float | None,
     overhead_ms: float,
     prompt_hash: str | None,
+    prediction: dict[str, Any] | None = None,
+    reservation_id: str | None = None,
 ) -> dict[str, Any]:
     """Build one ledger row, priced."""
     cost, pricing_version, estimated = price(usage, model or "", config.PRICING_VERSION)
+    prediction = prediction or {}
     return {
         "id": request_id,
         "ts": db.now_iso(),
@@ -624,15 +888,31 @@ def _row(
         "is_stream": int(is_stream),
         "estimated": int(estimated),
         "prompt_hash": prompt_hash,
-        # Phase 1 has no reservations: authorize/capture is Redis Lua (ARCHITECTURE.md
-        # §2) and Redis is not in the Phase 1 dependency set. The column is written NULL
-        # so adding reservations later is a code change, not a migration.
-        "reservation_id": None,
+        # Non-NULL as of Phase 2. Reservations are held in-process rather than in the
+        # Redis ARCHITECTURE.md §2 specifies (PROPOSALS.md A5), but the id is written
+        # either way, so a row can be traced back to the hold that authorized it.
+        "reservation_id": reservation_id,
+        # What the predictor said before the call ran. NULL is meaningful: no supported
+        # tokenizer for this model, or prediction disabled. Variance is
+        # `cost_usd - predicted_cost_usd`, computed at read time rather than stored —
+        # a derived column that can disagree with its inputs is worse than a subtraction.
+        "predicted_output_tokens": prediction.get("predicted_output_tokens"),
+        "predicted_cost_usd": prediction.get("predicted_cost_usd"),
+        "bucket": prediction.get("bucket"),
+        "prediction_method": prediction.get("prediction_method"),
     }
 
 
-def _schedule_capture(row: dict[str, Any]) -> None:
-    """Write a ledger row without ever blocking the caller (ARCHITECTURE.md §2 step 7)."""
+def _schedule_capture(row: dict[str, Any], release: str | None = None) -> None:
+    """Write a ledger row without ever blocking the caller (ARCHITECTURE.md §2 step 7).
+
+    ``release`` is the reservation this row settles, dropped once the write lands. The
+    ordering is the whole point of authorize/capture: release before the row is in
+    `requests` and this request's cost is counted by neither the hold nor the ledger, so
+    a concurrent authorize sees headroom that does not exist. Scheduling the release here
+    rather than at the call site is what keeps that ordering true — `_schedule_capture`
+    only *starts* the write, so awaiting a release next to it would race the same gap.
+    """
 
     async def write() -> None:
         try:
@@ -642,6 +922,10 @@ def _schedule_capture(row: dict[str, Any]) -> None:
             # has its bytes. Loud, because silently losing spend history is the one bug
             # that makes every downstream number wrong.
             log.exception("LEDGER WRITE FAILED for %s (spend not recorded)", row.get("id"))
+        finally:
+            # In `finally` so a failed write still frees the hold. The row is lost either
+            # way; keeping the reservation on top of that would spend the ceiling twice.
+            await budget.release(release)
 
     task = asyncio.create_task(write())
     _capture_tasks.add(task)

@@ -72,6 +72,29 @@ PRICING_DIR = REPO_ROOT / "pricing"
 # open is the default and closed is the deliberate opt-in.
 FAIL_MODE = _str("FAIL_MODE", "open").strip().lower()
 
+# ── Budgets and reservations ─────────────────────────────────────────────────
+# Budgets are declared in `meter.yaml` at the repo root so spend limits are reviewed by
+# pull request (README.md). No file means no ceilings, which is the Phase 1 behaviour.
+METER_YAML_PATH = Path(_str("METER_YAML_PATH", str(REPO_ROOT / "meter.yaml")))
+
+# The window a `ceiling_usd_per_day` is measured over. Rolling, not calendar-aligned: a
+# midnight reset would let a runaway loop spend a full ceiling at 23:59 and another at
+# 00:01, which is the failure the ceiling exists to prevent.
+BUDGET_WINDOW_S = _int("BUDGET_WINDOW_S", 86_400)
+
+# How long an unreleased reservation survives. Short on purpose (ARCHITECTURE.md §2): a
+# crashed worker must release its holds rather than deadlock the ceiling. Streams outlive
+# this routinely, which is why `budget.extend()` heartbeats it rather than raising it.
+RESERVATION_TTL_S = _float("RESERVATION_TTL_S", 120.0)
+
+# How often a live stream pushes its reservation's expiry forward. Must stay comfortably
+# under RESERVATION_TTL_S or a slow stream reaps its own hold mid-flight.
+RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
+
+# The pre-flight estimate (ARCHITECTURE.md §2 step 3). Off puts `predicted_*` NULL on
+# every row and reserves nothing, which is Phase 1 behaviour exactly.
+PREDICT_ENABLED = _bool("PREDICT_ENABLED", True)
+
 # ── Meter keys ───────────────────────────────────────────────────────────────
 # `key:project:environment` triples, comma separated. Phase 1 shim; superseded once
 # key provisioning moves into the database.

@@ -28,8 +28,8 @@ pip install -r requirements.txt
 cp .env.example .env                            # provider + Prava keys; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
-python tests/test_proxy.py                      # 127 checks, no framework, ~1s
-python tests/test_predictor.py                  # 43 checks, same convention
+python tests/test_proxy.py                      # 202 checks, no framework, ~3s
+python tests/test_predictor.py                  # 64 checks, same convention
 ```
 
 Dashboard (Next.js, from [dashboard/](dashboard/)):
@@ -62,9 +62,9 @@ Four components, one process, one SQLite file:
 
 | Component | What it is | Owner |
 | --- | --- | --- |
-| [proxy/](proxy/) | FastAPI hot path. Auth → attribute → breaker → route → shape → forward → capture | Shubh |
+| [proxy/](proxy/) | FastAPI hot path. Auth → attribute → estimate → breaker → reserve → forward → capture | Shubh |
 | [treasury/](treasury/) | Wallets, Prava mandates/charges, mock provider billing. **Routers mounted onto the proxy app** | Shivam |
-| [predictor/](predictor/) | Pre-flight `tiktoken` cost estimate. **Not yet wired into the request path** | Ammar |
+| [predictor/](predictor/) | Pre-flight `tiktoken` cost estimate. Called by the proxy at ESTIMATE | Ammar |
 | [dashboard/](dashboard/) | Next.js 16 App Router + Tailwind. Reads `meter.db` **read-only**, no API to the proxy except `/api/live-logs` | Tanay |
 
 Consequences worth knowing before you change anything:
@@ -83,17 +83,26 @@ Consequences worth knowing before you change anything:
   long-running transaction and that assumption breaks.
 - **Treasury tables are created in `app.py`'s `lifespan`, not on first use**, so a fresh clone that
   has never hit a treasury route still lets the dashboard read `wallets`.
-- **Every dashboard query guards on the table existing**, not just the file — either side can create
-  `meter.db` with only its own half of the schema. Keep that guard when adding a card.
+- **Every dashboard query guards on the table existing** (and, for the prediction columns, on the
+  *column* existing) — either side can create `meter.db` with only its own half of the schema, and a
+  database whose proxy has not restarted since the last migration has the table but not the columns.
+  Keep both guards when adding a card.
+- **New `requests` columns need an entry in `_ADDED_REQUEST_COLUMNS`** ([proxy/db.py](proxy/db.py)).
+  `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without the ALTER, teammates with
+  an older `meter.db` get a failing INSERT on their machine only.
+- **Budgets live in `meter.yaml` at the repo root** (see `meter.yaml.example`), not in `.env`. The
+  loader *replaces* rather than upserts, because a ceiling deleted from the file must stop being
+  enforced. No file means no ceilings and no added latency.
 - [dashboard/AGENTS.md](dashboard/AGENTS.md): this is Next.js 16, which has breaking changes versus
   training data. Read `node_modules/next/dist/docs/` before writing dashboard code.
 
 ## Repo state
 
 [CONTEXT.md](CONTEXT.md) §6a is the live status board — trust it over this section. As of the last
-update: proxy, ledger, circuit breaker, treasury schema + Prava rail, predictor v1, and the dashboard
-layout/live-logs all **work**; the Treasurer agent loop, reservations, per-project ceilings,
-`POST /v1/annotate`, Poke/Linq alerts, and Postgres are **not started**.
+update: proxy, ledger, circuit breaker, treasury schema + Prava rail, predictor v1 (wired into the
+request path), daily ceilings with authorize/capture reservations, `POST /v1/annotate`, and the
+dashboard layout/live-logs all **work**; the Treasurer agent loop, Poke/Linq alerts, Postgres, and
+`docker compose up` are **not started**.
 
 [proxy/README.md](proxy/README.md) has the module map, the request lifecycle, and an explicit table
 of what is *deliberately* unimplemented in Phase 1 and why. Read it before concluding something is
@@ -116,10 +125,13 @@ billing endpoint at `/mock-openai/billing`, 5-minute rolling breaker window).
 Build to CONTEXT.md's MVP scope. Consult ARCHITECTURE.md for *why* a mechanism exists before
 simplifying it away — two in particular are load-bearing and documented as such:
 
-- **Authorize → capture** (reserve before forwarding, release the difference after). A read-then-call
+- **Authorize → capture** (reserve before forwarding, release once the row lands). A read-then-call
   balance check is wrong under concurrency; every simultaneous request sees the same healthy balance.
-  Decided for Phase 2 as an in-process `asyncio.Lock`, not Redis — Redis becomes load-bearing at
-  proxy replica #2.
+  Built in [proxy/budget.py](proxy/budget.py) as an in-process `asyncio.Lock`, not Redis — Redis
+  becomes load-bearing at proxy replica #2. Two things here are easy to break: the release happens
+  *inside* the capture task (releasing beside it leaves a window where the cost is counted by
+  neither), and streams must heartbeat their hold or it expires mid-flight, silently, on the largest
+  requests in the system.
 - **Write-ahead `treasury_events`** (insert `pending` *before* calling Prava, use that row id as the
   idempotency key / `reference`). This is what makes a retry safe. A double-charge ends the
   autonomous-payments pitch.
