@@ -41,7 +41,7 @@ export default function Home() {
           <div className="mb-[80px] rounded-[16px] bg-iron p-[24px] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset]">
             <p className="t-body text-paper">
               Ledger not found — start the proxy (see{" "}
-              <span className="t-readout">proxy/README.md</span>) to begin
+              <span className="text-paper">proxy/README.md</span>) to begin
               logging requests.
             </p>
           </div>
