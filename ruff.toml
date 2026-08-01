@@ -1,4 +1,10 @@
-# Ruff configuration. Deliberately minimal: default rule set (E, F) only.
-# Lint debt that accumulated before this file existed was fixed in place;
-# `ruff check .` is expected to pass clean.
+# Ruff configuration. Deliberately minimal, and pinned explicitly because ruff's
+# DEFAULT rule set grows with each release — an unpinned `ruff>=0.11` silently
+# turned on UP/SIM/BLE/RUF/E501 and reported ~200 violations in code that was
+# clean. `select` names the set the codebase was written against (ruff's classic
+# defaults: pycodestyle E4/E7/E9 + pyflakes F), so CI and any future ruff version
+# see exactly these rules and nothing else.
 line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
