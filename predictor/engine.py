@@ -54,7 +54,13 @@ Payload = Union[str, Messages]
 # ledger fills. Flat 1.30 is a starting guess, not a measurement: observed
 # under-prediction was 53% overall but 100% for `code` and 0% for `summary`, so one
 # global constant demonstrably cannot serve every bucket.
-DEFAULT_BUFFER = 1.30
+# 1.0, deliberately. The buffer existed to buy safety by over-predicting, but safety
+# now comes from `bound_output_tokens`, which output cannot exceed. Keeping a
+# multiplicative buffer on the prediction path double-corrects: the buffer and the
+# history factor are BOTH fitted as actual/scope, so applying both computes
+# scope x (actual/scope) x (actual/scope). A prequential run caught this as median
+# error rising from 77% to 204% as the loop "learned".
+DEFAULT_BUFFER = 1.0
 TARGET_UNDER_PREDICTION = 0.15   # what a fitted buffer aims for
 
 # Step 1.
@@ -208,8 +214,9 @@ class Predictor:
         # ledger's predicted_scope_tokens stays the clean baseline the learner needs.
         raw *= self._factors.get(bucket, 1.0)
 
-        # ── 4. SAFETY BUFFER (asymmetric, per bucket) ──────────────────────
-        raw *= self._buffer_for(bucket)
+        # ── 4. SAFETY BUFFER — now applied to the BOUND, not the prediction ─
+        # See DEFAULT_BUFFER. The forecast optimises for accuracy; the ceiling
+        # carries the safety guarantee.
 
         # ── 5. HISTORY CORRECTION ──────────────────────────────────────────
         factor = self._history_factor(project, feature, actor, bucket, model)
@@ -314,7 +321,7 @@ class Predictor:
         return 1.0
 
     def load_buffers(self, observations: Dict[str, List[Tuple[float, int]]]) -> Dict[str, float]:
-        """Fit each bucket's buffer to hit TARGET_UNDER_PREDICTION.
+        """Fit each bucket's SAFETY quantile. Consumed by the bound, not the forecast.
 
         `observations` is {bucket: [(unbuffered_scope, actual_output_tokens)]}. The
         buffer is the quantile of actual/scope that leaves only the target fraction
@@ -395,8 +402,10 @@ def predict(payload: Payload, model: str, max_tokens: Optional[int] = None,
 
 def load_fits(rows_by_bucket): return _default.load_fits(rows_by_bucket)
 def load_buffers(observations): return _default.load_buffers(observations)
+def load_bounds(observations, quantile: float = 0.95): return _default.load_bounds(observations, quantile)
 def load_history(factors, shrink_k: int = 20): return _default.load_history(factors, shrink_k)
 def current_fits(): return _default.fits
+def current_history(): return dict(_default._history)
 def current_buffers(): return _default.buffers
 def cache_stats(): return _default.cache_stats()
 

@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from predictor import (  # noqa: E402
+    DEFAULT_BUFFER,
     PRIORS,
     Predictor,
     UnsupportedModelError,
@@ -300,12 +301,16 @@ def test_buffer_and_history() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def test_bias_direction() -> None:
     print("\nbias direction")
-    # Accuracy here is asymmetric: under-predicting lets a request through that should
-    # have been blocked, while over-predicting holds budget released at CAPTURE seconds
-    # later. So we aim high rather than accurate-on-average.
-    unbiased = Predictor(buffer=1.0).predict(PROMPT, MODEL).predicted_output_tokens
-    biased = predict(PROMPT, MODEL).predicted_output_tokens
-    check("default predictor over-predicts", biased > unbiased, f"{biased} vs {unbiased}")
+    # Safety now lives on the BOUND, not on a buffer applied to the forecast. Keeping
+    # both double-corrected: the buffer and the history factor are each fitted as
+    # actual/scope, so applying both computed scope x (actual/scope)^2. A prequential
+    # run caught that as median error rising 77% -> 204% while the loop "learned".
+    r = predict(PROMPT, MODEL)
+    check("forecast carries no safety buffer", DEFAULT_BUFFER == 1.0)
+    check("the bound is what guarantees safety",
+          r.bound_output_tokens >= r.predicted_output_tokens)
+    check("a set max_tokens makes the bound exact",
+          predict(PROMPT, MODEL, max_tokens=40).bound_output_tokens == 40)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
