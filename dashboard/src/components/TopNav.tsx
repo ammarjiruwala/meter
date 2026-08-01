@@ -43,10 +43,15 @@ export function TopNav() {
           Fixed takes the element out of flow unconditionally; the spacer below gives
           back the height it no longer occupies.
 
-          Translucency needs the blur to stay legible: over a table row a plain alpha
-          fill would let the row read straight through the labels. backdrop-blur plus
-          saturate keeps the surface reading as a surface. */}
-      <nav className="fixed left-1/2 top-[16px] z-50 w-[calc(100%-32px)] max-w-[1200px] -translate-x-1/2 rounded-[59px] bg-[rgba(8,8,8,0.62)] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset] backdrop-blur-[20px] backdrop-saturate-150">
+          Genuinely translucent: a light 32% scrim over an 8px blur, so rows passing
+          underneath stay recognisable as rows rather than dissolving into frosted
+          grey. The two numbers trade against each other — more alpha or more blur
+          buys label legibility and costs exactly the see-through quality that is the
+          point of the bar. This is deliberately near the transparent end of that
+          trade; the labels survive because the page beneath is near-black and its
+          text is small enough that 8px spreads it well below the glyph weight of the
+          nav's own labels. */}
+      <nav className="fixed left-1/2 top-[16px] z-50 w-[calc(100%-32px)] max-w-[1200px] -translate-x-1/2 rounded-[59px] bg-[rgba(8,8,8,0.32)] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset] backdrop-blur-[8px] backdrop-saturate-150">
         <div className="flex h-[64px] items-center justify-between px-[24px]">
         <a href="#top" className="flex items-center gap-[10px] text-paper">
           {/* Angular geometric mark — a gauge sweep with its needle. */}
