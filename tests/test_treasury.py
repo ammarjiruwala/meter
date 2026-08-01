@@ -930,6 +930,209 @@ def test_routes_present() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+def test_rate_limit_trip() -> None:
+    """PROPOSALS.md C3 — a spent allowance stops the loop instead of being retried."""
+    print("\nrate limiting (C3)")
+
+    async def exhausted_charge(*a, **k):
+        return {"_ok": False, "_http_status": 429, "_error": "TRIES_EXHAUSTED",
+                "_exhausted": True, "_rate_limited": True, "_response_id": "resp_429",
+                "transactionId": None}
+
+    async def throttled_charge(*a, **k):
+        return {"_ok": False, "_http_status": 429, "_error": "RATE_LIMITED",
+                "_rate_limited": True, "_response_id": "resp_430",
+                "transactionId": None}
+
+    real_charge = topup.charge_mandate
+    real_dry = config.TREASURER_DRY_RUN
+    try:
+        config.TREASURER_DRY_RUN = False
+        topup.config.TREASURER_DRY_RUN = False
+        mandate("rl", "mdt_rl")
+        seed("rl", 4.0)
+        wid = db.ensure_wallet("rl", "openai")
+
+        treasurer._tripped_until = 0.0
+        topup.charge_mandate = exhausted_charge
+        out = asyncio.run(topup.execute_topup(project_id="rl", amount_usd=5.0))
+        check("an exhausted allowance is refused", out["ok"] is False, str(out))
+        check("and is reported as rate limiting, not a decline",
+              out["reason"] == "rate_limited", str(out))
+        check("with the exhausted flag set so the loop can trip",
+              out.get("exhausted") is True, str(out))
+
+        # A 429 is a definite answer — it did not happen — so unlike a timeout the event
+        # must settle rather than stay pending. A pending row would be resumed forever.
+        ev = db.recent_events(wid, limit=1)[0]
+        check("the event settles failed, not pending", ev["status"] == "failed",
+              str(ev["status"]))
+
+        # The trip itself: one exhausted outcome must stop the loop acting again.
+        treasurer._tripped_until = 0.0
+        results = asyncio.run(treasurer.tick())
+        check("the tick that hit the limit acted", any(r.get("acted") for r in results),
+              str(results))
+        check("the treasurer is now tripped", treasurer.trip_state()["tripped"] is True)
+
+        again = asyncio.run(treasurer.tick())
+        check("a tripped treasurer does not charge again",
+              all(not r.get("acted") for r in again), str(again))
+        check("and says how long it is backed off for",
+              again[0].get("cooldown_remaining_s", 0) > 0, str(again))
+
+        # An ordinary 429 trips too — the allowance may not be spent, but hammering a
+        # throttled rail every TREASURER_INTERVAL_S is what turns it into a dead one.
+        treasurer._tripped_until = 0.0
+        topup.charge_mandate = throttled_charge
+        out2 = asyncio.run(topup.execute_topup(project_id="rl", amount_usd=5.0))
+        check("a plain 429 is also reported as rate limiting",
+              out2["reason"] == "rate_limited", str(out2))
+        check("but is not marked exhausted", out2.get("exhausted") is False, str(out2))
+    finally:
+        topup.charge_mandate = real_charge
+        config.TREASURER_DRY_RUN = real_dry
+        topup.config.TREASURER_DRY_RUN = real_dry
+        treasurer._tripped_until = 0.0
+
+
+def test_assess_creates_nothing() -> None:
+    """PROPOSALS.md M5 — a read-only endpoint must not poison the demo seed."""
+    print("\nassess is read-only (M5)")
+
+    before = {w["id"] for w in db.list_wallets()}
+    decision = treasurer.assess("never-seen-project", "openai")
+    after = {w["id"] for w in db.list_wallets()}
+
+    check("assess creates no wallet for an unknown project", before == after,
+          str(after - before))
+    check("and still reports a balance of zero", decision["balance_usd"] == 0.0,
+          str(decision["balance_usd"]))
+    check("and still recommends a top-up on the floor trigger",
+          decision["should_topup"] is True and decision["trigger"] == "floor",
+          str(decision))
+
+    # The regression this exists for, end to end: assess first, THEN seed. Before the fix
+    # assess inserted the wallet at $0.00 and the seed silently no-opped, so the demo's
+    # "$4.00, about to run dry" state rendered as $0.00.
+    treasurer.assess("seed-order", "openai")
+    wid = db.ensure_wallet("seed-order", "openai", 4.00)
+    check("seeding after an assess still applies the balance",
+          (db.get_wallet(wid) or {})["balance_usd"] == 4.00,
+          str((db.get_wallet(wid) or {}).get("balance_usd")))
+
+    check("wallet_id_for derives an id without writing",
+          db.wallet_id_for("no-such", "openai") == "wal_no-such_openai"
+          and not any(w["id"] == "wal_no-such_openai" for w in db.list_wallets()))
+
+
+
+def test_prava_backoff() -> None:
+    """C3 transport rules: reads retry with backoff, writes never do."""
+    print("\nprava 429 backoff (C3)")
+
+    class FakeResponse:
+        def __init__(self, status, body=b'{"error":{"code":"RATE_LIMITED"}}', headers=None):
+            self.status_code = status
+            self._body = body
+            self.headers = headers or {}
+            self.text = body.decode()
+
+        def json(self):
+            import json as _j
+            return _j.loads(self._body)
+
+    calls = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, method, url, **k):
+            calls["n"] += 1
+            return FakeResponse(429)
+
+    real_client, real_sleep = prava.httpx.AsyncClient, prava.asyncio.sleep
+    real_live = prava.config.PRAVA_LIVE_MODE
+    slept: list[float] = []
+
+    async def no_sleep(s):
+        slept.append(s)
+
+    try:
+        prava.config.PRAVA_LIVE_MODE = True
+        prava.httpx.AsyncClient = FakeClient
+        prava.asyncio.sleep = no_sleep
+
+        calls["n"] = 0
+        slept.clear()
+        out = asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("a read retries after a 429", calls["n"] == 1 + prava._READ_RETRIES,
+              f"{calls['n']} attempts")
+        check("with exponential backoff between attempts", slept == [1.0, 2.0], str(slept))
+        check("and reports the rate limit to the caller", out.get("_rate_limited") is True,
+              str(out))
+
+        # The rule that matters for money: a charge is never re-POSTed from in here. The
+        # safe way to resume one is topup's pending-event path with the original
+        # idempotency key, not a second attempt hidden inside the transport helper.
+        calls["n"] = 0
+        slept.clear()
+        asyncio.run(prava._request("POST", "/v1/mandates/m/charge", {"amount": "1.00"}))
+        check("a write is never retried", calls["n"] == 1, f"{calls['n']} attempts")
+        check("and never sleeps", slept == [], str(slept))
+
+        # Exhaustion is not a "slow down", it is "stop". Retrying cannot refill it.
+        class ExhaustedClient(FakeClient):
+            async def request(self, method, url, **k):
+                calls["n"] += 1
+                return FakeResponse(429, b'{"error":{"code":"TRIES_EXHAUSTED"}}')
+
+        prava.httpx.AsyncClient = ExhaustedClient
+        calls["n"] = 0
+        out = asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("an exhausted allowance is not retried even on a read", calls["n"] == 1,
+              f"{calls['n']} attempts")
+        check("and is flagged distinctly from an ordinary 429",
+              out.get("_exhausted") is True, str(out))
+
+        # Retry-After is honoured when present, and bounded so a bad value cannot wedge
+        # the loop for hours.
+        class RetryAfterClient(FakeClient):
+            async def request(self, method, url, **k):
+                calls["n"] += 1
+                return FakeResponse(429, headers={"retry-after": "3"})
+
+        prava.httpx.AsyncClient = RetryAfterClient
+        calls["n"] = 0
+        slept.clear()
+        asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("Retry-After is honoured over the backoff schedule", slept == [3.0, 3.0],
+              str(slept))
+
+        class SillyRetryAfter(FakeClient):
+            async def request(self, method, url, **k):
+                calls["n"] += 1
+                return FakeResponse(429, headers={"retry-after": "99999"})
+
+        prava.httpx.AsyncClient = SillyRetryAfter
+        slept.clear()
+        asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("an absurd Retry-After is clamped, not obeyed",
+              slept and max(slept) <= prava._BACKOFF_MAX_S, str(slept))
+    finally:
+        prava.httpx.AsyncClient = real_client
+        prava.asyncio.sleep = real_sleep
+        prava.config.PRAVA_LIVE_MODE = real_live
+
+
 def main() -> int:
     global CLIENT
     with TestClient(app) as client:
@@ -947,6 +1150,9 @@ def main() -> int:
             test_failure_handling,
             test_mandates_route_degrades,
             test_loop_resilience,
+            test_prava_backoff,
+            test_rate_limit_trip,
+            test_assess_creates_nothing,
             test_alert_noise,
             test_credential_preflight,
             test_pending_mandates,

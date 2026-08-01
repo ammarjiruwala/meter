@@ -14,6 +14,7 @@ Owner: Shivam (Payments & Agent).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -28,7 +29,7 @@ log = logging.getLogger("meter.treasury")
 _CRED = "credentials"
 
 
-def _refuse(
+async def _refuse(
     reason: str, *, wallet_id: str | None = None, amount_usd: float = 0.0, **extra: Any
 ) -> dict[str, Any]:
     log.warning("top-up refused: %s %s", reason, extra or "")
@@ -40,8 +41,8 @@ def _refuse(
     # their event_id and skip this.
     if wallet_id is not None and "event_id" not in extra:
         try:
-            event = db.open_event(wallet_id, amount_usd)
-            db.settle_event(event["id"], "refused", error=reason)
+            event = await asyncio.to_thread(db.open_event, wallet_id, amount_usd)
+            await asyncio.to_thread(db.settle_event, event["id"], "refused", error=reason)
             extra = {**extra, "event_id": event["id"]}
         except Exception:
             # Recording the refusal is a convenience, never a second failure mode.
@@ -58,12 +59,12 @@ async def execute_topup(
 ) -> dict[str, Any]:
     """Run one top-up. Safe to retry — see the pending-event handling below."""
     provider = provider or config.TREASURER_PROVIDER
-    wallet_id = db.ensure_wallet(project_id, provider)
+    wallet_id = await asyncio.to_thread(db.ensure_wallet, project_id, provider)
 
     # ── Rails, checked in order and all before any money moves ───────────────
-    mandate = db.chargeable_mandate(project_id, provider)
+    mandate = await asyncio.to_thread(db.chargeable_mandate, project_id, provider)
     if not mandate:
-        return _refuse(
+        return await _refuse(
             "no_chargeable_mandate",
             project_id=project_id,
             wallet_id=wallet_id,
@@ -73,7 +74,7 @@ async def execute_topup(
         )
 
     if amount_usd > mandate["max_per_txn_usd"]:
-        return _refuse(
+        return await _refuse(
             "over_per_txn_cap",
             wallet_id=wallet_id,
             amount_usd=amount_usd,
@@ -81,9 +82,9 @@ async def execute_topup(
             requested=amount_usd,
         )
 
-    spent = db.settled_total_since(wallet_id, 24 * 3600)
+    spent = await asyncio.to_thread(db.settled_total_since, wallet_id, 24 * 3600)
     if spent + amount_usd > mandate["max_daily_usd"]:
-        return _refuse(
+        return await _refuse(
             "over_daily_cap",
             wallet_id=wallet_id,
             amount_usd=amount_usd,
@@ -92,9 +93,9 @@ async def execute_topup(
             requested=amount_usd,
         )
 
-    since = db.seconds_since_last_attempt(wallet_id)
+    since = await asyncio.to_thread(db.seconds_since_last_attempt, wallet_id)
     if since is not None and since < mandate["cooldown_s"]:
-        return _refuse(
+        return await _refuse(
             "cooldown",
             wallet_id=wallet_id,
             amount_usd=amount_usd,
@@ -108,7 +109,7 @@ async def execute_topup(
     # request that violates configured policy says so, rather than blaming the rail.
     remaining = mandate.get("remaining_usd")
     if remaining is not None and amount_usd > remaining:
-        return _refuse("insufficient_mandate_headroom", remaining_usd=remaining,
+        return await _refuse("insufficient_mandate_headroom", remaining_usd=remaining,
                        requested=amount_usd,
                        mandate=mandate.get("prava_mandate_id"),
                        hint="charge less, or create a new mandate")
@@ -117,7 +118,7 @@ async def execute_topup(
     # Resume an unfinished attempt rather than opening a second one. A new row would mint
     # a new idempotency key, and Prava would read the retry as a separate charge — the
     # precise failure the key exists to prevent.
-    event = db.pending_event(wallet_id)
+    event = await asyncio.to_thread(db.pending_event, wallet_id)
     if event:
         log.info("resuming pending treasury event %s", event["idempotency_key"])
         event = {
@@ -127,12 +128,13 @@ async def execute_topup(
         }
         amount_usd = event["amount_usd"]
     else:
-        event = db.open_event(
-            wallet_id, amount_usd, mandate_id=mandate["id"], decision_inputs=decision_inputs
+        event = await asyncio.to_thread(
+            db.open_event, wallet_id, amount_usd,
+            mandate_id=mandate["id"], decision_inputs=decision_inputs,
         )
 
     if config.TREASURER_DRY_RUN:
-        db.settle_event(event["id"], "dry_run")
+        await asyncio.to_thread(db.settle_event, event["id"], "dry_run")
         return {
             "ok": False,
             "reason": "dry_run",
@@ -155,7 +157,7 @@ async def execute_topup(
     # taking the money twice. Settling it `failed` here would throw away the only handle
     # we have on a charge that might exist.
     if charge.get("_transport"):
-        return _refuse("prava_unreachable", error=charge.get("_error"),
+        return await _refuse("prava_unreachable", error=charge.get("_error"),
                        detail=charge.get("_detail"), event_id=event["id"],
                        hint="event left pending on purpose; retrying resumes it with "
                             "the same idempotency key")
@@ -168,9 +170,19 @@ async def execute_topup(
         # Response id goes in the error column: it is what Prava support traces on, and
         # discarding it at the exact moment something broke is a false economy.
         detail = f"{error} (response-id {charge.get('_response_id')})"
-        db.settle_event(event["id"], "failed", prava_txn_id=txn_id, error=detail)
-        return _refuse("charge_declined", error=error, event_id=event["id"],
-                       response_id=charge.get("_response_id"))
+        # Surfaced so the Treasurer can trip rather than retry into the same wall (C3).
+        # A 429 is a definite "not accepted", so the event still settles `failed` — it is
+        # the *loop* that must back off, not this row that must stay ambiguous.
+        rate_limited = bool(charge.get("_rate_limited"))
+        exhausted = bool(charge.get("_exhausted"))
+        await asyncio.to_thread(
+            db.settle_event, event["id"], "failed", prava_txn_id=txn_id, error=detail
+        )
+        return await _refuse("rate_limited" if (rate_limited or exhausted)
+                             else "charge_declined",
+                             error=error, event_id=event["id"],
+                             rate_limited=rate_limited, exhausted=exhausted,
+                             response_id=charge.get("_response_id"))
 
     credentials = charge.get(_CRED) or {}
     if charge.get("simulated"):
@@ -185,13 +197,17 @@ async def execute_topup(
         }
 
     if not credentials.get("token"):
-        db.settle_event(
-            event["id"], "failed", prava_txn_id=txn_id, error="charge returned no credentials"
+        await asyncio.to_thread(
+            db.settle_event, event["id"], "failed", prava_txn_id=txn_id,
+            error="charge returned no credentials",
         )
-        return _refuse("no_credentials", event_id=event["id"], charge=charge)
+        return await _refuse("no_credentials", event_id=event["id"], charge=charge)
 
     # ── Pay the provider ─────────────────────────────────────────────────────
-    billing = process_payment(
+    # `process_payment` credits the wallet, so it is blocking SQLite too — and it sits
+    # between two awaits, which makes it easy to miss.
+    billing = await asyncio.to_thread(
+        process_payment,
         BillingRequest(
             token=credentials["token"],
             dynamic_cvv=credentials.get("dynamicCvv", ""),
@@ -216,13 +232,14 @@ async def execute_topup(
         )
 
     if not billing.accepted:
-        db.settle_event(
+        await asyncio.to_thread(
+            db.settle_event,
             event["id"],
             "failed",
             prava_txn_id=txn_id,
             error=f"provider declined: {billing.decline_reason}",
         )
-        return _refuse(
+        return await _refuse(
             "provider_declined", reason_code=billing.decline_reason, event_id=event["id"]
         )
 
@@ -237,7 +254,9 @@ async def execute_topup(
                         f"(response-id {settlement.get('_response_id')})")
         log.warning("%s — txn %s", settle_error, txn_id)
 
-    db.settle_event(event["id"], "settled", prava_txn_id=txn_id, error=settle_error)
+    await asyncio.to_thread(
+        db.settle_event, event["id"], "settled", prava_txn_id=txn_id, error=settle_error
+    )
     log.info(
         "topped up %s %s by $%.2f -> $%.2f",
         project_id,
