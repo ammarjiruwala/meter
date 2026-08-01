@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from predictor import (  # noqa: E402
+    DEFAULT_BUFFER,
     PRIORS,
     Predictor,
     UnsupportedModelError,
@@ -252,29 +253,64 @@ def test_buffer_and_history() -> None:
     fitted = p.load_buffers({"code": [(100.0, 100 + i * 10) for i in range(30)]})
     check("fits with enough rows", "code" in fitted)
 
-    # Step 5 -- shrinkage. A factor from 2 observations must barely move; one from
-    # 200 should apply nearly in full.
-    weak = p.load_history({("proj",): (3.0, 2)})[("proj",)]
-    strong = p.load_history({("proj",): (3.0, 200)})[("proj",)]
-    check("small n is shrunk toward 1.0", weak < 1.3, f"got {weak:.2f}")
-    check("large n applies nearly in full", strong > 2.7, f"got {strong:.2f}")
+    # Step 5 -- a key below MIN_ROWS_FOR_KEY is dropped entirely rather than applied
+    # weakly, so the ladder falls through to a coarser key that actually has support.
+    check("thin key is skipped, not shrunk", p.load_history({("proj",): (3.0, 2)}) == {})
+    barely = p.load_history({("proj",): (3.0, 20)})[("proj",)]
+    strong = p.load_history({("proj",): (3.0, 500)})[("proj",)]
+    check("shrinkage still applies above the threshold", barely < strong, f"{barely:.2f} vs {strong:.2f}")
+    check("factor is clamped at 3.0", p.load_history({("p",): (99.0, 500)})[("p",)] == 3.0)
+    check("factor is clamped at 0.5", p.load_history({("p",): (0.01, 500)})[("p",)] == 0.5)
 
-    # Most specific key wins.
-    p.load_history({("proj", "feat", "ammar"): (2.0, 500), ("proj",): (0.5, 500)})
-    specific = p.predict("hi", MODEL, project="proj", feature="feat", actor="ammar")
-    general = p.predict("hi", MODEL, project="proj", feature="other", actor="x")
-    check("most specific key wins", specific.history_factor > general.history_factor)
+    # The ladder: attribution rungs outrank the generic (bucket, model) rung, because
+    # one team's prompting style predicts their next request better than a pattern
+    # averaged over everyone's traffic -- even when the generic rung has more rows.
+    p.load_history({("proj", "feat", "ammar"): (2.5, 200),
+                    ("proj",): (0.7, 300),
+                    ("code", MODEL): (1.8, 100)})
+    a = p.predict("Write a Python function.", MODEL, project="proj", feature="feat", actor="ammar")
+    b = p.predict("Write a Python function.", MODEL, project="proj", feature="zzz", actor="q")
+    c = p.predict("Write a Python function.", MODEL, project="unknown", feature="x", actor="y")
+    check("most specific rung wins", a.history_factor > 2.0, f"{a.history_factor:.2f}")
+    check("(project,) outranks (bucket, model)", b.history_factor < 1.0, f"{b.history_factor:.2f}")
+    check("unknown project falls to (bucket, model)", 1.0 < c.history_factor < 2.0,
+          f"{c.history_factor:.2f}")
+
+    # Step 6 -- the bound. max_tokens is exact; otherwise a learned per-bucket p95
+    # beats the model maximum, which would reserve ~$0.04 of gpt-4o output on every
+    # request and exhaust a small project's ceiling in a couple of dozen calls.
+    q = Predictor()
+    check("bound defaults to the model maximum", q.predict("hi", MODEL).bound_output_tokens == 4096)
+    q.load_bounds({q.predict("hi", MODEL).bucket: [200] * 25})
+    check("learned bound is tighter than the model maximum",
+          q.predict("hi", MODEL).bound_output_tokens < 4096)
+    check("too few rows keeps the model maximum", q.load_bounds({"code": [200] * 5}) == {})
+
+    # scope_tokens is the fixed baseline the learner fits against, so it must be the
+    # RAW heuristic -- unmoved by the buffer, the history factor, or the clamp.
+    r = Predictor(buffer=1.0)
+    base = r.predict("Explain how DNS works.", MODEL).scope_tokens
+    r.load_history({("p",): (2.0, 500)})
+    with_hist = r.predict("Explain how DNS works.", MODEL, project="p")
+    check("scope is unchanged by the history factor", with_hist.scope_tokens == base)
+    check("but the prediction did move", with_hist.predicted_output_tokens != base)
+    capped = r.predict("Explain how DNS works.", MODEL, max_tokens=5)
+    check("scope is unchanged by the clamp", capped.scope_tokens == base)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 def test_bias_direction() -> None:
     print("\nbias direction")
-    # Accuracy here is asymmetric: under-predicting lets a request through that should
-    # have been blocked, while over-predicting holds budget released at CAPTURE seconds
-    # later. So we aim high rather than accurate-on-average.
-    unbiased = Predictor(buffer=1.0).predict(PROMPT, MODEL).predicted_output_tokens
-    biased = predict(PROMPT, MODEL).predicted_output_tokens
-    check("default predictor over-predicts", biased > unbiased, f"{biased} vs {unbiased}")
+    # Safety now lives on the BOUND, not on a buffer applied to the forecast. Keeping
+    # both double-corrected: the buffer and the history factor are each fitted as
+    # actual/scope, so applying both computed scope x (actual/scope)^2. A prequential
+    # run caught that as median error rising 77% -> 204% while the loop "learned".
+    r = predict(PROMPT, MODEL)
+    check("forecast carries no safety buffer", DEFAULT_BUFFER == 1.0)
+    check("the bound is what guarantees safety",
+          r.bound_output_tokens >= r.predicted_output_tokens)
+    check("a set max_tokens makes the bound exact",
+          predict(PROMPT, MODEL, max_tokens=40).bound_output_tokens == 40)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,8 +318,15 @@ def test_pricing_integration() -> None:
     print("\npricing")
     cheap = predict("hi", MODEL)
     dear = predict("hi " * 1000, MODEL)
-    check("cost is positive and monotonic in input size",
-          0 < cheap.predicted_cost_usd < dear.predicted_cost_usd)
+    check("cost is positive", cheap.predicted_cost_usd > 0 and dear.predicted_cost_usd > 0)
+    check("input tokens are monotonic", cheap.input_tokens < dear.input_tokens)
+    # Total cost is deliberately NOT monotonic in input size. A long pasted prompt
+    # predicts a SHORTER answer -- it reads as a targeted edit rather than a
+    # generation request -- so more input can mean less output and a lower total.
+    # That inversion is the instruction-ratio signal working, not a bug.
+    check("longer input can predict shorter output",
+          dear.predicted_output_tokens < cheap.predicted_output_tokens,
+          f"{dear.predicted_output_tokens} vs {cheap.predicted_output_tokens}")
     check("pricing version is recorded", bool(cheap.pricing_version))
 
     # Priced through proxy/pricing.py against pricing/{version}.yaml, so a prediction and

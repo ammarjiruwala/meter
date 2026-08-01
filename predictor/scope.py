@@ -17,6 +17,7 @@ asking took.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 Messages = List[Dict[str, str]]
@@ -101,6 +102,43 @@ ATOMIC_TOKENS = 5
 BASE_SCOPE = 150.0
 SCOPE_CAP = 1500.0
 
+
+@dataclass
+class ScopeConfig:
+    """Every tunable constant, in one place.
+
+    They live here rather than as module literals so `predictor/optimize.py` can
+    search over them without rewriting source, and so a fitted configuration can be
+    serialised, diffed, reviewed and rolled back. DESIGN.md §10 records which of
+    these were measured and which are guesses -- almost all are guesses, which is
+    exactly why they need to be searchable.
+    """
+
+    base_scope: float = BASE_SCOPE
+    scope_cap: float = SCOPE_CAP
+    task_summary: float = 250.0
+    task_code: float = 500.0
+    task_extract: float = 100.0
+    task_search: float = 400.0
+    high_intensity: float = 1.5
+    low_intensity: float = 0.6
+    cot: float = 3.0
+    terse: float = 0.4
+    verbose: float = 2.0
+    instruction_low: float = 0.5
+    instruction_high: float = 1.5
+    instruction_pivot: float = 200.0
+    tokens_per_sentence: float = 25.0
+    tokens_per_word: float = 1.33
+    imperative: float = 1.4
+
+    def replace(self, **kw) -> "ScopeConfig":
+        from dataclasses import replace as _r
+        return _r(self, **kw)
+
+
+DEFAULT_CONFIG = ScopeConfig()
+
 TASK_SCOPES: Dict[str, Tuple[float, Tuple[str, ...]]] = {
     "summary": (250.0, (
         "summarize", "summarise", "summary", "tldr", "tl;dr", "condense",
@@ -138,6 +176,16 @@ LOW_INTENSITY = (
 HIGH_INTENSITY_SCALE = 1.5
 LOW_INTENSITY_SCALE = 0.6
 
+# The strongest single predictor found on 522 real WildChat prompts:
+# corr(imperative_start, output_tokens) = +0.378, versus +0.28 for anything else we
+# tested including input length. A prompt that OPENS with a generation verb is asking
+# for something to be produced; one that opens with a question usually wants an answer.
+# Cheap, and it fires on real phrasing rather than on keywords we invented.
+IMPERATIVE_START = (
+    "write", "create", "make", "generate", "give", "list", "explain", "describe",
+    "compose", "draft", "design", "build", "produce", "summarize", "translate",
+)
+
 COT_CUES = (
     "think step by step", "step-by-step", "step by step", "reason through",
     "reasoning", "show your work", "justify", "walk me through", "chain of thought",
@@ -174,6 +222,14 @@ _COT_RE = _compile(COT_CUES)
 _TERSE_RE = _compile(_TERSE)
 _VERBOSE_RE = _compile(_VERBOSE)
 _ATOMIC_RE = _compile(_ATOMIC)
+_IMPERATIVE_RE = re.compile(r"^\s*(?:please\s+)?(?:" +
+                            "|".join(IMPERATIVE_START) + r")\b", re.IGNORECASE)
+
+
+def imperative_scale(text: str, cfg: "ScopeConfig" = None) -> float:
+    """Does the prompt OPEN with a generation verb? See IMPERATIVE_START."""
+    cfg = cfg or DEFAULT_CONFIG
+    return cfg.imperative if _IMPERATIVE_RE.match(text) else 1.0
 
 
 def _text_of(payload: Payload) -> Tuple[str, str]:
@@ -192,8 +248,9 @@ def _text_of(payload: Payload) -> Tuple[str, str]:
     return " ".join(parts).lower(), last.lower()
 
 
-def parse_length_instruction(text: str) -> Optional[Tuple[float, str]]:
+def parse_length_instruction(text: str, cfg: "ScopeConfig" = None) -> Optional[Tuple[float, str]]:
     """Step 2. Returns (tokens, rule) when the prompt states a length, else None."""
+    cfg = cfg or DEFAULT_CONFIG
     if _ATOMIC_RE.search(text):
         return float(ATOMIC_TOKENS), "atomic"
 
@@ -202,7 +259,9 @@ def parse_length_instruction(text: str) -> Optional[Tuple[float, str]]:
         raw_qty, unit = match.group(1), match.group(2).lower()
         qty = float(raw_qty) if raw_qty.isdigit() else float(_NUMBER_WORDS.get(raw_qty, 0))
         if qty > 0:
-            tokens = qty * _UNIT_TOKENS[unit]
+            per_unit = {"sentence": cfg.tokens_per_sentence,
+                        "word": cfg.tokens_per_word}.get(unit, _UNIT_TOKENS[unit])
+            tokens = qty * per_unit
             # "at least N" is a floor: the model will produce N or more, so treating
             # N as the estimate guarantees under-prediction. Inflate instead.
             window = text[max(0, match.start() - 30):match.end()]
@@ -212,44 +271,50 @@ def parse_length_instruction(text: str) -> Optional[Tuple[float, str]]:
     return None
 
 
-def qualitative_scale(text: str) -> float:
+def qualitative_scale(text: str, cfg: "ScopeConfig" = None) -> float:
     """Terse/verbose cues, applied as a multiplier rather than an absolute count."""
+    cfg = cfg or DEFAULT_CONFIG
     if _TERSE_RE.search(text):
-        return TERSE_SCALE
+        return cfg.terse
     if _VERBOSE_RE.search(text):
-        return VERBOSE_SCALE
+        return cfg.verbose
     return 1.0
 
 
-def task_scope(text: str) -> Tuple[float, List[str]]:
+def task_scope(text: str, cfg: "ScopeConfig" = None) -> Tuple[float, List[str]]:
     """Step 3A. Base plus every detected task, capped before multipliers apply."""
-    scope = BASE_SCOPE
+    cfg = cfg or DEFAULT_CONFIG
+    weights = {"summary": cfg.task_summary, "code": cfg.task_code,
+               "extract": cfg.task_extract, "search": cfg.task_search}
+    scope = cfg.base_scope
     detected: List[str] = []
-    for name, (weight, pattern) in _TASK_PATTERNS.items():
+    for name, (_, pattern) in _TASK_PATTERNS.items():
         if pattern.search(text):
-            scope += weight
+            scope += weights.get(name, 0.0)
             detected.append(name)
-    return min(scope, SCOPE_CAP), detected
+    return min(scope, cfg.scope_cap), detected
 
 
-def verb_scale(text: str) -> float:
+def verb_scale(text: str, cfg: "ScopeConfig" = None) -> float:
     """Step 3B. 'Change one button' versus 'change the entire website'."""
+    cfg = cfg or DEFAULT_CONFIG
     if _HIGH_RE.search(text):
-        return HIGH_INTENSITY_SCALE
+        return cfg.high_intensity
     if _LOW_RE.search(text):
-        return LOW_INTENSITY_SCALE
+        return cfg.low_intensity
     return 1.0
 
 
-def cot_scale(text: str, model: str = "") -> float:
+def cot_scale(text: str, model: str = "", cfg: "ScopeConfig" = None) -> float:
     """Step 3C. Reasoning dumps intermediate thought into billed output tokens."""
+    cfg = cfg or DEFAULT_CONFIG
     lowered = (model or "").lower()
     if any(lowered.startswith(p) for p in REASONING_MODEL_PREFIXES):
-        return REASONING_MODEL_SCALE
-    return COT_SCALE if _COT_RE.search(text) else 1.0
+        return cfg.cot
+    return cfg.cot if _COT_RE.search(text) else 1.0
 
 
-def instruction_scale(last_message: str) -> float:
+def instruction_scale(last_message: str, cfg: "ScopeConfig" = None) -> float:
     """Step 3D. A message that is mostly pasted material wants a targeted edit; a
     message that is mostly instruction wants generation.
 
@@ -260,28 +325,32 @@ def instruction_scale(last_message: str) -> float:
     boundaries (84% vs 87% MAPE at n=15), so the simple form ships. Known failure:
     a long-but-genuine instruction is penalised as though it were payload.
     """
+    cfg = cfg or DEFAULT_CONFIG
     length = len(last_message)
     if length == 0:
         return 1.0
-    ratio = min(200, length) / length
-    return max(0.5, min(1.5, ratio * 2.0))
+    ratio = min(cfg.instruction_pivot, length) / length
+    return max(cfg.instruction_low, min(cfg.instruction_high, ratio * 2.0))
 
 
-def estimate(payload: Payload, model: str = "") -> Tuple[float, str, List[str]]:
+def estimate(payload: Payload, model: str = "",
+             cfg: "ScopeConfig" = None) -> Tuple[float, str, List[str]]:
     """Steps 2-3 combined. Returns (scope_tokens, rule, detected_tasks).
 
     Does NOT apply the safety buffer, the history correction, or the max_tokens
     clamp -- those are steps 4-6 and live in engine.py.
     """
+    cfg = cfg or DEFAULT_CONFIG
     full, last = _text_of(payload)
 
-    explicit = parse_length_instruction(full)
+    explicit = parse_length_instruction(full, cfg)
     if explicit is not None:
         return explicit[0], explicit[1], []
 
-    scope, detected = task_scope(full)
-    scope *= verb_scale(full)
-    scope *= cot_scale(full, model)
-    scope *= qualitative_scale(full)
-    scope *= instruction_scale(last)
+    scope, detected = task_scope(full, cfg)
+    scope *= verb_scale(full, cfg)
+    scope *= cot_scale(full, model, cfg)
+    scope *= qualitative_scale(full, cfg)
+    scope *= instruction_scale(last, cfg)
+    scope *= imperative_scale(last, cfg)
     return scope, "stacked", detected

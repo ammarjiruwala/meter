@@ -21,3 +21,9 @@ meter.db-shm
 
 # graphify skill output cache
 /graphify-out/
+
+# WildChat splits ARE committed (~1MB, ODC-BY). Regenerating them means paging the
+# HuggingFace rows API, which rate-limited us at 747 rows, so a lost split is hours
+# of waiting rather than a re-run. Committing also pins the exact train/val/test
+# partition, which is what makes accuracy numbers comparable across sessions.
+# The same applies to data/templated/ — those are 200 calls of real money.
