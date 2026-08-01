@@ -71,6 +71,38 @@ export function isLedgerAvailable(): boolean {
   return conn !== null && tableExists(conn, "requests");
 }
 
+export type SpendSummary = {
+  total_cost_usd: number;
+  request_count: number;
+  actor_count: number;
+  provider_count: number;
+  last_ts: string | null;
+};
+
+/** The headline figure. A single number is a stat, not a chart. */
+export function getSpendSummary(): SpendSummary {
+  const empty: SpendSummary = {
+    total_cost_usd: 0,
+    request_count: 0,
+    actor_count: 0,
+    provider_count: 0,
+    last_ts: null,
+  };
+  const conn = getDb();
+  if (!conn || !tableExists(conn, "requests")) return empty;
+  const row = conn
+    .prepare(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS total_cost_usd,
+              COUNT(*)                   AS request_count,
+              COUNT(DISTINCT actor)      AS actor_count,
+              COUNT(DISTINCT provider)   AS provider_count,
+              MAX(ts)                    AS last_ts
+         FROM requests`,
+    )
+    .get() as SpendSummary | undefined;
+  return row ?? empty;
+}
+
 export type WalletRow = {
   id: string;
   project_id: string;

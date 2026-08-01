@@ -1,47 +1,78 @@
 import type { SpendRow } from "@/lib/db";
 import { formatUsd } from "@/lib/format";
+import { Panel, SectionLabel } from "@/components/ui/primitives";
+
+const TH = "t-readout-sm px-[16px] py-[14px] uppercase text-ash font-normal";
+const TD = "px-[16px] py-[12px] align-middle";
 
 export function TeamSpendTable({ rows }: { rows: SpendRow[] }) {
+  // Share-of-total is what this table is for, and length reads faster than a
+  // column of figures. The rule stays neutral: the blue is spoken for by the
+  // action, and magnitude is carried by length rather than hue.
+  const max = rows.reduce((m, r) => Math.max(m, r.total_cost_usd), 0);
+
   return (
-    <div className="rounded-lg border border-zinc-200 dark:border-zinc-800">
-      <div className="border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
-        <h2 className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-          Team Spend
-        </h2>
-      </div>
-      {rows.length === 0 ? (
-        <p className="px-4 py-6 text-sm text-zinc-500">
-          No requests logged yet. Start the proxy and send a call through it.
-        </p>
-      ) : (
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-zinc-500">
-              <th className="px-4 py-2 font-medium">Project</th>
-              <th className="px-4 py-2 font-medium">Actor</th>
-              <th className="px-4 py-2 font-medium">Feature</th>
-              <th className="px-4 py-2 font-medium">Requests</th>
-              <th className="px-4 py-2 text-right font-medium">Cost</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr
-                key={`${row.project_id}-${row.actor}-${row.feature}-${i}`}
-                className="border-t border-zinc-100 dark:border-zinc-900"
-              >
-                <td className="px-4 py-2">{row.project_id}</td>
-                <td className="px-4 py-2">{row.actor ?? "—"}</td>
-                <td className="px-4 py-2">{row.feature ?? "—"}</td>
-                <td className="px-4 py-2">{row.request_count}</td>
-                <td className="px-4 py-2 text-right tabular-nums">
-                  {formatUsd(row.total_cost_usd)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
+    <section id="spend" className="scroll-mt-[100px]">
+      <SectionLabel>Team spend</SectionLabel>
+
+      <Panel className="overflow-hidden">
+        {rows.length === 0 ? (
+          <p className="t-body p-[24px] text-ash">
+            No requests logged yet. Start the proxy and send a call through it.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="border-b border-white/10 text-left">
+                  <th className={TH}>Project</th>
+                  <th className={TH}>Actor</th>
+                  <th className={TH}>Feature</th>
+                  <th className={`${TH} text-right`}>Requests</th>
+                  <th className={`${TH} w-[200px] text-right`}>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => (
+                  <tr
+                    key={`${row.project_id}-${row.actor}-${row.feature}-${i}`}
+                    className="border-b border-white/[0.06] last:border-0 hover:bg-white/[0.03]"
+                  >
+                    <td className={`${TD} t-readout-sm text-ash`}>
+                      {row.project_id}
+                    </td>
+                    <td className={`${TD} t-body text-paper`}>
+                      {row.actor ?? "—"}
+                    </td>
+                    <td className={`${TD} t-body text-paper`}>
+                      {row.feature ?? "—"}
+                    </td>
+                    <td
+                      className={`${TD} t-readout-sm text-right tabular-nums text-ash`}
+                    >
+                      {row.request_count}
+                    </td>
+                    <td className={TD}>
+                      <div className="flex items-center justify-end gap-[16px]">
+                        <span
+                          className="h-[4px] rounded-full bg-white/25"
+                          style={{
+                            width: `${max > 0 ? Math.max(4, (row.total_cost_usd / max) * 80) : 0}px`,
+                          }}
+                          aria-hidden="true"
+                        />
+                        <span className="t-readout tabular-nums text-paper">
+                          {formatUsd(row.total_cost_usd)}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+    </section>
   );
 }

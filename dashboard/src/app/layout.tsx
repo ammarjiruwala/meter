@@ -1,20 +1,25 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Substitutes for the brief's custom faces: Inter for Diatype REKKI (geometric
+// sans, holds up under aggressive negative tracking at display sizes), IBM Plex
+// Mono for OCD-GARRI (the instrument-label register).
+const inter = Inter({
+  variable: "--font-inter",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const plexMono = IBM_Plex_Mono({
+  variable: "--font-plex-mono",
   subsets: ["latin"],
+  weight: ["400"],
 });
 
 export const metadata: Metadata = {
   title: "Meter",
-  description: "The autonomous inference treasurer — budget, analyze, and transact.",
+  description:
+    "The autonomous inference treasurer — budget, analyze, and transact.",
 };
 
 export default function RootLayout({
@@ -25,9 +30,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${inter.variable} ${plexMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col bg-obsidian">{children}</body>
     </html>
   );
 }

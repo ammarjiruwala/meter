@@ -1,26 +1,124 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* REKKI — mission-control darkroom.
+   Pitch-black canvas, a five-level surface stack, and exactly one chromatic
+   voice. Elevation is an inset white hairline, never a drop shadow. */
+@theme {
+  --color-signal-blue: #0063e1;
+  --color-obsidian: #000000;
+  --color-carbon: #040910;
+  --color-graphite: #0d0d0d;
+  --color-iron: #1f1f1f;
+  --color-steel: #2b2c2e;
+  --color-ash: #858585;
+  --color-smoke: #979797;
+  --color-fog: #8c8c8c;
+  --color-paper: #ffffff;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  /* Diatype REKKI and OCD-GARRI are custom faces; these are the substitutes the
+     brief names. Plex Mono carries OCD-GARRI's instrument-label quality — the
+     slight positive tracking is what makes it read as a readout. */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo,
+    monospace;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --radius-nav: 2px;
+  --radius-inputs: 8px;
+  --radius-cards: 16px;
+  --radius-images: 24px;
+  --radius-buttons: 59px;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-obsidian);
+  color: var(--color-ash);
+  font-family: var(--font-sans);
+  font-feature-settings: "case";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The tracking ladder is the signature: authority comes from size and negative
+   tracking, never from weight. Nothing here goes above 400 except the mono
+   labels, which are a different register entirely. */
+.t-display {
+  font-size: 86px;
+  line-height: 1;
+  letter-spacing: -0.064em;
+  font-weight: 400;
+}
+.t-heading-lg {
+  font-size: 56px;
+  line-height: 1.25;
+  letter-spacing: -0.04em;
+  font-weight: 400;
+}
+.t-heading {
+  font-size: 24px;
+  line-height: 1.33;
+  letter-spacing: -0.027em;
+  font-weight: 400;
+}
+.t-heading-sm {
+  font-size: 20px;
+  line-height: 1.33;
+  letter-spacing: -0.027em;
+  font-weight: 400;
+}
+.t-subheading {
+  font-size: 18px;
+  line-height: 1.4;
+  letter-spacing: -0.015em;
+  font-weight: 400;
+}
+.t-body {
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: -0.007em;
+  font-weight: 400;
+}
+.t-caption {
+  font-size: 12px;
+  line-height: 1.2;
+  letter-spacing: -0.005em;
+  font-weight: 400;
+}
+
+/* The utility register — instrument labels and tabular readouts. Positive
+   tracking, which is what separates it from everything above. */
+.t-readout {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.23;
+  letter-spacing: 0.033em;
+  font-weight: 400;
+}
+.t-readout-sm {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.2;
+  letter-spacing: 0.033em;
+  font-weight: 400;
+}
+
+/* Elevation. The inset hairline IS the system — no shadows anywhere. */
+.surface-card {
+  background: var(--color-graphite);
+  border-radius: var(--radius-cards);
+  box-shadow: rgba(255, 255, 255, 0.12) 0px 0px 0px 1px inset;
+}
+.surface-panel {
+  background: var(--color-carbon);
+  border-radius: var(--radius-cards);
+  box-shadow: rgba(255, 255, 255, 0.12) 0px 0px 0px 1px inset;
+}
+
+@media (max-width: 900px) {
+  .t-display {
+    font-size: 56px;
+    letter-spacing: -0.04em;
+  }
+  .t-heading-lg {
+    font-size: 36px;
+  }
 }
