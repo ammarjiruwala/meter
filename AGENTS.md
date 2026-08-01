@@ -63,19 +63,33 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                              # add provider keys
 uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
-python tests/test_proxy.py                        # ~207 checks, no framework, ~3s
-python tests/test_predictor.py                    # ~108 checks, same convention
-python tests/test_alerts.py                       # 46 checks (alerts/)
+python tests/test_proxy.py                        # 219 checks, no framework, ~3s
+python tests/test_predictor.py                    # 130 checks, same convention
+python tests/test_treasury.py                     # 159 checks (treasury/)
+python tests/test_alerts.py                       # 46 checks (alerts/), needs Python 3.10+
+ruff check .                                      # CI runs this; keep it clean
 
 cd dashboard && npm install && npm run dev        # reads ../meter.db, read-only
 npm run build && npm run lint                     # dashboard type/lint check
 ```
 
 Run the matching self-check before you commit: `test_proxy.py` for anything under
-`proxy/` or `treasury/`, `test_predictor.py` for anything under `predictor/`,
-`test_alerts.py` for anything under `alerts/`. They are plain asserts, so they need no
-pytest and no fixtures — if you add non-trivial logic, add an assertion rather than
-starting a second test system.
+`proxy/` or `treasury/`, `test_treasury.py` for `treasury/` specifically,
+`test_predictor.py` for anything under `predictor/`, `test_alerts.py` for anything under
+`alerts/`. They are plain asserts, so they need no pytest and no fixtures — if you add
+non-trivial logic, add an assertion rather than starting a second test system.
+
+Two harnesses **measure** rather than gate, and are deliberately out of CI because their
+thresholds are timing-sensitive and a shared runner would make them flaky:
+
+```bash
+python tests/bench_overhead.py                            # added latency
+python tests/load_soak.py --seconds 20 --concurrency 16   # two writers, one SQLite file
+```
+
+Run `load_soak.py` before claiming anything about concurrency. Run `bench_overhead.py`
+**three times** before quoting a latency number anywhere — single readings of it do not
+reproduce, and one that did not was briefly written into three documents.
 
 Daily spend ceilings are declared in `meter.yaml` at the repo root (see
 `meter.yaml.example`), deliberately in the repo so a limit changes by pull request. No

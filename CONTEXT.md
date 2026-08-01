@@ -99,6 +99,13 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
+*   ⚠ **Demo trap found 2026-08-01 (Shubh, debug pass) — `PROPOSALS.md` M5, open, owner Shivam.**
+    `GET /treasury/assess` is documented "reads only" but **creates a wallet at $0.00**, and
+    `POST /wallets/seed` applies its balance on creation only. So on a fresh database, anything
+    that touches `/treasury/assess` first makes the seeded "$4.00 too low" demo state silently
+    no-op to $0.00 — no error, and a successful-looking response. **Rehearse with
+    `POST /wallets/seed?reset=true`** until it is fixed. Reproduced on a clean DB.
+
 *   **Last updated:** 2026-08-01 — **Sustained-load soak built and passing; overhead numbers
     corrected (Shubh).** `tests/load_soak.py` closes the last open item in the proxy lane. It
     found three real bugs in the test harnesses. The benchmark's fake upstream had been

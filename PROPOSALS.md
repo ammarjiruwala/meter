@@ -837,3 +837,48 @@ cache-hit accounting (Helicone), pre-aggregated daily spend rollups (LiteLLM), m
 error encoding as SSE `finish_reason: "error"` (OpenRouter). All are real industry features;
 none are needed for the 48-hour demo, and a few (retries) would obscure the ledger's
 one-row-per-request contract.
+
+---
+
+### M5 — `GET /treasury/assess` creates a wallet, which silently defeats `/wallets/seed` · OPEN — found 2026-08-01
+
+`treasurer.assess()` documents itself as *"Would we top up right now, and why? Reads only —
+never spends."* The second half is true. The first is not: its first statement is
+`db.ensure_wallet(project_id, provider)`, which **inserts a wallet row at $0.00** when the
+project has none. `GET /treasury/assess` is an unauthenticated read endpoint, so anyone —
+a judge poking the API, the dashboard, a demo script — can create wallet rows.
+
+On its own that is a docstring inaccuracy. It becomes a **demo trap** in combination with
+`POST /wallets/seed`, which is idempotent by design and applies its balance *on creation
+only* (`treasury/routes.py`, and correctly so — re-running it must not wipe a top-up the
+Treasurer already made). The sequence:
+
+1. Fresh `meter.db`. Anything hits `GET /treasury/assess`.
+2. A wallet is created at **$0.00**.
+3. `POST /wallets/seed` (default `balance_usd=4.00`, "the demo's too-low state") **no-ops**
+   and the wallet stays at $0.00. No error, and the response body looks successful — it
+   returns the wallet, just with the wrong balance.
+
+Reproduced on a fresh database:
+
+```
+wallets on fresh db:            []
+after GET /treasury/assess:     [('wal_demo-project_openai', 0.0)]
+after POST /wallets/seed 4.00:  0.0     <-- expected 4.00
+```
+
+Not fatal — the Treasurer still fires, because the floor trigger exists precisely for a
+balance that cannot pay for the next request. But the pitch's "$4.00, and OpenAI is about
+to run dry" beat is a number on screen during the demo, and it silently reads $0.00.
+
+**Recommendation:** make `assess()` match its own docstring and not create anything — look
+the wallet up and report `balance_usd: 0.0` when it is absent. `tick()` iterates
+`list_wallets()` and only ever assesses wallets that already exist, so nothing depends on
+the creation side effect. Roughly three lines.
+
+**The workaround until then is `POST /wallets/seed?reset=true`**, which is already
+implemented and documented. Anyone rehearsing the demo should use it rather than trusting
+a fresh-looking database.
+
+Owner: Shivam (`treasury/`). Raised rather than patched because it is another lane's
+module and the fix is a behaviour change to a documented endpoint.

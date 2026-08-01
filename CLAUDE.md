@@ -28,8 +28,17 @@ pip install -r requirements.txt
 cp .env.example .env                            # provider + Prava keys; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
-python tests/test_proxy.py                      # 207 checks, no framework, ~3s
-python tests/test_predictor.py                  # 64 checks, same convention
+python tests/test_proxy.py                      # 219 checks, no framework, ~3s
+python tests/test_predictor.py                  # 130 checks, same convention
+python tests/test_treasury.py                   # 159 checks (treasury/)
+python tests/test_alerts.py                     # 46 checks (alerts/) — needs Python 3.10+
+```
+
+Two measurement harnesses, neither in CI and neither a pass/fail gate on a normal change:
+
+```bash
+python tests/bench_overhead.py                  # added latency; run 3x before quoting a number
+python tests/load_soak.py --seconds 20 --concurrency 16   # two writers, one SQLite file
 ```
 
 Dashboard (Next.js, from [dashboard/](dashboard/)):
@@ -39,11 +48,18 @@ npm install && npm run dev                      # reads ../meter.db directly, re
 npm run build && npm run lint
 ```
 
-There is no pytest, no Python linter, and no build step on the backend. Both test files are plain
-asserts run as scripts — add to the matching one rather than introducing a second test system. Run
-`test_proxy.py` before committing under [proxy/](proxy/) or [treasury/](treasury/) (the treasury
-routers are mounted on the proxy app, so they import in that suite), and `test_predictor.py` before
-committing under [predictor/](predictor/). Neither has a `-k`-style filter; they run whole in ~1s.
+There is no pytest and no build step on the backend; linting is `ruff check .` and CI runs it. The
+test files are plain asserts run as scripts — add to the matching one rather than introducing a
+second test system. Run `test_proxy.py` before committing under [proxy/](proxy/) or
+[treasury/](treasury/) (the treasury routers are mounted on the proxy app, so they import in that
+suite), `test_treasury.py` for [treasury/](treasury/) specifically, `test_predictor.py` for
+[predictor/](predictor/), and `test_alerts.py` for [alerts/](alerts/). None has a `-k`-style
+filter; they run whole in ~1s.
+
+The two harnesses above are different in kind — they *measure* rather than gate, they take tens of
+seconds, and their thresholds are timing-sensitive, which is why they are deliberately out of CI.
+Run `load_soak.py` before claiming anything about concurrency, and `bench_overhead.py` three times
+before putting a latency number on a slide: single readings of it do not reproduce.
 
 Inspect the ledger directly (SQLite, WAL mode, safe to read while the proxy writes):
 
@@ -101,10 +117,21 @@ Consequences worth knowing before you change anything:
 ## Repo state
 
 [CONTEXT.md](CONTEXT.md) §6a is the live status board — trust it over this section. As of the last
-update: proxy, ledger, circuit breaker, treasury schema + Prava rail, predictor v1 (wired into the
-request path), daily ceilings with authorize/capture reservations, `POST /v1/annotate`, and the
-dashboard layout/live-logs all **work**; the Treasurer agent loop, Poke/Linq alerts, Postgres, and
-`docker compose up` are **not started**.
+update, all of this **works**: proxy, ledger, circuit breaker, treasury schema + Prava rail,
+predictor v3 (wired into the request path, with its learning loop running in the proxy), daily
+ceilings with authorize/capture reservations, `POST /v1/annotate`, the model allowlist, the
+Treasurer agent loop, Poke/Linq alerts (a real iMessage was delivered end to end), `docker compose
+up`, and the dashboard — layout, live logs, Team Budget, Cost per Outcome and the Treasurer panel.
+
+Still **not started**: Postgres (SQLite is the shipped datastore, decided in `PROPOSALS.md` A5),
+Redis-backed reservations (only load-bearing at proxy replica #2), and **cross-model routing plus
+the Model Efficiency view on top of it** — that is the one genuinely open lane, and four
+`PLAN.md` items hang off it (`PROPOSALS.md` B11).
+
+Two blockers on the Prava side are external rather than unbuilt, and both are open: a sandbox
+outage on credential minting, and **one purchase per payment cycle**, confirmed by a live Visa
+decline, which breaks the repeat-top-up demo narrative. See `CONTEXT.md` §6a before planning a demo
+around either.
 
 [proxy/README.md](proxy/README.md) has the module map, the request lifecycle, and an explicit table
 of what is *deliberately* unimplemented in Phase 1 and why. Read it before concluding something is
