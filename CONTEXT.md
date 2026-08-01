@@ -175,6 +175,14 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   ⚠ **`.env` `PRAVA_MANDATE_ID` points at the `one_time` mandate.** Reporting a one-time charge
         as APPROVED moves it to `consumed` and every later charge 409s. Point it at the monthly
         mandate `mdt_01KYXWSK8YNAMTPHNY9VWM1DAE` before running the loop.
+    *   ⚠ **`PRAVA_LIVE_MODE` parsing changed 2026-08-01 (Shubh, repo audit) — behaviour change in
+        this lane.** `treasury/prava.py` was reading all four `PRAVA_*` variables from the
+        environment itself, duplicating `treasury/config.py` (whose copies were consequently dead)
+        and comparing `PRAVA_LIVE_MODE` with an exact `== "True"`, so `true` / `1` / `yes` silently
+        **simulated** while looking live — the failure `.env.example` warned "looks identical to
+        success on stage". `prava.py` now reads `config`, which parses it leniently like every other
+        boolean. **If your `.env` says `PRAVA_LIVE_MODE=true` and you were relying on it quietly
+        simulating, it will now transact.** Default (unset) still simulates; verified end to end.
     *   **Open question:** docs say recurring mandates allow "one charge per cycle", but our sandbox
         run put several charges through a monthly mandate. Unresolved, and the demo's repeat-top-up
         narrative depends on it.

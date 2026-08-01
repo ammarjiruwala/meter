@@ -28,7 +28,7 @@ numbers; this only answers "do we have room for this request?".
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
 from typing import Dict, List, Optional, Tuple, Union
 

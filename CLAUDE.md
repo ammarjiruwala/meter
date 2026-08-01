@@ -52,9 +52,12 @@ sqlite3 meter.db "SELECT feature, actor, model, cost_usd, overhead_ms, estimated
                   FROM requests ORDER BY ts DESC LIMIT 10;"
 ```
 
-One-off Prava sandbox scripts live at the repo root (`check_mandates.py`, `create_mandate.py`,
-`test_charge.py`). They hit the live sandbox directly, bypassing [treasury/](treasury/) — scratch
-tools, not part of the app. `main.py` is a deprecation shim re-exporting `proxy.app:app`.
+Two one-off Prava sandbox scripts live at the repo root. They hit the live sandbox directly,
+bypassing [treasury/](treasury/): `create_mandate.py` (the **only** way to create a mandate — no
+route does this) and `check_mandates.py` (lists mandates without the server running). Don't add a
+third that duplicates a route — `test_charge.py` was deleted for exactly that, and because a
+`test_*` name at the repo root means a future pytest run would spend real sandbox money.
+`main.py` is a deprecation shim re-exporting `proxy.app:app`.
 
 ## How the pieces fit
 

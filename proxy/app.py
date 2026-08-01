@@ -413,11 +413,12 @@ async def _json_body(request: Request) -> dict[str, Any] | None:
 def _estimate(shape: str, body: dict[str, Any], model: str | None) -> dict[str, Any]:
     """ESTIMATE — ARCHITECTURE.md §2 step 3. Never raises, never blocks.
 
-    Returns the four `predicted_*` ledger fields plus the dollar figure to reserve. Every
-    failure mode degrades to "no prediction" rather than to an error, because a request
-    the proxy could have served must not die over a number that only informs a
-    reservation. `predicted_cost_usd` staying NULL is itself the signal, and it is
-    countable from the ledger.
+    Returns exactly the four `predicted_*` ledger fields — `predicted_cost_usd` doubles as
+    the dollar figure to reserve, so there is no separate reserve amount that could drift
+    from what the row records. Every failure mode degrades to "no prediction" rather than
+    to an error, because a request the proxy could have served must not die over a number
+    that only informs a reservation. `predicted_cost_usd` staying NULL is itself the
+    signal, and it is countable from the ledger.
 
     Anthropic models take this path routinely, not exceptionally: `tiktoken` has no Claude
     vocabulary and the predictor raises rather than returning a number that is quietly
@@ -430,7 +431,6 @@ def _estimate(shape: str, body: dict[str, Any], model: str | None) -> dict[str, 
         "predicted_cost_usd": None,
         "bucket": None,
         "prediction_method": None,
-        "reserve_usd": 0.0,
     }
     if not config.PREDICT_ENABLED or predict is None or not model:
         return blank
@@ -454,7 +454,6 @@ def _estimate(shape: str, body: dict[str, Any], model: str | None) -> dict[str, 
         "predicted_cost_usd": result.predicted_cost_usd,
         "bucket": result.bucket,
         "prediction_method": result.method,
-        "reserve_usd": result.predicted_cost_usd,
     }
 
 
@@ -536,7 +535,7 @@ async def _proxy(request: Request, shape: str) -> Response:
     # let through (ARCHITECTURE.md §2). Free when no meter.yaml is configured.
     try:
         budget_decision = await budget.authorize(
-            key["project_id"], tags["feature"], prediction["reserve_usd"]
+            key["project_id"], tags["feature"], prediction["predicted_cost_usd"] or 0.0
         )
     except Exception:
         # Same posture as the breaker: enforcement is degradable, availability is not.

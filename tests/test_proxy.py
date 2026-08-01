@@ -888,7 +888,9 @@ def test_prediction() -> None:
     check("a supported model produces a token prediction",
           isinstance(got["predicted_output_tokens"], int)
           and got["predicted_output_tokens"] > 0, str(got))
-    check("and a dollar figure to reserve", got["reserve_usd"] > 0, str(got))
+    # The same field is the ledger's `predicted_cost_usd` and the dollar figure reserved
+    # against the ceiling — deliberately one number, so the row and the hold cannot drift.
+    check("and a dollar figure to reserve", got["predicted_cost_usd"] > 0, str(got))
     check("and records which bucket it classified into", bool(got["bucket"]), str(got))
     check("and how it arrived at the number", got["prediction_method"] in
           {"prior", "learned", "capped"}, str(got))
@@ -903,7 +905,8 @@ def test_prediction() -> None:
     claude = _estimate(providers.SHAPE_ANTHROPIC, {"messages": messages}, "claude-sonnet-5")
     check("an unsupported model yields no prediction instead of raising",
           claude["predicted_cost_usd"] is None, str(claude))
-    check("and reserves nothing", claude["reserve_usd"] == 0.0, str(claude))
+    check("and therefore reserves nothing",
+          (claude["predicted_cost_usd"] or 0.0) == 0.0, str(claude))
 
     check("a body with no messages is handled",
           _estimate(providers.SHAPE_OPENAI, {}, "gpt-4o")["predicted_cost_usd"] is None)
