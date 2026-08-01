@@ -85,7 +85,12 @@ async def execute_topup(
                 "hint": "set TREASURER_DRY_RUN=false to move real money"}
 
     # ── Charge the mandate ───────────────────────────────────────────────────
-    charge = await charge_mandate(amount_usd, event["idempotency_key"])
+    # The mandate id comes from the row we selected, never from the environment. The
+    # table is the only place that knows which mandates are safe to charge repeatedly,
+    # so selecting one and charging another would silently drain the wrong authorization.
+    prava_mandate_id = mandate["prava_mandate_id"]
+    charge = await charge_mandate(amount_usd, event["idempotency_key"],
+                                  mandate_id=prava_mandate_id)
     txn_id = charge.get("transactionId")
 
     if charge.get("status") == "failed" or charge.get("errorMessage"):
@@ -123,7 +128,8 @@ async def execute_topup(
     settlement = None
     if txn_id:
         settlement = await report_charge(txn_id, approved=billing.accepted,
-                                         amount_paid=f"{amount_usd:.2f}")
+                                         amount_paid=f"{amount_usd:.2f}",
+                                         mandate_id=prava_mandate_id)
 
     if not billing.accepted:
         db.settle_event(event["id"], "failed", prava_txn_id=txn_id,
