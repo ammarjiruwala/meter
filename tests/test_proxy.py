@@ -1523,8 +1523,121 @@ def _with_breaker_disabled(project: str, feature: str, key: dict) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def test_client_request_id() -> None:
+    """PROPOSALS.md D1 — a caller may name its own request, so a retry is idempotent."""
+    print("\nclient request id")
+    from proxy.app import _CLIENT_REQUEST_ID, _request_id
+
+    class _Req:
+        def __init__(self, headers: dict[str, str]) -> None:
+            self.headers = headers
+
+    minted = _request_id(_Req({}))
+    check("mints an id when the client sends none", minted.startswith("req_"))
+    check("minted ids are unique", _request_id(_Req({})) != minted)
+
+    check(
+        "accepts a well-formed client id",
+        _request_id(_Req({"x-meter-request-id": "trace-abc_123:9"})) == "trace-abc_123:9",
+    )
+    check(
+        "surrounding whitespace is trimmed, not rejected",
+        _request_id(_Req({"x-meter-request-id": "  order-42-retry  "})) == "order-42-retry",
+    )
+
+    # Ignored rather than refused, and that choice is the point: a malformed idempotency
+    # key is not a reason to fail a request that is otherwise fine. Refusing would make
+    # adopting the header riskier than never sending it.
+    for bad, why in (
+        ("short", "under 8 characters"),
+        ("x" * 129, "over 128 characters"),
+        ("has spaces here", "whitespace inside"),
+        ("drop;--table", "punctuation outside the safe set"),
+        ("", "empty"),
+    ):
+        got = _request_id(_Req({"x-meter-request-id": bad}))
+        check(f"ignores a client id with {why}", got.startswith("req_"), f"got {got!r}")
+
+    check(
+        "the pattern anchors both ends",
+        not _CLIENT_REQUEST_ID.match("ok-value\nInjected: header"),
+    )
+
+
+def test_soft_budget() -> None:
+    """PROPOSALS.md D2 — warn before the 429, not instead of it."""
+    print("\nsoft budget alerts")
+    import textwrap
+
+    from alerts.poke import compose_budget
+    from proxy import budget
+
+    path = Path(_TMP) / "meter-soft.yaml"
+    path.write_text(
+        textwrap.dedent("""
+        projects:
+          proj-soft:
+            ceiling_usd_per_day: 10
+            features:
+              warm: { ceiling_usd_per_day: 1 }
+    """)
+    )
+    budget.load_meter_yaml(path)
+
+    check("nothing breached on an empty ledger", budget.soft_breaches(0.8) == [])
+
+    # $0.85 against the feature's $1 ceiling: over 80%, under 100% — the window the
+    # whole feature exists for. Also 8.5% of the project's $10, so the project ceiling
+    # must NOT fire; a warning that cannot tell them apart is noise.
+    db.record_request(
+        {
+            "id": "req-soft-1",
+            "ts": db.now_iso(),
+            "project_id": "proj-soft",
+            "feature": "warm",
+            "actor": "tester",
+            "model": "gpt-4o-mini",
+            "provider": "openai",
+            "endpoint": "/v1/chat/completions",
+            "cost_usd": 0.85,
+            "status": 200,
+        }
+    )
+
+    breaches = budget.soft_breaches(0.8)
+    scopes = [b["scope"] for b in breaches]
+    check("the feature over 80% is reported", "feature:proj-soft/warm" in scopes, str(scopes))
+    check("the project well under its own ceiling is not", "project:proj-soft" not in scopes,
+          str(scopes))
+
+    hit = next(b for b in breaches if b["scope"] == "feature:proj-soft/warm")
+    check("it reports the spend", abs(hit["spend_usd"] - 0.85) < 1e-6, str(hit))
+    check("and the ceiling it is measured against", hit["ceiling_usd"] == 1.0, str(hit))
+    check("and the ratio", abs(hit["ratio"] - 0.85) < 1e-6, str(hit))
+
+    # The scope string is the contract between the warning and the eventual refusal: an
+    # operator reading the iMessage has to be able to find the same line in meter.yaml
+    # that the 429 will name.
+    check(
+        "the breach scope matches what a 429 would report",
+        hit["scope"] == "feature:proj-soft/warm",
+    )
+
+    check("a higher threshold does not fire yet", budget.soft_breaches(0.9) == [])
+
+    body = compose_budget("feature:proj-soft/warm", 0.85, 1.0)
+    check("the message names the scope", "feature:proj-soft/warm" in body, body)
+    check("leads with headroom, not just a percentage", "$0.15 left" in body, body)
+    check("and says what happens next", "429" in body, body)
+
+    budget.load_meter_yaml(Path(_TMP) / "does-not-exist.yaml")
+    check("no ceilings configured means nothing to poll", budget.soft_breaches(0.8) == [])
+
+
 def main() -> int:
     for suite in (
+        test_client_request_id,
+        test_soft_budget,
         test_routing,
         test_header_substitution,
         test_prepare_body,

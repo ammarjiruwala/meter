@@ -63,7 +63,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                              # add provider keys
 uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
-python tests/test_proxy.py                        # 219 checks, no framework, ~3s
+python tests/test_proxy.py                        # 241 checks, no framework, ~3s
 python tests/test_predictor.py                    # 130 checks, same convention
 python tests/test_treasury.py                     # 159 checks (treasury/)
 python tests/test_alerts.py                       # 46 checks (alerts/), needs Python 3.10+
@@ -85,6 +85,7 @@ thresholds are timing-sensitive and a shared runner would make them flaky:
 ```bash
 python tests/bench_overhead.py                            # added latency
 python tests/load_soak.py --seconds 20 --concurrency 16   # two writers, one SQLite file
+python tests/load_soak.py --stream                         # streamed path + heartbeat
 ```
 
 Run `load_soak.py` before claiming anything about concurrency. Run `bench_overhead.py`

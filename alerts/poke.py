@@ -199,3 +199,53 @@ def send_topup_alert(
         target=_post, args=(body,), name=f"poke-topup-{wallet_id}", daemon=True
     ).start()
     return True
+
+
+def compose_budget(scope: str, spend_usd: float, ceiling_usd: float) -> str:
+    """The soft-budget warning body — the message that arrives *before* the block.
+
+    Leads with headroom rather than percentage. "83% of your ceiling" needs arithmetic
+    to act on; "$34.10 left" is the number that tells someone whether to care right now.
+    """
+    pct = (spend_usd / ceiling_usd * 100) if ceiling_usd else 0.0
+    remaining = max(ceiling_usd - spend_usd, 0.0)
+    return "\n".join(
+        [
+            f"⚠️ Meter: {scope} is at {pct:.0f}% of its daily ceiling",
+            f"${spend_usd:,.2f} of ${ceiling_usd:,.2f} — ${remaining:,.2f} left",
+            "Requests will be refused with 429 when it is reached.",
+        ]
+    )
+
+
+def send_budget_alert(scope: str, spend_usd: float, ceiling_usd: float) -> bool:
+    """Warn that a ceiling is close, while there is still time to do something.
+
+    `PROPOSALS.md` D2. Meter had the block (429 at the ceiling) and the rail (iMessage)
+    but nothing in between, so the first anyone heard about a budget was production
+    already refusing traffic. LiteLLM splits `soft_budget` from `max_budget` for exactly
+    this reason.
+
+    Same contract as the other two senders: never blocks, never raises, per-scope
+    cooldown. The cooldown matters more here than anywhere else — spend crossing a
+    threshold is not an edge, it is a *level*, so this stays true on every poll for the
+    rest of the day. Without the cooldown that is one text per poll, forever.
+    """
+    configured, reason = config.is_configured()
+    if not configured:
+        log.info("budget alert skipped: %s", reason)
+        return False
+
+    if _within_cooldown(f"budget:{scope}"):
+        log.info(
+            "budget alert suppressed for %s (within %.0fs cooldown)",
+            scope,
+            config.POKE_COOLDOWN_S,
+        )
+        return False
+
+    body = compose_budget(scope, spend_usd, ceiling_usd)
+    threading.Thread(
+        target=_post, args=(body,), name=f"poke-budget-{scope}", daemon=True
+    ).start()
+    return True

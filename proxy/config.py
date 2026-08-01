@@ -91,6 +91,17 @@ RESERVATION_TTL_S = _float("RESERVATION_TTL_S", 120.0)
 # under RESERVATION_TTL_S or a slow stream reaps its own hold mid-flight.
 RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
 
+# Soft budgets (PROPOSALS.md D2). The hard ceiling refuses with 429; this warns before it,
+# while there is still time to act. Deliberately a background poll rather than a check in
+# the request path: crossing a threshold is a *level*, not an edge, so testing it per
+# request would re-evaluate it thousands of times to send at most one message — and would
+# put that work in front of production traffic for a notification nobody reads inline.
+BUDGET_SOFT_ALERT_ENABLED = _bool("BUDGET_SOFT_ALERT_ENABLED", True)
+# Fraction of a ceiling that counts as "close". 0.8 matches LiteLLM's default soft budget.
+BUDGET_SOFT_ALERT_RATIO = _float("BUDGET_SOFT_ALERT_RATIO", 0.8)
+# How often the poll runs. Cheap: one indexed SUM per configured ceiling.
+BUDGET_SOFT_ALERT_INTERVAL_S = _float("BUDGET_SOFT_ALERT_INTERVAL_S", 60.0)
+
 # The pre-flight estimate (ARCHITECTURE.md §2 step 3). Off puts `predicted_*` NULL on
 # every row and reserves nothing, which is Phase 1 behaviour exactly.
 PREDICT_ENABLED = _bool("PREDICT_ENABLED", True)

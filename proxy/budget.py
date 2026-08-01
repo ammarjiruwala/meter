@@ -236,6 +236,42 @@ def _scope(project_id: str, feature: str | None) -> str:
     return f"project:{project_id}" if feature is None else f"feature:{project_id}/{feature}"
 
 
+def soft_breaches(ratio: float) -> list[dict[str, Any]]:
+    """Ceilings whose *settled* spend has crossed ``ratio`` of the limit.
+
+    `PROPOSALS.md` D2 — the warning that arrives before the 429. Reads the same numbers
+    `authorize` does and reports them under the same scope string a refusal would name,
+    so the message and the eventual rejection cannot disagree about which line of
+    `meter.yaml` is the problem.
+
+    **Settled spend only, deliberately.** In-flight holds are counted at authorize time
+    because they must be, but including them here would let a burst of concurrent
+    requests trip the warning and then un-trip it as they released — an alert that
+    retracts itself is worse than no alert.
+
+    Blocking SQLite reads: call it from a thread, never from the event loop.
+    """
+    out: list[dict[str, Any]] = []
+    for (project_id, feature), ceiling in sorted(_ceilings.items(), key=lambda kv: str(kv[0])):
+        if ceiling <= 0:
+            continue
+        spend = (
+            db.window_spend(project_id, feature, config.BUDGET_WINDOW_S)
+            if feature is not None
+            else db.project_window_spend(project_id, config.BUDGET_WINDOW_S)
+        )
+        if spend >= ceiling * ratio:
+            out.append(
+                {
+                    "scope": _scope(project_id, feature),
+                    "spend_usd": round(spend, 6),
+                    "ceiling_usd": ceiling,
+                    "ratio": round(spend / ceiling, 4),
+                }
+            )
+    return out
+
+
 def feature_models(project_id: str, feature: str | None) -> frozenset[str]:
     """The models a feature may call. Empty means unrestricted — the Phase 1 default."""
     if feature is None:

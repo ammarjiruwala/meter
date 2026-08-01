@@ -130,6 +130,108 @@ async def heartbeat(stop: asyncio.Event, samples: list[float]) -> None:
         samples.append((time.perf_counter() - start - 0.01) * 1000)
 
 
+async def start_sse_upstream(port: int, chunks: int, chunk_delay_s: float):
+    """A fake provider that actually streams, slowly, and reports usage at the end.
+
+    The non-streamed fake is a single JSON body, which exercises none of what makes
+    streaming the risky path here: the tap reassembling SSE events across chunk
+    boundaries, usage arriving only in the final event, and a reservation that has to
+    survive the whole response. `chunk_delay_s` is what lets a stream outlive its own
+    reservation TTL, which is the condition the heartbeat exists for.
+
+    Shape is OpenAI's: content deltas, then a usage-only chunk (empty `choices`), then
+    `[DONE]`. The proxy injects `stream_options.include_usage` on the way out and strips
+    the extra chunk on the way back, so emitting it unconditionally is what a real
+    provider does when asked.
+    """
+    import uvicorn
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/sse/chat/completions")
+    async def sse_completion() -> StreamingResponse:
+        async def gen():
+            for i in range(chunks):
+                yield (
+                    b'data: {"id":"sse-1","object":"chat.completion.chunk",'
+                    b'"model":"gpt-4o-mini","choices":[{"index":0,"delta":'
+                    b'{"content":"tok' + str(i).encode() + b' "},'
+                    b'"finish_reason":null}]}\n\n'
+                )
+                await asyncio.sleep(chunk_delay_s)
+            yield (
+                b'data: {"id":"sse-1","object":"chat.completion.chunk",'
+                b'"model":"gpt-4o-mini","choices":[],'
+                b'"usage":{"prompt_tokens":11,"completion_tokens":23,'
+                b'"total_tokens":34}}\n\n'
+            )
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    asyncio.create_task(server.serve())
+    from tests.bench_overhead import _await_started
+
+    await _await_started(server, "sse upstream")
+    return server
+
+
+async def stream_worker(
+    client: httpx.AsyncClient, port: int, stop: asyncio.Event, stats: dict
+) -> None:
+    """Drive streamed requests, and verify each one arrived readable.
+
+    Reading the body is not incidental. B15 was a bug where the proxy forwarded gzip
+    labelled `text/event-stream`: status was 200, the ledger row was written, and the
+    stream was unreadable to any client. A soak that only checked status codes would
+    have passed straight through it.
+    """
+    while not stop.is_set():
+        start = time.perf_counter()
+        try:
+            async with client.stream(
+                "POST",
+                f"http://127.0.0.1:{port}/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer mk_soak",
+                    "X-Meter-Feature": "soak",
+                    "X-Meter-Actor": "load-harness",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            ) as r:
+                body = b""
+                async for piece in r.aiter_bytes():
+                    body += piece
+        except Exception as exc:  # noqa: BLE001
+            stats["errors"] += 1
+            stats["error_detail"].append(repr(exc)[:200])
+            continue
+
+        stats["latency_ms"].append((time.perf_counter() - start) * 1000)
+        stats["sent"] += 1
+        if r.status_code != 200:
+            stats["non_200"] += 1
+            stats["status_codes"][r.status_code] = (
+                stats["status_codes"].get(r.status_code, 0) + 1
+            )
+            continue
+        stats["ok"] += 1
+        # The client-visible contract: readable SSE, terminated, and the injected
+        # usage chunk stripped back out rather than leaked to the caller.
+        if b"data: " not in body or b"[DONE]" not in body:
+            stats["unreadable"] = stats.get("unreadable", 0) + 1
+        if b'"usage"' in body:
+            stats["usage_leaked"] = stats.get("usage_leaked", 0) + 1
+
+
 def _new_stats() -> dict:
     return {
         "sent": 0, "ok": 0, "non_200": 0, "errors": 0,
@@ -193,13 +295,43 @@ async def main() -> int:
         default=250.0,
         help="Max tolerated event-loop stall before the run fails (default 250ms)",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="Drive streamed requests against an SSE upstream instead of JSON ones. "
+             "Streams are configured to outlive their reservation TTL, so this is the "
+             "run that proves the heartbeat holds.",
+    )
+    parser.add_argument(
+        "--stream-seconds",
+        type=float,
+        default=4.0,
+        help="How long each streamed response takes (default 4s, vs a 2s TTL)",
+    )
+    parser.add_argument(
+        "--break-heartbeat",
+        action="store_true",
+        help="Negative control: push the heartbeat interval past the stream duration so "
+             "budget.extend() never fires. The reservation check MUST fail under this — "
+             "run it to prove the check can actually detect the bug it is guarding.",
+    )
     args = parser.parse_args()
 
+    # Deliberately shorter than one response. Without a working heartbeat the hold is
+    # reaped while the stream it is covering is still running — silently, which is the
+    # whole reason ARCHITECTURE.md §2 calls this out. Choosing the numbers this way is
+    # what turns "the heartbeat exists" into "the heartbeat works".
+    stream_ttl_s = max(args.stream_seconds / 2.0, 1.0)
+
     _section("Sustained-load soak")
+    print(f"Mode:         {'streamed (SSE)' if args.stream else 'non-streamed (JSON)'}")
     print(f"Duration:     {args.seconds}s")
     print(f"Concurrency:  {args.concurrency} clients")
     print(f"Treasurer:    every {args.tick_interval}s (dry run)")
     print(f"Stall budget: {args.stall_budget_ms}ms")
+    if args.stream:
+        print(f"Stream:       {args.stream_seconds}s per response, "
+              f"reservation TTL {stream_ttl_s}s (stream outlives its own hold)")
 
     tmpdir = tempfile.mkdtemp(prefix="meter-soak-")
     db_path = Path(tmpdir) / "soak.db"
@@ -208,13 +340,18 @@ async def main() -> int:
     # Ceilings high enough that nothing 429s — we are testing write contention on the
     # enforced path, and a budget refusal would short-circuit the very writes we want to
     # collide. The path still runs ESTIMATE and RESERVE for every request.
+    # The key is `ceiling_usd_per_day`. Spelling it `ceiling_usd_day` here loaded zero
+    # ceilings, and the loader ignores keys it does not know — so authorize() took its
+    # "no ceilings configured" fast path, never took a hold, and every run of this
+    # harness silently measured the *unenforced* path while claiming otherwise. The
+    # assertion after the proxy boots is what makes that failure loud instead of silent.
     yaml_path.write_text(
         "projects:\n"
         "  soak-project:\n"
-        "    ceiling_usd_day: 100000\n"
+        "    ceiling_usd_per_day: 100000\n"
         "    features:\n"
         "      soak:\n"
-        "        ceiling_usd_day: 100000\n"
+        "        ceiling_usd_per_day: 100000\n"
     )
 
     # Ports are fixed before the env block because the provider base URLs have to be
@@ -224,11 +361,12 @@ async def main() -> int:
     # aimed at api.openai.com, which is how the first run of this harness sent 828 requests
     # to the real provider. It only failed safe because the key was fake.
     fake_port, proxy_port = 9877, 8766
+    upstream_prefix = "sse" if args.stream else "fake"
 
     os.environ.update(
         {
-            "OPENAI_BASE_URL": f"http://127.0.0.1:{fake_port}/fake",
-            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{fake_port}/fake",
+            "OPENAI_BASE_URL": f"http://127.0.0.1:{fake_port}/{upstream_prefix}",
+            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{fake_port}/{upstream_prefix}",
             "METER_DB_PATH": str(db_path),
             "METER_KEYS": "mk_soak:soak-project:test",
             "METER_YAML_PATH": str(yaml_path),
@@ -248,6 +386,15 @@ async def main() -> int:
             "TREASURER_COOLDOWN_S": "0",
             "PREDICT_REFRESH_ENABLED": "false",
             "POKE_ENABLED": "false",
+            "RESERVATION_TTL_S": str(stream_ttl_s),
+            # Heartbeat well inside the TTL. The proxy only heartbeats when a chunk
+            # arrives, so this has to be shorter than both the TTL and the gap between
+            # chunks or the hold reaps itself between deltas.
+            "RESERVATION_HEARTBEAT_S": (
+                str(args.stream_seconds * 100)
+                if args.break_heartbeat
+                else str(max(stream_ttl_s / 4.0, 0.25))
+            ),
             # A load harness must never touch the live payment sandbox. Off also skips the
             # boot credential check, which is a real network round-trip inside the lifespan.
             "PRAVA_LIVE_MODE": "false",
@@ -275,12 +422,34 @@ async def main() -> int:
                 "upstream. A proxy module was imported before the env block above."
             )
 
-    fake_server = await start_fake_upstream(fake_port)
+    if args.stream:
+        # One chunk every 100ms for the requested duration, so a response spans many
+        # chunk boundaries — the tap has to reassemble events that do not align to them.
+        chunk_delay = 0.1
+        fake_server = await start_sse_upstream(
+            fake_port, chunks=max(int(args.stream_seconds / chunk_delay), 1),
+            chunk_delay_s=chunk_delay,
+        )
+    else:
+        fake_server = await start_fake_upstream(fake_port)
     proxy_server = await start_proxy(proxy_port)
 
     # Give the Treasurer a wallet to find. Without one, list_wallets() is empty, tick()
     # does nothing, and the whole second-writer premise of this test quietly evaporates.
     tdb.ensure_wallet("soak-project", "openai", 5.0)
+
+    # Prove the ceilings actually loaded. `authorize()` returns on a dict lookup when
+    # none are configured, so a typo in the YAML above does not fail — it silently
+    # downgrades this to a test of the unenforced path, with no reservations taken and
+    # nothing to heartbeat. Same class of mistake as the base-URL guard above, and it
+    # already happened once.
+    from proxy import budget as _b  # noqa: E402
+
+    if not _b.active_ceilings():
+        raise RuntimeError(
+            "refusing to run: no ceilings loaded from meter.yaml, so no reservation is "
+            "ever taken and this would measure the unenforced path"
+        )
 
     # Control run: the same client, the same concurrency, the same event loop, straight at
     # the fake upstream with no proxy in the middle. Without it a throughput number here is
@@ -289,29 +458,37 @@ async def main() -> int:
     # itself. Anything the baseline also does is not the proxy's doing.
     _section("Baseline (no proxy — control)")
     base_stats = _new_stats()
-    base_stop = asyncio.Event()
-    async with httpx.AsyncClient(
-        timeout=30.0, limits=httpx.Limits(max_connections=args.concurrency * 2)
-    ) as bclient:
-        bworkers = [
-            asyncio.create_task(
-                worker(bclient, fake_port, base_stop, base_stats,
-                       url="/fake/chat/completions", headers={})
-            )
-            for _ in range(args.concurrency)
-        ]
-        bstart = time.perf_counter()
-        await asyncio.sleep(min(args.seconds, 8.0))
-        base_stop.set()
-        await asyncio.gather(*bworkers, return_exceptions=True)
-        base_elapsed = time.perf_counter() - bstart
-    base_rps = base_stats["sent"] / base_elapsed if base_elapsed else 0.0
-    base_lat = sorted(base_stats["latency_ms"])
-    if base_lat:
-        print(f"  {base_stats['sent']} requests, {base_rps:.0f} req/s, "
-              f"p50 {statistics.median(base_lat):.1f}ms")
+    base_rps = 0.0
+    if args.stream:
+        # Skipped on purpose. A control only means anything when it does the same work as
+        # the measured run, and driving the SSE upstream with the non-streaming worker
+        # compares 4-second streams against instant JSON — which reports the proxy at "0%
+        # of baseline". A misleading number is worse than no number.
+        print("  skipped — a non-streamed baseline is not comparable to a streamed run")
     else:
-        print("  no data")
+        base_stop = asyncio.Event()
+        async with httpx.AsyncClient(
+            timeout=30.0, limits=httpx.Limits(max_connections=args.concurrency * 2)
+        ) as bclient:
+            bworkers = [
+                asyncio.create_task(
+                    worker(bclient, fake_port, base_stop, base_stats,
+                           url="/fake/chat/completions", headers={})
+                )
+                for _ in range(args.concurrency)
+            ]
+            bstart = time.perf_counter()
+            await asyncio.sleep(min(args.seconds, 8.0))
+            base_stop.set()
+            await asyncio.gather(*bworkers, return_exceptions=True)
+            base_elapsed = time.perf_counter() - bstart
+        base_rps = base_stats["sent"] / base_elapsed if base_elapsed else 0.0
+        base_lat = sorted(base_stats["latency_ms"])
+        if base_lat:
+            print(f"  {base_stats['sent']} requests, {base_rps:.0f} req/s, "
+                  f"p50 {statistics.median(base_lat):.1f}ms")
+        else:
+            print("  no data")
 
     stats: dict = _new_stats()
     stall_samples: list[float] = []
@@ -321,12 +498,44 @@ async def main() -> int:
         "SELECT COUNT(*) FROM treasury_events"
     ).fetchone()[0]
 
+    # Watch the hold table while streams are in flight. This is the only direct evidence
+    # that the heartbeat does its job: each response outlives its own reservation TTL, so
+    # if `budget.extend` were not firing, the holds would be reaped mid-stream and this
+    # would sample zero while dozens of requests were still running. Nothing raises when
+    # that happens — the ceiling just quietly stops counting the biggest requests in the
+    # system — so an assertion is the only way to see it.
+    reservation_samples: list[int] = []
+
+    async def watch_reservations() -> None:
+        """Count holds that are still *live*, not merely still present.
+
+        `budget.outstanding()` reports `len(_holds)`, and holds are reaped lazily — only
+        when the next `authorize()` runs `_expire()` under the lock. An expired hold
+        therefore lingers in the dict, so counting entries cannot distinguish "the
+        heartbeat is working" from "these all expired and nobody has swept them yet".
+        That is not a hypothetical: with the heartbeat deliberately disabled, the
+        entry-count version of this check still passed.
+
+        Reading `expires_at` is the honest measurement, which means reaching into a
+        private. Acceptable in a harness whose entire job is to observe this.
+        """
+        from proxy import budget
+
+        while not stop.is_set():
+            now = time.monotonic()
+            reservation_samples.append(
+                sum(1 for h in budget._holds.values() if h.expires_at > now)
+            )
+            await asyncio.sleep(0.25)
+
     _section("Running")
-    client = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(
+    client = httpx.AsyncClient(timeout=60.0, limits=httpx.Limits(
         max_connections=args.concurrency * 2))
     hb = asyncio.create_task(heartbeat(stop, stall_samples))
+    watcher = asyncio.create_task(watch_reservations())
+    drive = stream_worker if args.stream else worker
     workers = [
-        asyncio.create_task(worker(client, proxy_port, stop, stats))
+        asyncio.create_task(drive(client, proxy_port, stop, stats))
         for _ in range(args.concurrency)
     ]
 
@@ -337,6 +546,7 @@ async def main() -> int:
         stop.set()
         await asyncio.gather(*workers, return_exceptions=True)
         hb.cancel()
+        watcher.cancel()
         elapsed = time.perf_counter() - started
 
     # Captures are scheduled, not awaited — the response returns before its ledger row
@@ -374,8 +584,8 @@ async def main() -> int:
     print(f"  transport errs: {stats['errors']}")
     proxy_rps = stats["sent"] / elapsed if elapsed else 0.0
     print(f"  throughput:     {proxy_rps:.1f} req/s")
-    print(f"  baseline:       {base_rps:.1f} req/s (no proxy, same concurrency)")
     if base_rps > 0:
+        print(f"  baseline:       {base_rps:.1f} req/s (no proxy, same concurrency)")
         print(f"  proxy share:    {proxy_rps / base_rps * 100:.0f}% of baseline throughput")
     if stats["latency_ms"]:
         lat = sorted(stats["latency_ms"])
@@ -388,6 +598,10 @@ async def main() -> int:
     print(f"  treasury_events:  {tevents} (was {events_before})")
     print(f"  lock errors:      {counter.locked}")
     print(f"  ledger failures:  {counter.ledger_failures}")
+
+    from proxy import budget as _budget  # noqa: E402
+
+    held_after = _budget.outstanding()["reservations"]
 
     _section("Event-loop stall")
     worst = max(stall_samples) if stall_samples else 0.0
@@ -430,6 +644,61 @@ async def main() -> int:
         worst <= args.stall_budget_ms,
         f"worst stall {worst:.0f}ms — a blocking call is holding the loop",
     )
+    check(
+        "every reservation was released",
+        held_after == 0,
+        f"{held_after} hold(s) still outstanding after every request finished — "
+        "a leaked hold spends the ceiling twice",
+    )
+
+    if args.stream:
+        streamed_rows = conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE is_stream = 1 AND status = 200"
+        ).fetchone()[0]
+        byte_estimated = conn.execute(
+            "SELECT COUNT(*) FROM requests WHERE is_stream = 1 AND estimated = 1"
+        ).fetchone()[0]
+        # Skip the first second of samples: the workers are still ramping and no stream
+        # has started yet, so a zero there means "not begun", not "hold expired".
+        steady = reservation_samples[4:]
+        peak_holds = max(steady) if steady else 0
+        floor_holds = min(steady) if steady else 0
+
+        _section("Streaming")
+        print(f"  streamed rows:   {streamed_rows}")
+        print(f"  byte-estimated:  {byte_estimated} (want 0 — usage came off the wire)")
+        print(f"  live holds:      peak {peak_holds}, floor {floor_holds} "
+              f"(floor must stay >0 — every stream outlives its own TTL)")
+        print(f"  unreadable:      {stats.get('unreadable', 0)}")
+        print(f"  usage leaked:    {stats.get('usage_leaked', 0)}")
+
+        check("streamed rows were ledgered", streamed_rows == stats["ok"],
+              f"{stats['ok']} streams served, {streamed_rows} rows")
+        check(
+            "usage parsed from the stream, not estimated from bytes",
+            byte_estimated == 0,
+            f"{byte_estimated} streamed row(s) fell back to a byte estimate — "
+            "the B15 failure mode: spend silently wrong, nothing raised",
+        )
+        check(
+            "every stream was readable SSE",
+            stats.get("unreadable", 0) == 0,
+            f"{stats.get('unreadable', 0)} response(s) had no 'data:'/[DONE] — "
+            "status was 200 and the row was written, but no client could read it",
+        )
+        check(
+            "injected usage chunk stripped from the client's stream",
+            stats.get("usage_leaked", 0) == 0,
+            f"{stats.get('usage_leaked', 0)} response(s) leaked the usage chunk the "
+            "proxy injected for its own accounting",
+        )
+        check(
+            "reservations survived streams that outlived their TTL",
+            floor_holds > 0,
+            f"live holds hit 0 while streams longer than the {stream_ttl_s}s TTL were "
+            f"still in flight (peak {peak_holds}) — the heartbeat is not extending them, "
+            "and the ceiling has stopped counting the biggest requests in the system",
+        )
 
     proxy_server.should_exit = True
     fake_server.should_exit = True
