@@ -20,8 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -516,6 +519,303 @@ def test_event_ledger() -> None:
           db.seconds_since_last_attempt(wid) is not None)
 
 
+def test_migration_from_old_schema() -> None:
+    """A database that predates these columns must not need to be deleted.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op against an existing table, so a teammate who
+    ran an earlier build has neither the newer columns nor the UNIQUE constraint. That
+    exact situation produced "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
+    constraint" during development.
+    """
+    print("\nmigration from an older database")
+    old = sqlite3.connect(os.path.join(tempfile.mkdtemp(), "old.db"))
+    old.row_factory = sqlite3.Row
+    # The shape mandates had before scoping landed: no UNIQUE, none of the new columns.
+    old.execute("""
+        CREATE TABLE mandates (
+            id TEXT PRIMARY KEY, provider TEXT NOT NULL,
+            max_per_txn_usd REAL NOT NULL, max_daily_usd REAL NOT NULL,
+            cooldown_s INTEGER NOT NULL DEFAULT 300,
+            prava_mandate_id TEXT, active INTEGER NOT NULL DEFAULT 1
+        )""")
+    old.execute("INSERT INTO mandates VALUES ('mnd_legacy','openai',1,1,0,'mdt_leg',1)")
+    old.commit()
+
+    before = {r["name"] for r in old.execute("PRAGMA table_info(mandates)")}
+    check("the old table lacks the new columns", "project_id" not in before)
+
+    old.executescript(db.SCHEMA)          # no-op on the table, but creates the index
+    db._migrate(old)
+    old.commit()
+
+    after = {r["name"] for r in old.execute("PRAGMA table_info(mandates)")}
+    for col in ("project_id", "external_user_id", "remaining_usd", "session_id",
+                "renews_at", "valid_until", "customer_id"):
+        check(f"migration adds {col}", col in after)
+    check("the legacy row survives",
+          old.execute("SELECT COUNT(*) FROM mandates").fetchone()[0] == 1)
+
+    idx = {r[1] for r in old.execute("PRAGMA index_list(mandates)")}
+    check("the unique index is applied retroactively",
+          "idx_mandates_prava_id" in idx, str(idx))
+
+    # The upsert needs that index to resolve ON CONFLICT against.
+    old.execute(
+        "INSERT INTO mandates (id, provider, max_per_txn_usd, max_daily_usd,"
+        " cooldown_s, prava_mandate_id, active) VALUES"
+        " ('mnd_x','openai',1,1,0,'mdt_leg',1)"
+        " ON CONFLICT(prava_mandate_id) DO UPDATE SET active = 0")
+    old.commit()
+    check("ON CONFLICT resolves after migration",
+          old.execute("SELECT active FROM mandates WHERE prava_mandate_id='mdt_leg'"
+                      ).fetchone()[0] == 0)
+    old.close()
+
+
+def test_concurrent_writers() -> None:
+    """Reads and writes from several threads at once, against one shared connection.
+
+    Two distinct hazards, and the second is the one that actually bit:
+
+    * **contention** — WAL plus `busy_timeout` should make a second writer wait rather
+      than raise "database is locked".
+    * **API misuse** — one `sqlite3.Connection` opened with `check_same_thread=False`
+      must not be *used* from two threads at once. That raises
+      `InterfaceError: bad parameter or other API misuse`, intermittently and only under
+      real concurrency. Reads were not taking the lock, and this caught it in roughly one
+      run in four. FastAPI runs sync routes in a threadpool while async ones run on the
+      event loop, so the overlap is reachable in production, not theoretical.
+
+    The reader threads are what make this a regression test rather than a smoke test —
+    without them the bug hides.
+    """
+    print("\nconcurrent readers and writers")
+    seed("concurrent", 0.0)
+    wid = db.ensure_wallet("concurrent", "openai")
+    errors: list[Exception] = []
+
+    def credit():
+        try:
+            for _ in range(40):
+                db.adjust_balance(wid, 1.0)
+        except Exception as exc:            # noqa: BLE001 — recorded, then asserted on
+            errors.append(exc)
+
+    def ledger_writes():
+        try:
+            for _ in range(40):
+                spend("concurrent", 0.01)
+        except Exception as exc:            # noqa: BLE001
+            errors.append(exc)
+
+    def readers():
+        try:
+            for _ in range(60):
+                db.get_wallet(wid)
+                db.list_wallets()
+                db.chargeable_mandate("concurrent", "openai")
+                db.recent_events(wid, 5)
+        except Exception as exc:            # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=credit), threading.Thread(target=ledger_writes),
+               threading.Thread(target=credit), threading.Thread(target=readers),
+               threading.Thread(target=readers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    check("no locking or API-misuse errors under concurrency", errors == [],
+          str(errors[:1]))
+    check("every credit landed — no lost updates",
+          db.get_wallet(wid)["balance_usd"] == 80.0,
+          str(db.get_wallet(wid)["balance_usd"]))
+    check("the ledger rows landed too",
+          ledger.project_window_spend("concurrent", 3600) > 0.39)
+
+
+def test_persistence() -> None:
+    """State survives a restart — it is a database, not a cache."""
+    print("\npersistence across reconnect")
+    mandate("persist", "mdt_persist")
+    seed("persist", 33.0)
+    CLIENT.post("/topup", params={"project_id": "persist", "amount_usd": 10})
+
+    conn = db.connect()
+    conn.close()
+    db._conn = None                          # force a genuine reopen
+
+    check("wallet survived", db.get_wallet(db.ensure_wallet("persist", "openai"))
+          ["balance_usd"] == 43.0)
+    check("mandate survived",
+          db.chargeable_mandate("persist", "openai")["prava_mandate_id"] == "mdt_persist")
+    check("events survived",
+          len(db.recent_events(db.ensure_wallet("persist", "openai"))) == 1)
+
+
+def test_money_conservation() -> None:
+    """Settled top-ups and the balance must agree. A ledger that does not add up is not one."""
+    print("\nmoney conservation")
+    mandate("conserve", "mdt_cons", per_txn=100.0, daily=1000.0, cooldown=0)
+    seed("conserve", 0.0)
+    wid = db.ensure_wallet("conserve", "openai")
+
+    for amount in (10.0, 25.0, 40.0):
+        r = CLIENT.post("/topup", params={"project_id": "conserve",
+                                          "amount_usd": amount}).json()
+        check(f"${amount:.0f} top-up settled", r.get("ok") is True, r.get("reason", ""))
+
+    events = db.recent_events(wid, 50)
+    settled = [e for e in events if e["status"] == "settled"]
+    total = sum(e["amount_usd"] for e in settled)
+    check("three settled events recorded", len(settled) == 3, str(len(settled)))
+    check("balance equals the sum of settled top-ups",
+          db.get_wallet(wid)["balance_usd"] == total, f"{total} vs "
+          f"{db.get_wallet(wid)['balance_usd']}")
+    check("every event has a distinct idempotency key",
+          len({e["idempotency_key"] for e in settled}) == 3)
+
+
+def test_multi_provider() -> None:
+    """OpenAI and Anthropic are separate balances and separate mandates."""
+    print("\nmulti-provider")
+    db.upsert_mandate("mdt_oai", "openai", 200.0, 500.0, 0,
+                      recurring_frequency="monthly", status="active",
+                      approved_amount_usd=500.0, remaining_usd=500.0,
+                      project_id="dual", external_user_id_="meter_dual")
+    db.upsert_mandate("mdt_ant", "anthropic", 200.0, 500.0, 0,
+                      recurring_frequency="monthly", status="active",
+                      approved_amount_usd=500.0, remaining_usd=500.0,
+                      project_id="dual", external_user_id_="meter_dual")
+    CLIENT.post("/wallets/seed", params={"project_id": "dual", "provider": "openai",
+                                         "balance_usd": 4.0, "reset": True})
+    CLIENT.post("/wallets/seed", params={"project_id": "dual", "provider": "anthropic",
+                                         "balance_usd": 9.0, "reset": True})
+
+    check("provider selects its own mandate",
+          db.chargeable_mandate("dual", "anthropic")["prava_mandate_id"] == "mdt_ant")
+
+    r = CLIENT.post("/topup", params={"project_id": "dual", "provider": "openai",
+                                      "amount_usd": 50}).json()
+    check("openai top-up succeeds", r.get("ok") is True, r.get("reason", ""))
+    check("it charged the openai mandate", r["mandate"] == "mdt_oai")
+
+    wallets = {(w["project_id"], w["provider"]): w["balance_usd"]
+               for w in CLIENT.get("/wallets").json()}
+    check("openai wallet credited", wallets[("dual", "openai")] == 54.0)
+    check("anthropic wallet untouched", wallets[("dual", "anthropic")] == 9.0)
+
+
+def test_dashboard_queries() -> None:
+    """The exact SQL dashboard/src/lib/db.ts runs, against the same file."""
+    print("\ndashboard queries")
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT provider, balance_usd FROM wallets ORDER BY provider").fetchall()
+    check("provider balances query runs", len(rows) > 0)
+
+    # Tanay's getTeamSpend — the treasury's tables must not disturb it.
+    rows = conn.execute(
+        "SELECT project_id, actor, feature, SUM(cost_usd) AS total_cost_usd,"
+        " COUNT(*) AS request_count FROM requests"
+        " GROUP BY project_id, actor, feature ORDER BY total_cost_usd DESC").fetchall()
+    check("team spend query still runs", isinstance(rows, list))
+
+    rows = conn.execute(
+        "SELECT id, ts, actor, model, NULL AS predicted_cost_usd, cost_usd, status"
+        " FROM requests ORDER BY ts DESC LIMIT 50").fetchall()
+    check("live logs query still runs", isinstance(rows, list))
+
+
+def test_integration_proxy_to_treasurer() -> None:
+    """The whole chain: a real proxied call funds the burn rate that triggers a top-up.
+
+    Everything else in this file feeds the ledger directly. This drives an actual
+    request through the proxy against a local upstream, so the ledger row is written by
+    the real CAPTURE path, and the Treasurer reads what the proxy actually recorded.
+    """
+    print("\nintegration — proxied call drives the autonomous save")
+    import json as _json
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    body = _json.dumps({
+        "id": "chatcmpl-int", "object": "chat.completion", "model": "gpt-4o",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 400_000, "completion_tokens": 400_000,
+                  "total_tokens": 800_000},
+    }).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("content-length", 0) or 0))
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    _threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    from proxy import config as pconfig
+    prev = (pconfig.OPENAI_BASE_URL, pconfig.OPENAI_API_KEY, pconfig.BREAKER_ENABLED)
+    pconfig.OPENAI_BASE_URL = f"http://127.0.0.1:{port}/v1"
+    pconfig.OPENAI_API_KEY = "sk-fake"
+    pconfig.BREAKER_ENABLED = False
+    try:
+        # METER_KEYS seeds mk_dev_local -> demo-project, so that is the project the
+        # proxy will attribute this spend to.
+        r = CLIENT.post("/v1/chat/completions",
+                        headers={"Authorization": "Bearer mk_dev_local",
+                                 "X-Meter-Feature": "integration"},
+                        json={"model": "gpt-4o",
+                              "messages": [{"role": "user", "content": "hi"}]})
+        check("the proxied call succeeded", r.status_code == 200, str(r.status_code))
+        time.sleep(0.8)                       # capture runs off the hot path
+
+        spent = ledger.project_window_spend("demo-project", 3600)
+        check("the proxy priced it into the ledger", spent > 0, f"${spent}")
+
+        a = CLIENT.get("/treasury/assess", params={"project_id": "demo-project"}).json()
+        check("the Treasurer reads that spend as burn",
+              a["burn_usd_per_hour"] > 0, str(a["burn_usd_per_hour"]))
+
+        # Set the balance to half an hour of runway at the burn the proxy just produced,
+        # so the runway trigger fires on real data rather than a hand-picked number.
+        seed("demo-project", round(a["burn_usd_per_hour"] * 0.5, 6))
+        mandate("demo-project", "mdt_int", per_txn=1000.0, daily=5000.0, cooldown=0)
+
+        a = CLIENT.get("/treasury/assess", params={"project_id": "demo-project"}).json()
+        check("runway is computed from real spend", a["runway_hours"] is not None)
+        check("and it triggers on runway, not the floor", a["trigger"] == "runway",
+              f"runway={a['runway_hours']}h trigger={a['trigger']}")
+
+        before = balances()["demo-project"]
+        results = CLIENT.post("/treasury/tick").json()
+        mine = [x for x in results
+                if x["decision"]["project_id"] == "demo-project"][0]
+        check("the Treasurer acted", mine["acted"] is True)
+        check("the top-up settled", mine["outcome"]["ok"] is True,
+              mine["outcome"].get("reason", ""))
+        check("the balance rose", balances()["demo-project"] > before,
+              f"${before} -> ${balances()['demo-project']}")
+
+        a = CLIENT.get("/treasury/assess", params={"project_id": "demo-project"}).json()
+        check("and the wallet is healthy again", a["should_topup"] is False,
+              f"runway now {a['runway_hours']}h")
+    finally:
+        (pconfig.OPENAI_BASE_URL, pconfig.OPENAI_API_KEY,
+         pconfig.BREAKER_ENABLED) = prev
+        server.shutdown()
+
+
 def test_routes_present() -> None:
     """The surface the dashboard and the demo depend on."""
     print("\nroutes")
@@ -551,6 +851,13 @@ def main() -> int:
             test_alert_noise,
             test_pending_mandates,
             test_event_ledger,
+            test_migration_from_old_schema,
+            test_concurrent_writers,
+            test_persistence,
+            test_money_conservation,
+            test_multi_provider,
+            test_dashboard_queries,
+            test_integration_proxy_to_treasurer,
             test_routes_present,
         ):
             suite()

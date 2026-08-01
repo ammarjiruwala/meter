@@ -35,7 +35,28 @@ from typing import Any
 from proxy import config
 
 _conn: sqlite3.Connection | None = None
-_lock = threading.Lock()
+
+# Reentrant, and held for reads as well as writes. One `sqlite3.Connection` is shared
+# across threads (`check_same_thread=False`), and using it from two threads at once is
+# API misuse, not merely contention — it surfaces as
+# `InterfaceError: bad parameter or other API misuse`, intermittently.
+#
+# That is reachable here rather than theoretical: FastAPI runs sync routes
+# (`GET /wallets`, `/mock-openai/billing`) in a threadpool while async ones run on the
+# event loop, so a read and a write genuinely overlap. `proxy/db.py` locks its reads for
+# the same reason. Reentrant because some writers read back through a locked helper
+# after their own write.
+_lock = threading.RLock()
+
+
+def _fetchone(sql: str, params: tuple = ()) -> sqlite3.Row | None:
+    with _lock:
+        return connect().execute(sql, params).fetchone()
+
+
+def _fetchall(sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+    with _lock:
+        return connect().execute(sql, params).fetchall()
 
 
 def now_iso() -> str:
@@ -233,15 +254,13 @@ def set_balance(wallet_id: str, balance_usd: float) -> float | None:
 
 
 def get_wallet(wallet_id: str) -> dict[str, Any] | None:
-    row = connect().execute("SELECT * FROM wallets WHERE id = ?", (wallet_id,)).fetchone()
+    row = _fetchone("SELECT * FROM wallets WHERE id = ?", (wallet_id,))
     return dict(row) if row else None
 
 
 def list_wallets() -> list[dict[str, Any]]:
     """Every wallet, for the dashboard's Provider Balances card."""
-    rows = connect().execute(
-        "SELECT * FROM wallets ORDER BY project_id, provider"
-    ).fetchall()
+    rows = _fetchall("SELECT * FROM wallets ORDER BY project_id, provider")
     return [dict(r) for r in rows]
 
 
@@ -370,11 +389,11 @@ def open_pending_mandate(project_id: str, session_id: str, provider: str,
 
 
 def pending_mandates(project_id: str) -> list[dict[str, Any]]:
-    rows = connect().execute(
+    rows = _fetchall(
         "SELECT * FROM mandates WHERE project_id = ? AND status = 'pending_approval'"
         " ORDER BY synced_at",
         (project_id,),
-    ).fetchall()
+    )
     return [dict(r) for r in rows]
 
 
@@ -392,12 +411,12 @@ def resolve_pending_mandate(row_id: str, status: str) -> None:
 
 def list_stored_mandates(project_id: str | None = None) -> list[dict[str, Any]]:
     if project_id:
-        rows = connect().execute(
+        rows = _fetchall(
             "SELECT * FROM mandates WHERE project_id = ? ORDER BY provider, id",
             (project_id,),
-        ).fetchall()
+        )
     else:
-        rows = connect().execute("SELECT * FROM mandates ORDER BY provider, id").fetchall()
+        rows = _fetchall("SELECT * FROM mandates ORDER BY provider, id")
     return [dict(r) for r in rows]
 
 
@@ -429,7 +448,7 @@ def chargeable_mandate(project_id: str, provider: str,
         params.append(min_remaining_usd)
     sql += " ORDER BY COALESCE(remaining_usd, approved_amount_usd) DESC LIMIT 1"
 
-    row = connect().execute(sql, params).fetchone()
+    row = _fetchone(sql, tuple(params))
     return dict(row) if row else None
 
 
@@ -521,11 +540,11 @@ def pending_event(wallet_id: str) -> dict[str, Any] | None:
     thing the key exists to prevent — Prava would see two unrelated charges rather than
     one retried charge. So a caller resumes a pending row instead of starting over.
     """
-    row = connect().execute(
+    row = _fetchone(
         "SELECT * FROM treasury_events WHERE wallet_id = ? AND status = 'pending'"
         " ORDER BY created_at LIMIT 1",
         (wallet_id,),
-    ).fetchone()
+    )
     return dict(row) if row else None
 
 
@@ -536,11 +555,11 @@ def settled_total_since(wallet_id: str, seconds: float) -> float:
     spend anything, and counting it would let a run of declines lock out a legitimate
     top-up.
     """
-    row = connect().execute(
+    row = _fetchone(
         "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM treasury_events"
         " WHERE wallet_id = ? AND status = 'settled' AND created_at >= ?",
         (wallet_id, iso_seconds_ago(seconds)),
-    ).fetchone()
+    )
     return float(row["total"] or 0.0)
 
 
@@ -550,11 +569,11 @@ def seconds_since_last_attempt(wallet_id: str) -> float | None:
     Backs the cooldown. Deliberately counts *attempts* rather than successes — a failing
     charge retried in a tight loop is the case the cooldown most needs to stop.
     """
-    row = connect().execute(
+    row = _fetchone(
         "SELECT created_at FROM treasury_events WHERE wallet_id = ?"
         " ORDER BY created_at DESC LIMIT 1",
         (wallet_id,),
-    ).fetchone()
+    )
     if not row:
         return None
     then = datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%S.%f+00:00")
@@ -564,9 +583,9 @@ def seconds_since_last_attempt(wallet_id: str) -> float | None:
 
 def recent_events(wallet_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """Most recent attempts for a wallet — backs the dashboard's Agent Activity panel."""
-    rows = connect().execute(
+    rows = _fetchall(
         "SELECT * FROM treasury_events WHERE wallet_id = ?"
         " ORDER BY created_at DESC LIMIT ?",
         (wallet_id, limit),
-    ).fetchall()
+    )
     return [dict(r) for r in rows]
