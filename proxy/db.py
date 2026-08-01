@@ -115,7 +115,17 @@ CREATE TABLE IF NOT EXISTS requests (
     is_stream           INTEGER NOT NULL DEFAULT 0,
     estimated           INTEGER NOT NULL DEFAULT 0,
     prompt_hash         TEXT,
-    reservation_id      TEXT
+    reservation_id      TEXT,
+    -- What the predictor said BEFORE the call, alongside what actually happened.
+    -- Storing both in the same row is what makes predictor accuracy a query rather
+    -- than a separate pipeline, and it is what feeds the learner (predictor/learner.py).
+    -- All nullable: a prediction is best-effort and must never be able to fail a
+    -- request. NULL means "not predicted" (unsupported model, or predictor errored),
+    -- which is different from and must not be confused with a prediction of zero.
+    predicted_output_tokens INTEGER,
+    predicted_cost_usd      REAL,
+    bucket                  TEXT,
+    prediction_method       TEXT
 );
 
 -- (project_id, ts) backs the rolling-window breaker check that runs on every single
@@ -125,6 +135,10 @@ CREATE INDEX IF NOT EXISTS idx_requests_project_ts ON requests(project_id, ts);
 CREATE INDEX IF NOT EXISTS idx_requests_trace     ON requests(trace_id);
 -- prompt_hash backs duplicate-call and cache-candidate detection for the Analyst.
 CREATE INDEX IF NOT EXISTS idx_requests_prompt    ON requests(prompt_hash);
+-- NOTE: the index on `bucket` is NOT here. It is created in _migrate(), after the
+-- column exists. Creating it here fails outright on a ledger that predates the
+-- column, because CREATE TABLE IF NOT EXISTS no-ops on the existing table and then
+-- the index references a column that is not there yet.
 
 CREATE TABLE IF NOT EXISTS breaker_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -162,9 +176,41 @@ def connect() -> sqlite3.Connection:
         # Concurrent writers wait instead of immediately raising "database is locked".
         conn.execute("PRAGMA busy_timeout=5000")
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
         _conn = conn
         return _conn
+
+
+# Columns added after the first ledgers were already created. CREATE TABLE IF NOT
+# EXISTS silently does nothing on an existing table, so without this anyone holding a
+# meter.db from before these columns landed gets "no such column" on every write.
+# Dropping their ledger instead is not an option: it is the priced history, which
+# ARCHITECTURE.md §9 calls the part that does not port.
+_ADDED_COLUMNS = (
+    ("requests", "predicted_output_tokens", "INTEGER"),
+    ("requests", "predicted_cost_usd", "REAL"),
+    ("requests", "bucket", "TEXT"),
+    ("requests", "prediction_method", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns missing from an older ledger. Idempotent, safe on a fresh DB.
+
+    Runs after the schema script, so every table exists by now. Any index that
+    references a migrated column must be created here rather than in SCHEMA, for the
+    reason noted there.
+    """
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table absent entirely; SCHEMA owns creating it
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+    # bucket backs the learner's per-bucket refit and the accuracy-by-bucket report.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_bucket ON requests(bucket)")
 
 
 def seed_keys(spec: str) -> int:
@@ -242,6 +288,7 @@ _REQUEST_COLUMNS = (
     "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
     "pricing_version", "cost_usd", "latency_ms", "ttft_ms", "overhead_ms",
     "status", "is_stream", "estimated", "prompt_hash", "reservation_id",
+    "predicted_output_tokens", "predicted_cost_usd", "bucket", "prediction_method",
 )
 
 
