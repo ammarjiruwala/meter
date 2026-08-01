@@ -113,7 +113,14 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 
 *   **Treasurer Agent / Prava:** Not started.
 
-*   **Dashboard:** Not started. Tanay can read `meter.db` directly today — WAL mode is on, so reading while the proxy writes is safe.
+*   **Dashboard: BASIC LAYOUT WORKING.** `dashboard/` — Next.js (App Router) + Tailwind, `npm run dev`
+    from `dashboard/`. Reads `proxy/meter.db` directly and read-only (`dashboard/src/lib/db.ts`),
+    WAL mode makes concurrent reads with the proxy's writer safe. Renders a "Team Spend" table
+    (grouped by project/actor/feature from `requests`) and a "Provider Balances" card — the latter
+    is placeholder data (`dashboard/src/lib/wallets.ts`) since no `wallets` table exists yet.
+    Handles the ledger-not-created-yet case (nobody has run the proxy) with an empty state instead
+    of crashing. Not yet done: live streaming/polling (Phase 2's Live Logs table), Poke alert
+    wiring (Phase 3, hooks into `breaker.notify()`).
 
 *   **Open blockers/decisions:**
     1.  **Pricing rates are unverified and this blocks the demo.** `pricing/2026-08-01.yaml` was written from memory. Every dollar Meter displays comes from it, and a wrong list price is checkable from the audience. ~30 min for someone to diff against the providers' pricing pages. (`PROPOSALS.md` C1)
