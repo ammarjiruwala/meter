@@ -103,6 +103,25 @@ class PredictionResult:
 class Predictor:
     """One instance per proxy process. Holds learned state; safe across threads."""
 
+    @staticmethod
+    def _load_fitted():
+        """Load constants and per-bucket factors produced by predictor/optimize.py.
+
+        Falls back to the shipped defaults when absent, so a fresh checkout works
+        without a fitting run and a bad fit can be reverted by deleting one file.
+        """
+        import json as _json
+        from pathlib import Path as _P
+        path = _P(__file__).resolve().parent.parent / "data" / "fitted.json"
+        if not path.exists():
+            return None, {}
+        try:
+            blob = _json.loads(path.read_text())
+            from .scope import ScopeConfig
+            return ScopeConfig(**blob["config"]), blob.get("factors", {})
+        except Exception:
+            return None, {}
+
     def __init__(self, buffer: float = DEFAULT_BUFFER) -> None:
         self._default_buffer = buffer
         self._buffers: Dict[str, float] = {}
@@ -111,6 +130,7 @@ class Predictor:
         self._fits: Dict[str, Fit] = {}
         self._cache: "OrderedDict[str, PredictionResult]" = OrderedDict()
         self._lock = Lock()
+        self._cfg, self._factors = self._load_fitted()
 
     # --- step 0 ------------------------------------------------------------
 
@@ -181,9 +201,12 @@ class Predictor:
             method, tasks = "json_schema", []
         else:
             # ── 2 & 3. EXPLICIT LENGTH, else TASK STACKING ─────────────────
-            raw, method, tasks = scope_mod.estimate(payload, model)
+            raw, method, tasks = scope_mod.estimate(payload, model, self._cfg)
 
         scope_tokens = max(1, int(round(raw)))
+        # Per-bucket scale fitted on held-out data. Applied to the raw scope, so the
+        # ledger's predicted_scope_tokens stays the clean baseline the learner needs.
+        raw *= self._factors.get(bucket, 1.0)
 
         # ── 4. SAFETY BUFFER (asymmetric, per bucket) ──────────────────────
         raw *= self._buffer_for(bucket)

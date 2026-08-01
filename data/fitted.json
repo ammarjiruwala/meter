@@ -1,0 +1,35 @@
+{
+  "config": {
+    "base_scope": 80.0,
+    "scope_cap": 1500.0,
+    "task_summary": 250.0,
+    "task_code": 0.0,
+    "task_extract": 50.0,
+    "task_search": 400.0,
+    "high_intensity": 1.2,
+    "low_intensity": 0.15,
+    "cot": 1.0,
+    "terse": 0.3,
+    "verbose": 1.5,
+    "instruction_low": 0.7,
+    "instruction_high": 1.5,
+    "instruction_pivot": 400.0,
+    "tokens_per_sentence": 35.0,
+    "tokens_per_word": 1.33,
+    "imperative": 1.2
+  },
+  "factors": {
+    "default": 3.0166666666666666,
+    "explanation": 2.4,
+    "list": 2.876157407407408,
+    "reasoning": 4.687500000000001,
+    "code": 4.030980902777778
+  },
+  "validation": {
+    "median": 44.24044626465189,
+    "mape": 309.77511286510213,
+    "under": 53.333333333333336,
+    "within_50": 53.333333333333336,
+    "n": 150
+  }
+}
