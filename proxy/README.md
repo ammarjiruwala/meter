@@ -26,6 +26,9 @@ curl localhost:8080/v1/chat/completions \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+Booting also creates the treasury tables (`wallets`, `mandates`, `treasury_events`) in the
+same file, so the dashboard can read balances on a fresh clone.
+
 The ledger lands in `meter.db` (SQLite, gitignored):
 
 ```bash
@@ -38,7 +41,7 @@ sqlite3 meter.db \
 ## Test it
 
 ```bash
-python tests/test_proxy.py     # 78 assertions, no framework, ~1s
+python tests/test_proxy.py     # 127 checks, no framework, ~1s
 ```
 
 Covers model routing, provider key substitution, longest-prefix pricing, both SSE parser
@@ -59,6 +62,10 @@ half-open re-trip → auto-close → manual reset → revoke mode).
 | `db.py` | SQLite ledger, meter keys, breaker events, window queries |
 | `config.py` | Environment parsing. No I/O, safe to import from anywhere |
 
+`app.py` also imports `treasury/` (Shivam) to mount its routers and to create its tables at
+boot. The dependency runs one way — `treasury.db` reads `proxy.config` for `DB_PATH` so the
+two halves can never disagree about which file the database is.
+
 ## Endpoints
 
 | Route | Purpose |
@@ -67,6 +74,21 @@ half-open re-trip → auto-close → manual reset → revoke mode).
 | `POST /v1/messages` | Anthropic-native. An Anthropic SDK will never call the OpenAI path |
 | `POST /v1/breaker/reset` | Manual breaker reset and key un-revoke |
 | `GET /healthz` | Liveness plus a config echo, for diagnosing a misconfigured demo box |
+
+Shivam's treasury routes are mounted on this same app (`treasury/routes.py`,
+`treasury/mock_provider.py`), so the backend is one process on one port rather than a
+second server nobody remembers to start. They are deliberately **off** the `/v1` prefix:
+`/v1` is the surface a caller's provider SDK targets, and control-plane routes do not
+belong in it.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /wallets` · `POST /wallets/seed` | Provider credit balances. The dashboard's Provider Balances card reads the table directly |
+| `GET /mandates` | Live headroom from Prava |
+| `POST /mandates/sync` | Pull Prava's mandates into the local `mandates` table |
+| `GET /mandates/stored` · `GET /mandates/chargeable` | What the Treasurer will actually read, and which mandate it would pick |
+| `POST /charge` · `POST /report` · `POST /charge-refusal` | Mandate charge, settlement, and the over-cap refusal demo beat |
+| `POST /mock-openai/billing` | Stands in for the provider's billing system — the one simulated component |
 
 ---
 
@@ -118,6 +140,19 @@ the tokens were burned either way.
 still produce a ledger row, flagged `estimated = true`. A missing row understates spend,
 which is the one direction of error a budget tool cannot have.
 
+**The proxy is no longer the only writer to `meter.db`.** `treasury/db.py` writes `wallets`
+and `treasury_events` to the same file — the Treasurer credits a balance while the proxy is
+writing ledger rows. WAL already made concurrent *reads* safe for the dashboard; concurrent
+writers serialise, which is why both connections set `busy_timeout` and why every treasury
+write is a single statement with no transaction held open across a network call to Prava.
+If you add a long-running transaction on this side, that assumption breaks.
+
+**The treasury tables are created in `lifespan`, not on first use.** `treasury.db.connect()`
+is lazy, so without that call the `wallets` table would not exist until somebody happened to
+hit a treasury route — and the dashboard reads that table directly and read-only. It would
+have failed with "no such table: wallets" on any machine where nobody had called the
+endpoint yet, which is every teammate's machine on a fresh clone.
+
 **Untagged traffic is its own breaker scope, not the project total.** Summing the project
 for the `*` scope would let one tagged feature's burst trip the breaker for untagged
 traffic — which is usually the traffic nobody has instrumented yet, i.e. production. The
@@ -153,7 +188,7 @@ Each of these is a deliberate omission with a reason, not an oversight.
 | --- | --- | --- |
 | **Reservations (authorize/capture)** | Redis Lua per ARCHITECTURE.md §2; Redis is not in the Phase 1 dependency set. `reservation_id` is written NULL so adding it later is a code change, not a migration | Shubh, once Redis is stood up |
 | **Per-project daily ceilings** | `projects.ceiling_usd_day` and `db.project_window_spend()` both exist; nothing enforces them yet. Needs the `meter.yaml` loader, which no phase assigns to anyone | See PROPOSALS.md B7 |
-| **Postgres** | Shivam owns the schema. Column names here match ARCHITECTURE.md §4 verbatim so the port is a swap | Shivam, Phase 1–2 |
+| **Postgres** | Still SQLite. Shivam's treasury tables (`wallets`, `mandates`, `treasury_events`) landed in this same file, also with ARCHITECTURE.md §4 column names verbatim, so the port stays one swap for both halves | Shivam, Phase 2 |
 | **`POST /v1/annotate`** | Documented in README.md as attribution rung 3 and called "the margin metric" in ARCHITECTURE.md §4, but assigned to nobody in PLAN.md | See PROPOSALS.md B9 |
 | **7-day breaker baseline** | Resolved differently: the burst check compares against the trailing *hour*, which needs no accumulated history and works on day one. See ARCHITECTURE.md §6 | Done |
 | **Poke/Linq alerts** | `breaker.notify()` is the seam, deliberately log-only. An awaited third-party HTTP call in the request path puts someone else's latency in front of production | Tanay, Phase 3 |

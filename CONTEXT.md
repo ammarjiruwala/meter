@@ -101,8 +101,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 
 *   **Last updated:** 2026-08-01 — Shivam's treasury schema (`wallets`, `mandates`, `treasury_events`)
     and mock provider billing landed, then folded into the proxy app: one process, one port.
-    **`proxy/README.md` still describes the proxy's routes as `/v1` + `/healthz` only — Shubh to
-    refresh it.**
+    `proxy/README.md` refreshed to match (routes, the shared-writer note, boot-time table
+    creation) — done with Shubh's sign-off.
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
