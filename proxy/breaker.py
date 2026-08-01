@@ -268,14 +268,17 @@ def reset(scope: str, key_id: str | None = None, reset_by: str = "manual") -> di
 
 
 def notify(scope: str, mode: str, metric: dict[str, Any]) -> None:
-    """Alert seam for the Poke/Linq iMessage integration.
+    """Alert on a tripped breaker: always a log line, plus iMessage if configured.
 
-    Owned by Tanay (CONTEXT.md §6). Deliberately left as a log line: wiring an outbound
-    HTTP call into the request path from this side would put a third-party API's latency
-    and failure modes directly in front of production traffic. When Poke lands it should
-    be dispatched as a background task from here, never awaited inline.
+    The log line comes first and unconditionally. It is the record of record —
+    Poke may be unconfigured, rate-limited, or down, and none of those may cost us
+    the evidence that a breaker tripped.
 
-    ponytail: log-only seam; Tanay replaces the body with a fire-and-forget Poke call.
+    The iMessage is dispatched by ``alerts.poke`` on a daemon thread and is not
+    awaited. This function runs inside the request path (via ``asyncio.to_thread``),
+    so an inline HTTP call would put a third-party API's latency and failure modes
+    directly in front of production traffic. ``send_breaker_alert`` also swallows its
+    own exceptions, so alerting cannot escalate into a request failure.
     """
     log.warning(
         "ALERT circuit breaker tripped scope=%s mode=%s spend=$%.4f threshold=$%.2f",
@@ -284,3 +287,12 @@ def notify(scope: str, mode: str, metric: dict[str, Any]) -> None:
         metric.get("window_spend_usd", 0.0),
         metric.get("threshold_usd", 0.0),
     )
+
+    try:
+        from alerts import send_breaker_alert
+
+        send_breaker_alert(scope, mode, metric)
+    except Exception as exc:  # noqa: BLE001
+        # Covers the import itself — a missing dependency in the alerts package
+        # must not take down the breaker that is mid-trip.
+        log.warning("poke alert dispatch failed: %s: %s", type(exc).__name__, exc)

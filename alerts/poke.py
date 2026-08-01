@@ -1,0 +1,154 @@
+"""Circuit-breaker alerts over iMessage, via the Linq Partner API v3.
+
+Called from ``proxy.breaker.notify`` at the moment a breaker trips. Two
+properties matter more than anything else here, and both are load-bearing:
+
+**It never blocks the caller.** ``notify()`` runs inside the request path (via
+``asyncio.to_thread``), so an awaited HTTP call would put Linq's latency and
+failure modes directly in front of production traffic — the exact thing a cost
+tool must not do. Dispatch happens on a daemon thread and the caller returns
+immediately.
+
+**It never raises.** An alerting failure is not a request failure. Everything is
+caught and logged; the breaker's own log line in ``notify()`` remains the record
+of record whether or not the message goes out.
+
+Endpoint choice: ``POST /v3/messages`` rather than ``POST /v3/chats``, because it
+resolves the sending line and the chat itself
+(docs/linq/api/resources/messages/methods/create/index.md). We do not own a
+provisioned number here, and picking one would be guessing.
+
+Owner: Tanay (Frontend & DX).
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any
+
+import httpx
+
+from . import config
+
+log = logging.getLogger("meter.alerts.poke")
+
+# scope -> monotonic timestamp of the last message actually dispatched.
+_last_sent: dict[str, float] = {}
+_lock = threading.Lock()
+
+
+def _within_cooldown(scope: str, now: float | None = None) -> bool:
+    """True when this scope alerted recently enough that we should stay quiet."""
+    now = time.monotonic() if now is None else now
+    with _lock:
+        last = _last_sent.get(scope)
+        if last is not None and (now - last) < config.POKE_COOLDOWN_S:
+            return True
+        _last_sent[scope] = now
+        return False
+
+
+def reset_cooldown() -> None:
+    """Clear dedup state. For tests and for a manual breaker reset."""
+    with _lock:
+        _last_sent.clear()
+
+
+def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:
+    """The message body.
+
+    Leads with the numbers the breaker actually compared. "A breaker tripped" is
+    an interruption; "$24.13 in 5 min against a $20.00 floor" is something the
+    person holding the phone can act on without opening a laptop.
+    """
+    spend = metric.get("window_spend_usd")
+    floor = metric.get("threshold_usd")
+    window_s = metric.get("window_s")
+
+    effect = (
+        "key revoked — all traffic on it is blocked"
+        if mode == "revoke"
+        else "that tag is being throttled; other traffic is unaffected"
+    )
+
+    lines = [f"\U0001f6a8 Meter: circuit breaker tripped on {scope}"]
+
+    if isinstance(spend, (int, float)) and isinstance(floor, (int, float)):
+        window = f"{int(window_s) // 60} min" if isinstance(window_s, (int, float)) else "the window"
+        lines.append(f"${spend:,.2f} in {window} against a ${floor:,.2f} floor")
+
+    ratio = metric.get("burst_ratio")
+    if isinstance(ratio, (int, float)):
+        lines.append(f"{ratio:.1f}x the trailing hourly rate")
+    elif "burst_ratio" in metric and ratio is None:
+        # None means the baseline window had no spend at all — a tag that went
+        # from nothing to over the floor, which is the leaked-key shape.
+        lines.append("no prior spend in the baseline window")
+
+    lines.append(effect)
+    lines.append("Reset: POST /v1/breaker/reset")
+    return "\n".join(lines)
+
+
+def _post(body: str) -> None:
+    """Blocking send. Only ever called on the dispatch thread."""
+    url = f"{config.POKE_API_BASE}/messages"
+    try:
+        response = httpx.post(
+            url,
+            timeout=config.POKE_TIMEOUT_S,
+            headers={
+                "Authorization": f"Bearer {config.POKE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "to": [config.POKE_CTO_PHONE],
+                "message": {"parts": [{"type": "text", "value": body}]},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — an alert must never escalate
+        log.warning("poke alert failed to send: %s: %s", type(exc).__name__, exc)
+        return
+
+    # 202 Accepted is the documented success for this endpoint; chat creation is
+    # incidental to the send.
+    if response.status_code in (200, 201, 202):
+        log.info("poke alert sent (HTTP %s)", response.status_code)
+    else:
+        # Linq returns a structured error code; surfacing it beats a bare status.
+        log.warning(
+            "poke alert rejected (HTTP %s): %s",
+            response.status_code,
+            response.text[:300],
+        )
+
+
+def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any]) -> bool:
+    """Fire-and-forget an iMessage about a tripped breaker.
+
+    Returns whether a send was *dispatched* — not whether it arrived, which is
+    not knowable synchronously and which no caller should be waiting on.
+    """
+    configured, reason = config.is_configured()
+    if not configured:
+        log.info("poke alert skipped: %s", reason)
+        return False
+
+    if _within_cooldown(scope):
+        log.info(
+            "poke alert suppressed for %s (within %.0fs cooldown)",
+            scope,
+            config.POKE_COOLDOWN_S,
+        )
+        return False
+
+    body = compose(scope, mode, metric)
+    # Daemon so a hung request can never hold up interpreter shutdown. There is
+    # no event loop on this thread — breaker.check() runs under asyncio.to_thread
+    # — so a thread is the right primitive rather than a task.
+    threading.Thread(
+        target=_post, args=(body,), name=f"poke-alert-{scope}", daemon=True
+    ).start()
+    return True

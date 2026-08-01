@@ -103,7 +103,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     and mock provider billing landed, then folded into the proxy app: one process, one port.
     `proxy/README.md` refreshed to match (routes, the shared-writer note, boot-time table
     creation) — done with Shubh's sign-off. Dashboard restyled onto a dark control-room visual
-    system (Tanay); Phase 4's "finalize UI" is effectively done ahead of schedule.
+    system (Tanay); Phase 4's "finalize UI" is effectively done ahead of schedule. Poke/Linq
+    breaker alerts wired (Tanay) — code complete, awaiting a live token to verify.
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -122,7 +123,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 
 *   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
 
-*   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are NOT wired** — `breaker.notify()` is a log-only seam waiting on Tanay.
+*   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are wired** — see the Alerts entry below.
 
 *   **Predictive Engine: WORKING (v1), NOT YET WIRED INTO THE PROXY.** `predictor/` — full detail in `predictor/README.md`, self-check `python tests/test_predictor.py` (43 checks).
     *   `predict(payload, model, max_tokens) -> PredictionResult` — the ESTIMATE step of ARCHITECTURE.md §2. Deterministic, no I/O, **p50 0.031ms** (~0.6% of the 5ms pre-flight budget).
@@ -208,8 +209,30 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         `requests` table, and the whole page 500'd with `no such table: requests`. Each read
         checks `sqlite_master` first and degrades to an empty state per card, so a half-built
         database shows what it has instead of nothing.
-    *   Not yet done: Poke alert wiring (Phase 3, hooks into `breaker.notify()`), Model Efficiency
-        view (Phase 3, needs Ammar's cross-model data), Agent Activity panel (Phase 3, Treasurer).
+    *   Not yet done: Model Efficiency view (Phase 3, needs Ammar's cross-model data), Agent
+        Activity panel (Phase 3, needs the Treasurer loop).
+
+*   **Alerts (Poke / Linq): WIRED, UNVERIFIED AGAINST THE LIVE API.** `alerts/` — a sibling
+    package to `treasury` and `predictor`. `proxy.breaker.notify()` still logs unconditionally
+    (that line is the record of record) and then hands off to `alerts.send_breaker_alert`.
+    *   `POST /v3/messages` on the Linq Partner API, which resolves the sending line and chat
+        itself — we own no provisioned number, and picking one would be guessing.
+    *   **Dispatched on a daemon thread, never awaited.** `notify()` runs inside the request path,
+        so an inline HTTP call would put a third party's latency in front of production traffic.
+        It also swallows every exception: an alerting failure must not become a request failure.
+    *   **Per-scope cooldown, default 300s** (`POKE_COOLDOWN_S`). A breaker half-opens and
+        re-trips while a burst continues; without a floor, one runaway feature texts somebody
+        every few seconds, which is how an alerting channel gets muted for good.
+    *   Silent without credentials, so every teammate's machine stays quiet. `POKE_ENABLED` is a
+        separate kill switch. Destination must be E.164 — validated at config time, because Linq
+        rejects anything else with error 1002 and it would otherwise surface as an unsent alert
+        mid-incident.
+    *   `python tests/test_alerts.py` — 40 checks covering payload shape, the configuration gate,
+        cooldown, failure isolation, and that a 1.5s send returns to the caller in under 0.25s.
+    *   🚨 **Still needs a real Linq bearer token.** Everything is tested against a mocked
+        transport; nobody has confirmed an actual iMessage arrives, and "the key leaks, the lead
+        gets a text" is a live demo beat. Whoever registered with Linq needs to put a token in
+        `.env` as `POKE_API_KEY`, plus a destination in `POKE_CTO_PHONE`.
 
 *   **Resolved since kickoff:**
     1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)
