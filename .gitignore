@@ -4,3 +4,17 @@ __pycache__/
 *.pyc
 node_modules/
 .next/ 
+.next/
+
+# Python virtualenvs
+.venv/
+venv/
+
+# The Phase 1 SQLite ledger and its WAL sidecars. Local spend data — never committed,
+# and it would conflict on every merge anyway.
+meter.db
+meter.db-wal
+meter.db-shm
+*.db
+*.db-wal
+*.db-shm

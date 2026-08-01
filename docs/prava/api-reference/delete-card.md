@@ -1,0 +1,94 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.prava.space/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Delete Card
+
+> Delete a customer's enrolled card and retire its network token
+
+Delete an enrolled card. Deletion also retires the card's network token (the tokenized stand-in for the card at the card network) where one exists.
+
+`POST /v1/deleteCard` · Authenticated with your secret key.
+
+## Body
+
+<ParamField body="customer_id" type="string" required>
+  The customer whose card to delete (the `user_id` used at session creation).
+</ParamField>
+
+<ParamField body="card_id" type="string" required>
+  The card to delete — the same identifier as the `enrollmentId` from the SDK's [`collectPAN`](/sdk/cards/collect-pan) and the `card_id` in [List Cards](/api-reference/list-cards).
+</ParamField>
+
+<ParamField body="reason" type="string" default="OTHER">
+  Why the card is being deleted: `CUSTOMER_CONFIRMED`, `LOST`, `STOLEN`, `SUSPECTED_FRAUD`, `CLOSED_ACCOUNT`, or `OTHER`.
+</ParamField>
+
+## Response
+
+<ResponseField name="success" type="boolean">Whether the card was deleted.</ResponseField>
+<ResponseField name="card_id" type="string">The deleted card id.</ResponseField>
+<ResponseField name="was_default" type="boolean">Whether the deleted card was the customer's default. If `true`, the customer picks a new default on their next payment.</ResponseField>
+<ResponseField name="network_token_deleted" type="boolean">Whether a card-network token was retired as part of the deletion.</ResponseField>
+
+## Error responses
+
+| Status | Code                    | Cause                                | Resolution                                                   |
+| ------ | ----------------------- | ------------------------------------ | ------------------------------------------------------------ |
+| 401    | `AUTH_1001`             | Invalid API key                      | Check your secret key                                        |
+| 400    | `INVALID_REQUEST`       | Missing `customer_id` or `card_id`   | Include both fields                                          |
+| 404    | `CUSTOMER_NOT_FOUND`    | No customer for the given identifier | Verify `customer_id`                                         |
+| 404    | `NOT_FOUND`             | Card not found                       | Verify `card_id` via [List Cards](/api-reference/list-cards) |
+| 502    | `NETWORK_DELETE_FAILED` | Card-network deletion failed         | Retry the request                                            |
+
+<RequestExample>
+  ```bash cURL theme={null}
+  curl -X POST https://sandbox.api.prava.space/v1/deleteCard \
+    -H "Authorization: Bearer sk_test_..." \
+    -H "Content-Type: application/json" \
+    -d '{ "customer_id": "user_123", "card_id": "card_1", "reason": "CUSTOMER_CONFIRMED" }'
+  ```
+
+  ```python Python theme={null}
+  import requests
+
+  resp = requests.post(
+      "https://sandbox.api.prava.space/v1/deleteCard",
+      headers={"Authorization": "Bearer sk_test_..."},
+      json={"customer_id": "user_123", "card_id": "card_1", "reason": "CUSTOMER_CONFIRMED"},
+  )
+  ```
+
+  ```javascript JavaScript theme={null}
+  const resp = await fetch("https://sandbox.api.prava.space/v1/deleteCard", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer sk_test_...",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      customer_id: "user_123",
+      card_id: "card_1",
+      reason: "CUSTOMER_CONFIRMED",
+    }),
+  });
+  ```
+</RequestExample>
+
+<ResponseExample>
+  ```json 200 Success theme={null}
+  { "success": true, "card_id": "card_1", "was_default": false, "network_token_deleted": true }
+  ```
+
+  ```json 400 Validation theme={null}
+  {
+    "error": { "code": "INVALID_REQUEST", "message": "Missing customer_id or card_id" }
+  }
+  ```
+
+  ```json 404 Not Found theme={null}
+  {
+    "error": { "code": "NOT_FOUND", "message": "Card not found" }
+  }
+  ```
+</ResponseExample>

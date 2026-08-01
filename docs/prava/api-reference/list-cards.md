@@ -1,0 +1,119 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.prava.space/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# List Cards
+
+> Retrieve enrolled cards for a customer
+
+Retrieve a customer's enrolled cards. Only non-sensitive card metadata is returned — full PANs (the real card numbers) are never exposed.
+
+`GET /v1/listCards` · Authenticated with your secret key.
+
+<Note>
+  Cards are scoped by `merchant_id` (derived from your secret key) and the `customer_id` query
+  parameter.
+</Note>
+
+## Query parameters
+
+<ParamField query="customer_id" type="string" required>
+  The customer to list cards for — the same value you passed as `user_id` when creating the session.
+</ParamField>
+
+<ParamField query="status" type="string" default="active">
+  `active` (default) or `all` (include previously deleted cards for historical reference).
+</ParamField>
+
+<ParamField query="include_card_art" type="string" default="false">
+  `true` to include `card_art_url` and display `metadata`; otherwise those fields are null.
+</ParamField>
+
+## Response
+
+<ResponseField name="cards" type="object[]">
+  <Expandable title="card properties">
+    <ResponseField name="card_id" type="string">Card id — the same identifier as the SDK `enrollmentId` from [`collectPAN()`](/sdk/cards/collect-pan).</ResponseField>
+    <ResponseField name="card_last4" type="string">Last 4 digits.</ResponseField>
+    <ResponseField name="card_brand" type="string | null">e.g. `"visa"`, or null if unknown.</ResponseField>
+    <ResponseField name="card_exp_month" type="number | null">1–12.</ResponseField>
+    <ResponseField name="card_exp_year" type="number | null">4-digit year.</ResponseField>
+    <ResponseField name="masked_card_number" type="string | null">Masked PAN, or null.</ResponseField>
+    <ResponseField name="is_default" type="boolean">Whether this is the customer's default card.</ResponseField>
+    <ResponseField name="status" type="string">`active` or `deleted`.</ResponseField>
+    <ResponseField name="card_art_url" type="string | null">Only when `include_card_art=true`.</ResponseField>
+    <ResponseField name="metadata" type="object | null">Display metadata (`backgroundColor`, `foregroundColor`, `labelColor`).</ResponseField>
+    <ResponseField name="created_at" type="string">ISO 8601 enrollment timestamp.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="count" type="number">Number of cards returned.</ResponseField>
+
+## Error responses
+
+| Status | Code                 | Cause                                         |
+| ------ | -------------------- | --------------------------------------------- |
+| 400    | `INVALID_REQUEST`    | Missing `customer_id` query parameter         |
+| 401    | `AUTH_1001`          | Invalid API key                               |
+| 401    | `AUTH_1002`          | Missing or invalid Authorization header       |
+| 404    | `CUSTOMER_NOT_FOUND` | No customer found for the given `customer_id` |
+
+<RequestExample>
+  ```bash cURL theme={null}
+  curl "https://sandbox.api.prava.space/v1/listCards?customer_id=user_123&status=active" \
+    -H "Authorization: Bearer sk_test_..."
+  ```
+
+  ```python Python theme={null}
+  import requests
+
+  resp = requests.get(
+      "https://sandbox.api.prava.space/v1/listCards",
+      headers={"Authorization": "Bearer sk_test_..."},
+      params={"customer_id": "user_123", "status": "active"},
+  )
+  ```
+
+  ```javascript JavaScript theme={null}
+  const resp = await fetch(
+    "https://sandbox.api.prava.space/v1/listCards?customer_id=user_123&status=active",
+    {
+      headers: {
+        Authorization: "Bearer sk_test_...",
+      },
+    }
+  );
+  ```
+</RequestExample>
+
+<ResponseExample>
+  ```json 200 Success theme={null}
+  {
+    "cards": [
+      {
+        "card_id": "card_1",
+        "card_last4": "4242",
+        "card_brand": "visa",
+        "card_exp_month": 12,
+        "card_exp_year": 2030,
+        "is_default": true,
+        "status": "active",
+        "created_at": "2026-05-01T10:00:00Z"
+      }
+    ],
+    "count": 1
+  }
+  ```
+
+  ```json 400 Validation theme={null}
+  {
+    "error": { "code": "INVALID_REQUEST", "message": "Missing customer_id" }
+  }
+  ```
+
+  ```json 404 Not Found theme={null}
+  {
+    "error": { "code": "CUSTOMER_NOT_FOUND", "message": "No customer for the given customer_id" }
+  }
+  ```
+</ResponseExample>

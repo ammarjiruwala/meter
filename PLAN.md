@@ -11,7 +11,16 @@ Here is the finalized, personalized 48-hour battle plan with tasks assigned to S
 
 ### 🏗️ Phase 1: The Real Proxy & Foundation (Hours 1 - 12)  
 **Goal:** Intercept real traffic, call real LLMs, and log actual token usage.  
-*   **Shubh (Proxy & Infra):** Set up FastAPI. Create the `/v1/chat/completions` endpoint. Forward traffic to real OpenAI/Anthropic using a master company key, and return the response.  
+*   ✅ **DONE — Shubh (Proxy & Infra):** ~~Set up FastAPI. Create the `/v1/chat/completions` endpoint. Forward traffic to real OpenAI/Anthropic using a master company key, and return the response.~~
+    *   FastAPI app in `proxy/`, run with `uvicorn proxy.app:app --port 8080`. See `proxy/README.md`.
+    *   `POST /v1/chat/completions` (OpenAI-shaped) **and** `POST /v1/messages` (Anthropic-native) — an Anthropic SDK never calls the OpenAI path, so one route alone would have made "every provider" mean "OpenAI".
+    *   Master-key substitution: the caller sends a **Meter** key, the proxy swaps in the provider key on the way out. Outbound headers are a whitelist so the caller's key can never leak upstream.
+    *   Provider routing by model prefix (`claude-*` → Anthropic), overridable with `X-Meter-Provider`.
+    *   **SSE streaming with real usage extraction** — pulled forward from Phase 2 because `ARCHITECTURE.md` §2 calls it the most underestimated part of the build. Injects `stream_options.include_usage` for OpenAI and strips the extra chunk back out; reads Anthropic usage across both `message_start` and `message_delta`.
+    *   Attribution rungs 0–2: `X-Meter-Feature`, `X-Meter-Actor`, `X-Meter-Trace`, plus a defined `prompt_hash` normalization (see `PROPOSALS.md` B6).
+    *   Priced SQLite ledger with column names matching `ARCHITECTURE.md` §4 verbatim, so Shivam's Postgres port is a schema swap. Capture runs off the hot path and survives a mid-stream client disconnect.
+    *   Latency instrumentation: `overhead_ms` column + `X-Meter-Overhead-Ms` response header. **Measured p50 +1.49 ms** wall-clock against a local fake upstream (loopback, no TLS — treat as a floor).
+    *   `python tests/test_proxy.py` — 78 assertions, no framework.
 *   **Shivam (Payments & Agent):** Set up the Postgres/SQLite DB schema (`users`, `wallets`, `transactions`, `model_efficiency`). Build the **Mock Provider Billing Endpoint** (`/mock-openai/billing`).  
 *   **Ammar (Predictive AI):** Integrate `tiktoken` for input counting. Build the initial output prediction heuristic (e.g., "If task is coding, output = input * 2.0").  
 *   **Tanay (Frontend & DX):** Initialize Next.js app. Connect to the DB. Build the basic layout: A table for "Team Spend" and a card showing "Provider Balances".
@@ -20,7 +29,9 @@ Here is the finalized, personalized 48-hour battle plan with tasks assigned to S
 
 ### 🧠 Phase 2: Prediction Engine & Prava Sandbox (Hours 12 - 24)  
 **Goal:** Predict costs before execution and successfully generate a Prava sandbox card.  
-*   **Shubh (Proxy & Infra):** Integrate Ammar's predictive engine into the proxy. *Before* forwarding, check predicted cost against budget. *After* getting the real response, log actual cost and calculate variance (Predicted vs. Actual).  
+*   **Shubh (Proxy & Infra):** Integrate Ammar's predictive engine into the proxy. *Before* forwarding, check predicted cost against budget. *After* getting the real response, log actual cost and calculate variance (Predicted vs. Actual).
+    *   **Budget enforcement — newly assigned (`PROPOSALS.md` B7).** This was specified in three documents and owned by nobody. It is the "Budget" pillar from the README's own table, and the only one of the three with no owner. Scope: a `meter.yaml` loader that upserts into `projects`/`feature_budgets` at boot (also resolves the `meter.yaml`-vs-DB source-of-truth conflict, `PROPOSALS.md` A6), then a pre-flight ceiling check in the request path returning `429` with a header naming the ceiling that was hit. The query half already exists as `db.project_window_spend()`. ~60 lines.
+    *   **Reservations — newly assigned (`PROPOSALS.md` A5).** Decision: **no Redis in the 48-hour build.** Redis is not what makes authorize/capture correct — serialization is, and with a single proxy process an `asyncio.Lock` around the same read-modify-write is an identical guarantee. Implement reservations against the existing SQLite ledger (reserve estimate → forward → release the difference on capture → TTL-expire abandoned holds) so the thousand-concurrent-requests hole `ARCHITECTURE.md` §2 describes is genuinely closed and the demo can show a ceiling holding. Redis Lua becomes necessary at proxy replica #2, not before; the upgrade is one function. ~40 lines.
 *   **Shivam (Payments & Agent):** Authenticate with Prava Sandbox. Write the Python function to create a one-time card using the fake credit card info. Connect Mock Billing to process this card token.  
 *   **Ammar (Predictive AI):** Implement the cross-model routing logic. Allow the proxy to send the *same* prompt to both OpenAI and Anthropic. Log the actual token usage for both so we can compare which model is more token-efficient for specific task types.  
 *   **Tanay (Frontend & DX):** Build the "Live Logs" table. It should show: `User | Model | Predicted Cost | Actual Cost | Status`. Auto-refresh via polling.
@@ -29,7 +40,14 @@ Here is the finalized, personalized 48-hour battle plan with tasks assigned to S
 
 ### ⚡ Phase 3: Autonomous Treasurer, Cross-Model UI & Poke Alerts (Hours 24 - 36)  
 **Goal:** The 3 AM save, model comparison dashboard, and iMessage alerts.  
-*   **Shubh (Proxy & Infra):** Build the **Circuit Breaker**. Create a rolling 5-minute window check. If a user spends > $20 in 5 mins, block their API key.  
+*   ✅ **DONE (pulled forward into Phase 1) — Shubh (Proxy & Infra):** ~~Build the **Circuit Breaker**. Create a rolling 5-minute window check. If a user spends > $20 in 5 mins, block their API key.~~
+    *   `proxy/breaker.py`. Rolling window and threshold are env-configurable, defaulting to the $20 / 5-minute numbers specified here.
+    *   **Two modes**, because a retry storm and a leaked key are different emergencies: `throttle` returns `429` + `Retry-After` for the offending attribution tag only and lets every other tag keep flowing; `revoke` cuts the Meter key entirely with `403`.
+    *   Auto half-open after a cooldown: re-measures the window instead of trusting the old verdict, closes itself once spend decays, re-trips if it has not. Without this the demo trips the breaker once and strands us on stage.
+    *   `POST /v1/breaker/reset` for manual reset and key un-revoke — always available, per `ARCHITECTURE.md` §6.
+    *   Every trip records the numbers it compared (`window_spend_usd` vs `threshold_usd`), so "the breaker tripped" is provable on stage rather than asserted.
+    *   `breaker.notify()` is the seam for Tanay's Poke integration — deliberately log-only for now, since an awaited third-party HTTP call in the request path would put someone else's latency in front of production traffic.
+    *   ✅ **Detector conflict resolved** (`PROPOSALS.md` A1). This file and `CONTEXT.md` §5C specified a flat `$20/5min`; `ARCHITECTURE.md` §6 specified a ratio against a 7-day baseline. Shipped detection satisfies both: an absolute **floor** (the $20/5min number above) **AND** a **burst** check — the short window's spend *rate* must exceed the trailing hour's average rate by 3x. The hour-long baseline needs no accumulated history, so it works on day one. Without the second condition a feature that legitimately costs more than the floor trips every five minutes forever; without the first, detection is too slow for a leaked key. `BREAKER_BURST_RATIO=0` reverts to the flat detector as a live escape hatch.
 *   **Shivam (Payments & Agent):** Build the **Treasurer Agent**. An `asyncio` loop that checks `wallets` every 3 seconds. If `provider_balance < $10`, call Prava Sandbox for a card, call Mock Billing to add funds, update DB.  
 *   **Ammar (Predictive AI):** Finalize the cross-model analysis data. Create a script that runs a standard test suite of prompts (coding, reasoning, chat) across GPT-4o and Claude 3.5. Calculate the efficiency delta. Push this data to the DB.  
 *   **Tanay (Frontend & DX):**  
