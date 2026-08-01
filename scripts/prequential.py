@@ -50,7 +50,7 @@ def main() -> int:
         src = REPO / "data" / "templated" / "gpt-4o-mini.jsonl"
         if not src.exists():
             sys.exit(f"missing {src} — run: python scripts/templated_probe.py")
-        rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+        rows = [json.loads(line) for line in src.read_text().splitlines() if line.strip()]
         if args.exclude_truncated:
             # Two defensible readings. A row that stopped at max_tokens is a LOWER
             # BOUND on natural output length, so fitting a length model on it teaches
@@ -66,7 +66,7 @@ def main() -> int:
             random.Random(0).shuffle(rows)
     else:
         src = REPO / "data" / "wildchat" / "train.jsonl"
-        rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+        rows = [json.loads(line) for line in src.read_text().splitlines() if line.strip()]
 
     db = Path(args.db)
     if db.exists():
@@ -81,7 +81,6 @@ def main() -> int:
     dbmod.connect()
 
     from predictor import Predictor, buckets
-    from predictor.refresh import compute, _rows
     from predictor.scope import _text_of
     from scripts.replay_to_ledger import synthetic_attribution
 

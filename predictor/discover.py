@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 
@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from predictor import buckets                                    # noqa: E402
-from predictor.features import CANDIDATES, rank, vector          # noqa: E402
+from predictor.features import rank, vector          # noqa: E402
 from predictor.scope import ScopeConfig, _text_of, estimate       # noqa: E402
 
 
@@ -69,7 +69,7 @@ def load(split: str) -> List[dict]:
     p = DATA / f"{split}.jsonl"
     if not p.exists():
         sys.exit(f"missing {p} — run: python scripts/fetch_wildchat.py")
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
 
 
 def design(rows: List[dict], names: List[str], bucket_list: List[str]) -> np.ndarray:

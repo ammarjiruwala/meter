@@ -221,7 +221,6 @@ def refresh_now(db_path: str | None = None, gate: bool = True) -> Dict[str, Any]
     # gating on a different object than `load_history` produces — it missed the
     # MIN_ROWS_FOR_KEY skip and the [0.5, 3.0] clamp.
     candidate = engine.shrink_history(candidate_h)
-    current = engine.current_history()
 
     kept, report = _select_keys(holdout, candidate)
 

@@ -110,7 +110,7 @@ def main() -> int:
     src = REPO / "data" / "templated" / "gpt-4o-mini-v2.jsonl"
     if not src.exists():
         sys.exit(f"missing {src} — run: python scripts/templated_probe.py --set v2 --yes")
-    rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in src.read_text().splitlines() if line.strip()]
     keys = [f"{r['project']}/{r['feature']}" for r in rows]
     trunc = sum(1 for r in rows if r["finish_reason"] != "stop")
 
@@ -128,7 +128,7 @@ def main() -> int:
     # v1 alongside, so consistency is visible rather than asserted.
     v1p = REPO / "data" / "templated" / "gpt-4o-mini.jsonl"
     if v1p.exists():
-        v1 = [json.loads(l) for l in v1p.read_text().splitlines() if l.strip()]
+        v1 = [json.loads(line) for line in v1p.read_text().splitlines() if line.strip()]
         k1 = [f"{r['project']}/{r['feature']}" for r in v1]
         a1 = np.array([r["output_tokens"] for r in v1], float)
         out.insert(0, stats(np.array([r["predicted_output_tokens"] for r in v1], float),
@@ -136,7 +136,7 @@ def main() -> int:
         out.insert(1, stats(kfold_corrected(v1, k1), a1, "v1 + history (reference)"))
     show(out)
 
-    print(f"\n  per-feature (v2), out-of-sample:")
+    print("\n  per-feature (v2), out-of-sample:")
     print(f"  {'feature':<24}{'n':>4}{'med actual':>12}{'base':>10}{'+history':>11}"
           f"{'p90 out':>10}")
     print("  " + "-" * 71)
