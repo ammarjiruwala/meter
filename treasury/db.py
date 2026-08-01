@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from proxy import config
@@ -182,6 +182,26 @@ def ensure_wallet(project_id: str, provider: str, balance_usd: float = 0.0) -> s
         )
         conn.commit()
     return wallet_id
+
+
+def set_balance(wallet_id: str, balance_usd: float) -> float | None:
+    """Force a wallet to an exact balance.
+
+    Separate from ``ensure_wallet`` on purpose: that one must never clobber a live
+    balance, so it ignores its starting value on an existing row. But resetting the demo
+    to its "too low" state needs to actually overwrite, and discovering mid-demo that
+    seeding did nothing because a wallet already existed is a bad way to find that out.
+    """
+    conn = connect()
+    with _lock:
+        cur = conn.execute(
+            "UPDATE wallets SET balance_usd = ?, updated_at = ? WHERE id = ?",
+            (balance_usd, now_iso(), wallet_id),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return None
+    return balance_usd
 
 
 def get_wallet(wallet_id: str) -> dict[str, Any] | None:
@@ -346,6 +366,60 @@ def settle_event(
             (status, prava_txn_id, error, now_iso(), event_id),
         )
         conn.commit()
+
+
+def iso_seconds_ago(seconds: float) -> str:
+    ts = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return ts.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+
+
+def pending_event(wallet_id: str) -> dict[str, Any] | None:
+    """An unfinished attempt for this wallet, if there is one.
+
+    The write-ahead row is only useful if a retry *finds* it. Opening a fresh row on
+    every attempt would mint a fresh idempotency key each time, which is exactly the
+    thing the key exists to prevent — Prava would see two unrelated charges rather than
+    one retried charge. So a caller resumes a pending row instead of starting over.
+    """
+    row = connect().execute(
+        "SELECT * FROM treasury_events WHERE wallet_id = ? AND status = 'pending'"
+        " ORDER BY created_at LIMIT 1",
+        (wallet_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def settled_total_since(wallet_id: str, seconds: float) -> float:
+    """Money actually moved for this wallet in the trailing window.
+
+    Backs the rolling 24h cap. Counts `settled` only: a refused or failed attempt did not
+    spend anything, and counting it would let a run of declines lock out a legitimate
+    top-up.
+    """
+    row = connect().execute(
+        "SELECT COALESCE(SUM(amount_usd), 0) AS total FROM treasury_events"
+        " WHERE wallet_id = ? AND status = 'settled' AND created_at >= ?",
+        (wallet_id, iso_seconds_ago(seconds)),
+    ).fetchone()
+    return float(row["total"] or 0.0)
+
+
+def seconds_since_last_attempt(wallet_id: str) -> float | None:
+    """Age of the most recent attempt, or ``None`` if there has never been one.
+
+    Backs the cooldown. Deliberately counts *attempts* rather than successes — a failing
+    charge retried in a tight loop is the case the cooldown most needs to stop.
+    """
+    row = connect().execute(
+        "SELECT created_at FROM treasury_events WHERE wallet_id = ?"
+        " ORDER BY created_at DESC LIMIT 1",
+        (wallet_id,),
+    ).fetchone()
+    if not row:
+        return None
+    then = datetime.strptime(row["created_at"], "%Y-%m-%dT%H:%M:%S.%f+00:00")
+    then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
 
 
 def recent_events(wallet_id: str, limit: int = 20) -> list[dict[str, Any]]:
