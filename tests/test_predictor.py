@@ -72,9 +72,21 @@ def test_input_counting() -> None:
 
     # Chat payloads cost more than their raw content: role markers, delimiters, and reply
     # priming. Ignoring the framing under-counts every single chat request.
+    #
+    # The overhead is exactly 7 for a single user message: 3 per-message + 1 role token
+    # + 3 reply priming. Pinned as an exact value because a live 15-call run showed our
+    # count was low by precisely 7 on every request when a bare string was passed while
+    # a messages list was sent upstream. Under-counting is the direction that breaks a
+    # ceiling, so this must not drift silently.
     text = "hello world"
-    check("messages include chat framing overhead",
-          count([{"role": "user", "content": text}], MODEL) > count(text, MODEL))
+    check("single-message framing overhead is exactly 7",
+          count([{"role": "user", "content": text}], MODEL) - count(text, MODEL) == 7,
+          f"got {count([{'role': 'user', 'content': text}], MODEL) - count(text, MODEL)}")
+
+    # Overhead scales per message, not once per request.
+    two = count([{"role": "user", "content": text}, {"role": "assistant", "content": text}], MODEL)
+    one = count([{"role": "user", "content": text}], MODEL)
+    check("framing is charged per message", two > one + count(text, MODEL))
 
     # A loud failure beats a silently ~10-20% wrong number in something that gates spend.
     # The reference fell back to cl100k_base for Claude, which is the wrong vocabulary.
