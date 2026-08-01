@@ -6,8 +6,9 @@ Here is the finalized, personalized 48-hour battle plan with tasks assigned to S
 > from what this plan asked for, the mark says so rather than pretending the original line shipped.
 >
 > **Left to do:** cross-model routing + the efficiency data it feeds (Ammar, Phases 2–4) and the
-> dashboard view on top of it (Tanay); sustained-load stress test (Shubh, Phase 4); demo video and
-> pitch script (Tanay, Phase 4). Everything else is built. Two blockers are external, not effort:
+> dashboard view on top of it (Tanay); demo video and pitch script (Tanay, Phase 4).
+> **Shubh's lane is closed** — the sustained-load soak landed 2026-08-01 (`tests/load_soak.py`).
+> Everything else is built. Two blockers are external, not effort:
 > the Prava sandbox outage and the one-charge-per-cycle mandate limit — see `CONTEXT.md` §6a.
 
 ---
@@ -97,10 +98,10 @@ Here is the finalized, personalized 48-hour battle plan with tasks assigned to S
 
 ### 🎬 Phase 4: End-to-End Testing & Demo Polish (Hours 36 - 48)  
 **Goal:** Bulletproof the 90-second demo and calculate your metrics.  
-*   🟡 **PARTIAL — Shubh (Proxy & Infra):** Stress test the proxy. Fix any race conditions in the DB writes from concurrent requests.
+*   ✅ **DONE — Shubh (Proxy & Infra):** ~~Stress test the proxy. Fix any race conditions in the DB writes from concurrent requests.~~
     *   ✅ **The race condition this line exists for is closed and asserted.** `proxy/budget.py` counts holds alongside settled spend inside one `asyncio.Lock`; the self-check fires **40 concurrent authorizes at a ceiling admitting 4** and asserts exactly 4 pass — without serialisation all 40 do. A separate SQLite locking bug in the treasury reads was found and fixed (`74c8e2e`).
-    *   ✅ **Overhead re-measured and the harness committed** (`tests/bench_overhead.py`): p50 **+0.26ms** minimal, **+0.35ms** enforced path. This replaced a Phase 1 number that predated ESTIMATE/RESERVE and that nobody could reproduce.
-    *   ⬜ **Left: an actual sustained-load run.** Both of the above are correctness checks, not a load test — nothing has driven concurrent traffic through the full path for a sustained period to see WAL contention between the proxy and the Treasurer under real load.
+    *   ✅ **Sustained-load soak built and passing** (`tests/load_soak.py`, 2026-08-01). N clients drive the enforced path while the Treasurer writes to the same `meter.db`. At 16 clients / 15s: **~5,000 requests at ~400 req/s, every one ledgered, zero `database is locked`, zero failed ledger writes, worst event-loop stall 44ms.** CLAUDE.md's two-writer claim now has evidence rather than an argument behind it. Throughput stops scaling past ~16 clients — the harness measures a no-proxy baseline at the same concurrency so that ceiling is attributable, and it is the A5 design (one SQLite connection behind a lock), not a defect. **Streaming is not covered** — that needs an SSE fake upstream.
+    *   ✅ **Overhead numbers re-validated and unchanged: p50 +0.26ms minimal / +0.35ms enforced.** They had been measured against a fake upstream that was **answering 422 to every call** (fixed), but re-measuring three times on the working path reproduced them — parsing and pricing a small usage block is nearly free. ⚠ Run it three times before quoting; one reading during this work landed at 0.40ms and did not reproduce.
 *   ✅ **DONE — Shivam (Payments & Agent):** ~~Ensure the Prava sandbox transactions are 100% reliable. Handle error states (e.g., Prava timeout -> fallback alert).~~
     *   Timeout leaves the event `pending` (not refused — the charge may have landed); a definite refusal settles `failed`; `X-Response-ID` is captured because that is what Prava support traces on. Credentials are checked at boot.
     *   ⚠ "100% reliable" is **not achievable from our side right now** — the sandbox outage and the one-charge-per-cycle limit are both Prava's, and both are open. The code handles them; the demo narrative still has to.
@@ -143,6 +144,6 @@ The script as originally written:
 1.  **Decide the mandate strategy** (Shivam + everyone) — one save, a pre-approved pool, or mint per top-up. This is a demo-narrative decision, not a code one, and it is blocking. `CONTEXT.md` §6a.
 2.  **Cut or build the cross-model beat** (Ammar + Tanay). Building it is Phase 2's routing item, the Phase 3 probe script, and the dashboard view — three items on one dependency, with a day's worth of work behind them. Cutting it is one edit to the pitch.
 3.  **Record the demo and rewrite the pitch script** (Tanay), after 1 and 2 resolve.
-4.  **Sustained-load run** (Shubh) — the only correctness gap left in Phase 4, and the cheapest of these.
+4.  ✅ ~~**Sustained-load run** (Shubh).~~ Landed — `tests/load_soak.py`. It also corrected the overhead number we were quoting; re-read that line before any slide.
 
 Go execute!

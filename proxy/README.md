@@ -179,6 +179,18 @@ path), self-reported in-process, measured with the committed harness
 client, so it is a floor rather than a production number, though comfortably inside the
 5 ms budget ARCHITECTURE.md §8 sets.
 
+> **These numbers were re-validated 2026-08-01 after a bug in the harness itself, and they
+> survived.** The fake upstream had been answering **422 to every call**: this file uses
+> `from __future__ import annotations`, so FastAPI resolved the handler's `request:
+> Request` hint against module globals, found nothing (the import was function-local), and
+> treated it as a required query parameter. Every "benchmarked" request therefore skipped
+> usage parsing and pricing. The import moved to module scope, and re-measuring across
+> three runs each reproduced the same figures — 0.26/0.27/0.30 ms minimal, 0.35/0.36/0.37 ms
+> enforced. **The conclusion is that parsing a small non-streamed usage block and pricing
+> it costs almost nothing**, which is consistent with the ~0.03 ms the estimate adds. Take
+> single runs with suspicion either way: one reading during this work landed at 0.40 ms and
+> did not reproduce.
+
 Two caveats, both load-bearing if this goes in front of judges:
 
 1. **Loopback is a floor, not a production number.** The harness (`tests/bench_overhead.py`,
@@ -190,6 +202,49 @@ Two caveats, both load-bearing if this goes in front of judges:
 2. **The estimate adds ~0.03 ms** (`predictor/README.md`); a reserve costs one or two
    SQLite reads, but *only* when a ceiling is configured — `budget.authorize` returns on a
    dict lookup when `meter.yaml` is absent, so the demo path is barely affected.
+3. **Single client. It says nothing about behaviour under concurrency** — that is
+   `tests/load_soak.py`, below.
+
+### Under sustained concurrent load
+
+`tests/load_soak.py` is the other half, and answers a different question: two writers on
+one SQLite file while N clients drive the enforced path for a sustained period. It exists
+because CLAUDE.md's claim that WAL plus `busy_timeout` covers two writers was an argument
+with nothing measuring it.
+
+```bash
+python tests/load_soak.py --seconds 20 --concurrency 16
+```
+
+Measured 2026-08-01, 16 clients for 15s — **~5,000 requests at ~400 req/s, every one
+ledgered, zero `database is locked`, zero failed ledger writes, worst event-loop stall
+44 ms.** The Treasurer ticked throughout, writing `treasury_events` to the same file.
+
+It is deliberately **not in CI**: throughput and stall thresholds are timing-sensitive and
+a shared runner would make it flaky, which is how a load test gets muted. Run it before
+claiming anything about concurrency.
+
+What it checks, and why each one is there:
+
+| Check | Why |
+| --- | --- |
+| No ledger row dropped | A missing row understates spend — the one direction of error a budget tool cannot have. Scoped to 200s, because refusals are ledgered too. |
+| No `database is locked` | `busy_timeout` should make a losing writer wait, not raise. Watched via a log handler, since the proxy deliberately swallows ledger-write failures. |
+| The Treasurer actually wrote | A soak whose second writer sat idle would pass while proving nothing. |
+| Event loop never stalls | The one that catches something real. A blocking SQLite call made from a coroutine holds the only event loop and stalls every in-flight request, and **nothing logs an error when it happens**. `busy_timeout` is 5000 ms, which bounds that stall at five seconds. |
+
+**Throughput does not scale past ~16 clients**, and the harness reports a no-proxy
+baseline at the same concurrency so the ceiling is attributable rather than assumed: at 64
+clients the proxy sustained ~122 req/s against a ~247 req/s baseline. Roughly half that
+collapse is the harness saturating its own event loop; the rest is the documented design —
+one process-wide SQLite connection behind a lock, plus the shared `asyncio.to_thread`
+pool. That ceiling is inherent to the A5 decision, not a defect, and it moves with Redis
+and Postgres at replica #2.
+
+**Not covered: streaming.** The streamed path holds a reservation across the whole
+response and heartbeats it — the silent failure ARCHITECTURE.md §2 warns about, on the
+largest requests in the system. Exercising it needs an SSE fake upstream the harness does
+not have.
 
 ---
 
