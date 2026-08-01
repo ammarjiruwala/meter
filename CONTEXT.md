@@ -99,6 +99,19 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
+*   **Last updated:** 2026-08-02 — **Shubh's lane closed out completely (`shubh/final`).** The
+    streaming soak landed (see the soak entry below), and the three remaining Shubh-owned
+    proposals shipped: **D1** (a caller may supply `X-Meter-Request-Id`, so a retry overwrites
+    its own ledger row instead of double-counting — `INSERT OR REPLACE` on a caller-supplied
+    id was already the semantics, nothing had ever exposed it), **D2** (soft-budget iMessage at
+    80% of any ceiling, as a background poll rather than a request-path check, reading settled
+    spend only), and **D3** (documented that Meter's `429` means budget-exhausted, not rate
+    limited; `402` stays reserved for a real paywall). Verified against a **running** app, not
+    just the modules: the warning fires at exactly 80% and the eventual 429 names the same
+    scope string. Refusals now also carry `X-Meter-Request-Id` — found because the live check
+    caught a 429 with no id on it, and a breaker trip and a budget refusal both write ledger
+    rows the id is supposed to point at. `test_proxy.py` is now **241 checks**.
+
 *   ⚠ **Demo trap found 2026-08-01 (Shubh, debug pass) — `PROPOSALS.md` M5, open, owner Shivam.**
     `GET /treasury/assess` is documented "reads only" but **creates a wallet at $0.00**, and
     `POST /wallets/seed` applies its balance on creation only. So on a fresh database, anything
@@ -106,8 +119,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     no-op to $0.00 — no error, and a successful-looking response. **Rehearse with
     `POST /wallets/seed?reset=true`** until it is fixed. Reproduced on a clean DB.
 
-*   **Last updated:** 2026-08-01 — **Sustained-load soak built and passing; overhead numbers
-    corrected (Shubh).** `tests/load_soak.py` closes the last open item in the proxy lane. It
+*   Prior entry — **Sustained-load soak built and passing; overhead numbers corrected (Shubh).** `tests/load_soak.py` closes the last open item in the proxy lane. It
     found three real bugs in the test harnesses. The benchmark's fake upstream had been
     answering **422 to every call**, so the committed +0.26/+0.35ms overhead pair was measured
     on a path that skipped usage parsing and pricing — but re-measuring three times on the
@@ -195,7 +207,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Sustained-load soak: DONE, and it passes** (`tests/load_soak.py`, 2026-08-01 — the Phase 4 "stress test the proxy / fix race conditions in concurrent DB writes" item). N clients drive the enforced path while the Treasurer writes `treasury_events` to the same `meter.db`. Measured at 16 clients / 15s: **~5,000 requests at ~400 req/s, every one ledgered, zero `database is locked`, zero failed ledger writes, worst event-loop stall 44ms.** CLAUDE.md's two-writer claim was an argument until now; this is the evidence for it.
         *   **Throughput stops scaling past ~16 clients** — at 64 the proxy sustained ~122 req/s against a ~247 req/s no-proxy baseline the harness measures itself, so the ceiling is attributable rather than guessed. About half is the single-process harness saturating its own event loop; the rest is the A5 design (one SQLite connection behind a lock, shared `to_thread` pool). Inherent, not a defect, and it moves at replica #2.
         *   **Deliberately not in CI.** Timing-sensitive thresholds on a shared runner is how a load test becomes flaky and then muted.
-        *   **Not covered: streaming**, where a hold is heartbeat-extended across the response — the silent failure ARCHITECTURE.md §2 warns about, on the biggest requests. Needs an SSE fake upstream. Nothing here says streams are safe under load.
+        *   **Streaming now covered too** (`--stream`, added 2026-08-02). An SSE fake upstream emits deltas for 4s against a **2s reservation TTL**, so every response deliberately outlives its own hold — the condition `budget.extend()` exists for. Asserts usage came off the wire (not a byte estimate, the B15 failure), the stream was readable SSE, the injected usage chunk was stripped, and **live holds never hit zero while streams were in flight**.
+        *   ⚠ **The reservation check is verified sensitive, not just passing.** `--break-heartbeat` pushes the heartbeat past the stream duration and the check must fail — it is run that way deliberately. The first version of it *passed* under that control and was therefore worthless: it counted `len(_holds)`, but holds are reaped lazily (only when the next `authorize()` runs `_expire()`), so an expired hold lingers in the dict. It now counts holds whose `expires_at` is still in the future. **Any future edit to that check must be re-validated with `--break-heartbeat`.**
 
 *   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
     *   **Phase 2 additions to carry into the port:** four prediction columns on `requests` (`predicted_output_tokens`, `predicted_cost_usd`, `bucket`, `prediction_method`), plus two new tables — `annotations` (§4's, with a `project_id` added so one project cannot annotate another's traces) and `feature_budgets` (not in §4; §4 has ceilings only at project level, but README.md's own `meter.yaml` example sets them per feature).
@@ -526,6 +539,27 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         B11, and that data does not exist: nothing routes one prompt to two providers and there is
         no `model_efficiency` table). The Agent Activity panel that used to sit on this line
         **shipped** — see the "Treasurer Agent" panel entry above.
+    *   **PLANNED, NOT STARTED — a marketing homepage in front of the dashboard** (Tanay,
+        decided 2026-08-01). A flashy hero, a concise product overview, a "how to use it"
+        section, and an entry point into the dashboard. **Deliberately a different character
+        from the dashboard**: the homepage is creative and expressive, the dashboard stays
+        simple, productive and professional — an operations screen someone watches while
+        production is live is not the place to be impressive. Awaiting design direction; no
+        code written and nothing designed yet. Three consequences worth settling before it
+        starts, recorded here so they are decided rather than discovered:
+        *   **The dashboard currently owns `/`.** A homepage there moves it — `/dashboard` is
+            the obvious target. Small change, but it touches the nav and any shared link.
+        *   **Tokens should stay shared even though the characters differ.** Same canvas,
+            accent and type, varying only density and motion budget, or the two halves stop
+            reading as one product. A genuinely separate look for the homepage is a legitimate
+            choice, but it is a bigger one and needs saying explicitly.
+        *   **The animated background is mounted in the root layout**, so today it renders on
+            both. It likely belongs at full strength on the homepage and dialled down or absent
+            on the dashboard — drifting orbs behind live financial numbers work against the
+            "professional" half of this split.
+        *   The "how to use it" section can be **accurate rather than illustrative**: Meter
+            keys, `POST /v1/chat/completions`, `meter.yaml` ceilings and `POST /v1/annotate` all
+            work and are verified, which is unusual for a hackathon landing page.
 
 *   **Alerts (Poke / Linq): WORKING, VERIFIED LIVE.** A real iMessage was delivered end to end
     through the shipping code path on 2026-08-01 (Linq returned `202 Accepted`). `alerts/` — a sibling

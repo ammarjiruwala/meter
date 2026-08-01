@@ -781,7 +781,7 @@ Patterns from a review of the major open-source LLM gateways (LiteLLM, Helicone,
 OpenRouter, one-api/new-api, Langfuse) — things Meter deliberately does not yet have, or does
 have and was validated on. These are recorded for the team to pick from; none block the demo.
 
-### D1 — Client-visible request id / idempotency key · OPEN
+### D1 — Client-visible request id / idempotency key · **DONE — shipped 2026-08-02 (Shubh)**
 
 Every major gateway exposes a request id — Helicone accepts a client-supplied
 `Helicone-Request-Id` header (idempotent retries, links retries to one logical request),
@@ -794,7 +794,17 @@ response header and accept an optional client-supplied `X-Meter-Request-Id`, `IN
 REPLACE` semantics already make a replay idempotent (B8). ~5 lines, answers "what happens
 when the client retries?". Owner: Shubh.
 
-### D2 — Soft-budget alert below the hard ceiling · OPEN
+**Shipped 2026-08-02 (Shubh).** Half of this already existed — `X-Meter-Request-Id` was
+echoed on every response, including refusals. What was missing was the inbound half:
+`_request_id()` in `proxy/app.py` now uses a caller-supplied `X-Meter-Request-Id` when one
+is sent, so `record_request`'s `INSERT OR REPLACE` on that id makes a retry overwrite its
+own row rather than double-count spend (B8). Ids must match `[A-Za-z0-9._:-]{8,128}` —
+long enough not to collide, restricted enough to be safe as a primary key and in a log
+line, and **anchored at both ends** so a value carrying a newline cannot inject a header.
+A malformed id is *ignored*, not rejected: refusing would make adopting the header riskier
+than never sending it. 10 checks in `test_proxy.py`.
+
+### D2 — Soft-budget alert below the hard ceiling · **DONE — shipped 2026-08-02 (Shubh)**
 
 LiteLLM distinguishes `soft_budget` (warn only) from `max_budget` (block). Meter has the
 block side (`meter.yaml` ceilings → 429) and the alert rail (`alerts/` → iMessage) but no
@@ -805,7 +815,25 @@ into a preventable incident — and is a demo beat the current 429-only flow can
 burn rate) that fires `alerts/` when spend crosses a configurable fraction of a ceiling.
 Cheap; the pieces all exist. Owner: Shubh or Tanay, post-hackathon.
 
-### D3 — `402` vs `429` for budget refusals · OPEN — documentation decision
+**Shipped 2026-08-02 (Shubh).** `budget.soft_breaches(ratio)` plus a background poll in
+`proxy/app.py`'s lifespan, firing `alerts.send_budget_alert`. Four decisions worth keeping:
+
+* **A background poll, not a request-path check** — and not in the Treasurer loop as
+  suggested above, which would have put a proxy concern in `treasury/`. A ceiling being
+  80% full is a *level*, not an edge, so an inline test re-evaluates the same condition
+  thousands of times to send at most one message, in front of production traffic.
+* **Settled spend only.** Including in-flight holds would let a burst trip the warning and
+  then un-trip it as the holds released. An alert that retracts itself is worse than none.
+* **The same scope string a 429 would name**, so the warning and the refusal cannot
+  disagree about which line of `meter.yaml` is the problem. Asserted in the self-check.
+* **The message leads with headroom** ("$0.15 left"), not a percentage — "83% of ceiling"
+  needs arithmetic before anyone can act on it.
+
+Per-scope cooldown comes free from `alerts._within_cooldown`, and it matters more here
+than for the breaker: the condition stays true for the rest of the day, so without it this
+is one text per poll forever. 12 checks in `test_proxy.py`.
+
+### D3 — `402` vs `429` for budget refusals · **DECIDED & DOCUMENTED — 2026-08-02 (Shubh)**
 
 OpenRouter splits the two: credit/balance exhaustion is `402 Payment Required`, rate limits
 are `429` with `X-RateLimit-*` headers. Meter refuses budget-exhausted requests with `429`

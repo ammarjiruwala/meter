@@ -49,6 +49,36 @@ X-Meter-Budget-Ceiling-Usd: 200.00
 X-Meter-Budget-Spend-Usd:   200.004312
 ```
 
+**Meter's `429` means "budget exhausted", not "rate limited"** (`PROPOSALS.md` D3). The two
+are different conditions and only one of them is fixed by waiting: a rate limit clears in
+seconds, a spent daily ceiling clears when the window rolls or someone edits `meter.yaml`.
+`429` is nevertheless the right code — it is what every provider SDK already backs off on,
+and it is what LiteLLM returns for the same condition — so the distinction lives in the
+`X-Meter-Budget-*` headers above rather than in the status. OpenRouter splits them and
+returns `402 Payment Required` for credit exhaustion; `402` is reserved here for a future
+paywall, where the caller could actually pay to resolve it, which is not what a
+self-imposed ceiling is.
+
+**Before the ceiling is reached, a soft-budget warning fires** (`PROPOSALS.md` D2). At
+`BUDGET_SOFT_ALERT_RATIO` of any ceiling (default `0.8`) an iMessage goes out naming the
+same scope string the eventual `429` will name, so the warning and the refusal cannot
+disagree about which line of `meter.yaml` is the problem. It is a background poll every
+`BUDGET_SOFT_ALERT_INTERVAL_S`, **not** a check in the request path: a ceiling being 80%
+full is a level rather than an edge, so testing it per request would re-evaluate the same
+condition thousands of times to send at most one message. It reads settled spend only —
+counting in-flight holds would let a burst trip the warning and then un-trip it, and an
+alert that retracts itself is worse than none.
+
+### Client-supplied request ids
+
+Send `X-Meter-Request-Id` and Meter uses it as the ledger row's primary key; send nothing
+and it mints one. Either way the value comes back on the response (`PROPOSALS.md` D1).
+Because `record_request` is `INSERT OR REPLACE` on that id, **a client that retries with
+the same id overwrites its own row instead of double-counting spend** — which is the honest
+answer to "what happens when my client retries?". Ids must match
+`[A-Za-z0-9._:-]{8,128}`; anything else is ignored rather than refused, because a
+malformed idempotency key is not a reason to reject a request that is otherwise fine.
+
 ## Cost per outcome
 
 Rung 3 of the README's attribution ladder. The proxy cannot know whether a ticket was

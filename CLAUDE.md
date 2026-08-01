@@ -28,7 +28,7 @@ pip install -r requirements.txt
 cp .env.example .env                            # provider + Prava keys; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
-python tests/test_proxy.py                      # 219 checks, no framework, ~3s
+python tests/test_proxy.py                      # 241 checks, no framework, ~3s
 python tests/test_predictor.py                  # 130 checks, same convention
 python tests/test_treasury.py                   # 159 checks (treasury/)
 python tests/test_alerts.py                     # 46 checks (alerts/) — needs Python 3.10+
@@ -39,6 +39,7 @@ Two measurement harnesses, neither in CI and neither a pass/fail gate on a norma
 ```bash
 python tests/bench_overhead.py                  # added latency; run 3x before quoting a number
 python tests/load_soak.py --seconds 20 --concurrency 16   # two writers, one SQLite file
+python tests/load_soak.py --stream                         # streamed path + reservation heartbeat
 ```
 
 Dashboard (Next.js, from [dashboard/](dashboard/)):
