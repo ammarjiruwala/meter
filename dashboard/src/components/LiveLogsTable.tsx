@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { LiveLogRow } from "@/lib/db";
-import { formatUsd } from "@/lib/format";
+import { usdColumnFormatter } from "@/lib/format";
 import {
   Panel,
   SectionLabel,
@@ -39,6 +39,18 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
       clearInterval(id);
     };
   }, []);
+
+  // Only worth explaining when it is actually happening — on an all-OpenAI
+  // ledger every row is predicted and the note is noise.
+  const unpredicted = rows.filter((r) => r.predicted_cost_usd === null).length;
+
+  // One formatter across both cost columns. Reading predicted against actual is
+  // the entire point of the pair, and that comparison only works if the two
+  // columns share a decimal count.
+  const usd = usdColumnFormatter([
+    ...rows.map((r) => r.predicted_cost_usd),
+    ...rows.map((r) => r.cost_usd),
+  ]);
 
   return (
     <section id="logs" className="scroll-mt-[100px]">
@@ -85,12 +97,12 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
                     <td
                       className={`${TD} t-readout-sm text-right tabular-nums text-ash`}
                     >
-                      {formatUsd(row.predicted_cost_usd)}
+                      {usd(row.predicted_cost_usd)}
                     </td>
                     <td
                       className={`${TD} t-readout text-right tabular-nums text-paper`}
                     >
-                      {formatUsd(row.cost_usd)}
+                      {usd(row.cost_usd)}
                     </td>
                     <td className={`${TD} text-right`}>
                       <StatusBadge tone={toneForStatus(row.status)}>
@@ -105,10 +117,13 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
         )}
       </Panel>
 
-      <p className="t-caption mt-[16px] text-ash">
-        Predicted cost is the proxy&rsquo;s pre-flight estimate. It is blank for
-        Claude models, which have no local tokenizer to count them exactly.
-      </p>
+      {unpredicted > 0 && (
+        <p className="t-caption mt-[16px] text-ash">
+          {unpredicted} of {rows.length} rows carry no forecast. Prediction needs
+          an exact token count, and Anthropic does not use a tiktoken vocabulary
+          - the predictor declines rather than approximating ~10-20% wrong.
+        </p>
+      )}
     </section>
   );
 }

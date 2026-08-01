@@ -109,8 +109,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     `POST /v1/annotate`, and three review decisions recorded below (B17 validation rule, B9
     ratified, overhead number qualified). Also on main from this window: dashboard restyled onto a
     dark control-room visual system (Tanay) — Phase 4's "finalize UI" effectively done ahead of
-    schedule; Poke/Linq breaker alerts wired (Tanay), code complete, awaiting a live token to
-    verify; treasury `/topup` + mandate-selection fixes (Shivam).
+    schedule; Poke/Linq breaker alerts wired and verified live (Tanay) — a real iMessage delivered
+    end to end; treasury `/topup` + mandate-selection fixes (Shivam).
 
 *   **Setup: DONE.** `/docs/prava` and `/docs/linq` have reference docs (API reference, SDKs, sandbox
     test cards, error codes) pulled from the sponsor doc sites, scoped to what Meter's Prava
@@ -241,7 +241,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   Not yet done: Model Efficiency view (Phase 3, needs Ammar's cross-model data), Agent
         Activity panel (Phase 3, needs the Treasurer loop).
 
-*   **Alerts (Poke / Linq): WIRED, UNVERIFIED AGAINST THE LIVE API.** `alerts/` — a sibling
+*   **Alerts (Poke / Linq): WORKING, VERIFIED LIVE.** A real iMessage was delivered end to end
+    through the shipping code path on 2026-08-01 (Linq returned `202 Accepted`). `alerts/` — a sibling
     package to `treasury` and `predictor`. `proxy.breaker.notify()` still logs unconditionally
     (that line is the record of record) and then hands off to `alerts.send_breaker_alert`.
     *   `POST /v3/messages` on the Linq Partner API, which resolves the sending line and chat
@@ -256,12 +257,19 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         separate kill switch. Destination must be E.164 — validated at config time, because Linq
         rejects anything else with error 1002 and it would otherwise surface as an unsent alert
         mid-incident.
-    *   `python tests/test_alerts.py` — 40 checks covering payload shape, the configuration gate,
+    *   `python tests/test_alerts.py` — 46 checks covering payload shape, the configuration gate,
         cooldown, failure isolation, and that a 1.5s send returns to the caller in under 0.25s.
-    *   🚨 **Still needs a real Linq bearer token.** Everything is tested against a mocked
-        transport; nobody has confirmed an actual iMessage arrives, and "the key leaks, the lead
-        gets a text" is a live demo beat. Whoever registered with Linq needs to put a token in
-        `.env` as `POKE_API_KEY`, plus a destination in `POKE_CTO_PHONE`.
+        **Needs Python 3.10+** (`proxy/breaker.py` uses `dataclass(slots=True)`); macOS system
+        python is 3.9 and will fail on the import, not on the logic.
+    *   **Destination validation is NANP-aware, not just E.164.** A US number one digit short
+        (`+1217213007`) still sits inside E.164's generic 8-15 range, so the generic rule passed a
+        real typo through to a live send attempt. `+1` now requires exactly 10 national digits;
+        other country codes keep the generic rule.
+    *   **Still to verify:** the alert has been proven from a direct call, but not yet from an
+        actual breaker trip against a running proxy. That path adds `notify()` and the cooldown in
+        situ, and it is the one the demo runs.
+    *   `GET /v3/phone_numbers` is a zero-side-effect way to check a token — use it before
+        sending anything, so credential problems never get confused with integration problems.
 
 *   **Resolved since kickoff:**
     1.  ✅ **Pricing is verified** against Anthropic's and OpenAI's published rate cards (2026-08-01). The first draft was written from memory and was wrong in both directions. **One deadline attached:** Claude Sonnet 5 is on introductory pricing ($2/$10 per MTok) that expires **2026-08-31**, jumping 50% to $3/$15. On 2026-09-01, create `pricing/2026-09-01.yaml` — do *not* edit the existing file, or every historical row silently reprices. (`PROPOSALS.md` C1)

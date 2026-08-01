@@ -155,11 +155,12 @@ export type LiveLogRow = {
   ts: string;
   actor: string | null;
   model: string | null;
-  // Written at CAPTURE by the proxy's ESTIMATE step. Stays null for models with no
-  // local tokenizer — every Claude model, since tiktoken has no Anthropic vocabulary
-  // and the predictor refuses to guess (predictor/README.md) — so a blank cell here is
-  // a real state to render, not a missing feature.
+  // Written at CAPTURE by the proxy, from the prediction made before the call.
+  // Null is meaningful and distinct from zero: it means the request was not
+  // predicted at all — Claude models raise rather than approximate with the wrong
+  // tokenizer, so those rows carry no forecast. `prediction_method` says which.
   predicted_cost_usd: number | null;
+  prediction_method: string | null;
   cost_usd: number;
   status: number | null;
 };
@@ -167,9 +168,17 @@ export type LiveLogRow = {
 export function getLiveLogs(limit = 50): LiveLogRow[] {
   const conn = getDb();
   if (!conn || !tableExists(conn, "requests")) return [];
+
+  // The prediction columns arrived with the predictor integration. A teammate's
+  // meter.db can predate that, and selecting a missing column throws — same class
+  // of failure as the missing-table case, so it gets the same treatment.
   const predicted = columnExists(conn, "requests", "predicted_cost_usd")
     ? "predicted_cost_usd"
     : "NULL AS predicted_cost_usd";
+  const method = columnExists(conn, "requests", "prediction_method")
+    ? "prediction_method"
+    : "NULL AS prediction_method";
+
   return conn
     .prepare(
       `SELECT id,
@@ -177,6 +186,7 @@ export function getLiveLogs(limit = 50): LiveLogRow[] {
               actor,
               model,
               ${predicted},
+              ${method},
               cost_usd,
               status
          FROM requests

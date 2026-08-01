@@ -63,9 +63,35 @@ POKE_COOLDOWN_S = _float("POKE_COOLDOWN_S", 300.0)
 # a log line nobody reads until the demo.
 E164 = re.compile(r"^\+[1-9]\d{7,14}$")
 
+# The generic rule alone is too permissive to be useful for the numbers we
+# actually use. A US number missing a digit — +1217213007 for +12177213007 —
+# still lands inside the 8-15 range and passes, so a typo reaches Linq and comes
+# back as an unsent alert mid-incident. NANP is exactly 10 digits after the +1,
+# and that is worth pinning because it is the country code this team dials.
+NANP_NATIONAL_DIGITS = 10
+
 
 def phone_is_valid(number: str) -> bool:
-    return bool(E164.match(number))
+    if not E164.match(number):
+        return False
+    if number.startswith("+1"):
+        return len(number) - 2 == NANP_NATIONAL_DIGITS
+    return True
+
+
+def phone_problem(number: str) -> str:
+    """Why a number is unusable, phrased for someone fixing a .env at 3am."""
+    if not number:
+        return "unset"
+    if not E164.match(number):
+        return f"{number!r} is not E.164 — needs a leading + and 8-15 digits, e.g. +14155551234"
+    if number.startswith("+1") and len(number) - 2 != NANP_NATIONAL_DIGITS:
+        got = len(number) - 2
+        return (
+            f"{number!r} has {got} digits after +1, but a US/Canada number needs "
+            f"exactly {NANP_NATIONAL_DIGITS} (e.g. +14155551234)"
+        )
+    return ""
 
 
 def is_configured() -> tuple[bool, str]:
@@ -80,6 +106,7 @@ def is_configured() -> tuple[bool, str]:
         return False, "POKE_API_KEY is unset"
     if not POKE_CTO_PHONE:
         return False, "POKE_CTO_PHONE is unset"
-    if not phone_is_valid(POKE_CTO_PHONE):
-        return False, f"POKE_CTO_PHONE {POKE_CTO_PHONE!r} is not E.164 (e.g. +14155551234)"
+    problem = phone_problem(POKE_CTO_PHONE)
+    if problem:
+        return False, f"POKE_CTO_PHONE {problem}"
     return True, "ok"

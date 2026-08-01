@@ -1,5 +1,5 @@
 import type { SpendRow } from "@/lib/db";
-import { formatUsd } from "@/lib/format";
+import { usdColumnFormatter } from "@/lib/format";
 import { Panel, SectionLabel } from "@/components/ui/primitives";
 
 const TH = "t-readout-sm px-[16px] py-[14px] uppercase text-ash font-normal";
@@ -10,6 +10,8 @@ export function TeamSpendTable({ rows }: { rows: SpendRow[] }) {
   // column of figures. The rule stays neutral: the blue is spoken for by the
   // action, and magnitude is carried by length rather than hue.
   const max = rows.reduce((m, r) => Math.max(m, r.total_cost_usd), 0);
+  // Shared across the column so the decimal points align — see usdColumnFormatter.
+  const usd = usdColumnFormatter(rows.map((r) => r.total_cost_usd));
 
   return (
     <section id="spend" className="scroll-mt-[100px]">
@@ -62,7 +64,7 @@ export function TeamSpendTable({ rows }: { rows: SpendRow[] }) {
                           aria-hidden="true"
                         />
                         <span className="t-readout tabular-nums text-paper">
-                          {formatUsd(row.total_cost_usd)}
+                          {usd(row.total_cost_usd)}
                         </span>
                       </div>
                     </td>
