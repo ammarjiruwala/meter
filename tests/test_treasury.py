@@ -56,10 +56,18 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 
 def mandate(project: str, prava_id: str, *, remaining: float = 500.0,
             frequency: str = "monthly", status: str = "active",
-            per_txn: float = 200.0, daily: float = 500.0, cooldown: int = 0) -> None:
+            per_txn: float = 200.0, daily: float = 500.0, cooldown: int = 0,
+            approved: float | None = None) -> None:
+    """A mandate fixture, untouched this cycle unless `approved` says otherwise.
+
+    `approved` defaults to `remaining`, so a fixture is fresh. Passing an `approved`
+    above `remaining` is how you build a mandate whose cycle has already been spent —
+    which selection must then skip.
+    """
     db.upsert_mandate(prava_id, "openai", per_txn, daily, cooldown,
                       recurring_frequency=frequency, status=status,
-                      approved_amount_usd=500.0, remaining_usd=remaining,
+                      approved_amount_usd=remaining if approved is None else approved,
+                      remaining_usd=remaining,
                       project_id=project, external_user_id_=db.external_user_id(project))
 
 
@@ -194,6 +202,28 @@ def test_mandate_selection() -> None:
     mandate("multi", "mdt_big", remaining=400.0)
     check("picks the mandate with the most headroom",
           db.chargeable_mandate("multi", "openai")["prava_mandate_id"] == "mdt_big")
+
+    # Confirmed live: a second charge in the same cycle is declined by Visa with
+    # "Purchase already made in the current payment cycle", even though the mandate stays
+    # `active` with headroom left. `remaining` below `approvedAmount` is the observable
+    # signal that the cycle is spent — which is why a pool of mandates is needed at all.
+    db.upsert_mandate("mdt_spent", "openai", 200.0, 500.0, 0,
+                      recurring_frequency="monthly", status="active",
+                      approved_amount_usd=500.0, remaining_usd=498.0,
+                      project_id="cycle", external_user_id_="meter_cycle",
+                      last_charge_status="declined")
+    check("a mandate already charged this cycle is not selected",
+          db.chargeable_mandate("cycle", "openai") is None,
+          "remaining 498 < approved 500 means the cycle's one purchase is gone")
+
+    db.upsert_mandate("mdt_fresh", "openai", 200.0, 500.0, 0,
+                      recurring_frequency="monthly", status="active",
+                      approved_amount_usd=500.0, remaining_usd=500.0,
+                      project_id="cycle", external_user_id_="meter_cycle")
+    pick = db.chargeable_mandate("cycle", "openai")
+    check("an untouched mandate in the pool is selected instead",
+          pick is not None and pick["prava_mandate_id"] == "mdt_fresh",
+          pick["prava_mandate_id"] if pick else "none")
 
 
 def test_topup_rails() -> None:

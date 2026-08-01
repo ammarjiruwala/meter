@@ -101,9 +101,17 @@ MANDATE_MERCHANT_NAME = _str("MANDATE_MERCHANT_NAME", "Meter Mock Provider")
 MANDATE_MERCHANT_URL = _str("MANDATE_MERCHANT_URL", "https://example.com")
 MANDATE_MERCHANT_COUNTRY = _str("MANDATE_MERCHANT_COUNTRY", "US")
 
-# Default ceiling when a caller doesn't specify one. Deliberately well above the demo's
-# $50 top-up so rehearsals don't drain the headroom mid-weekend.
-MANDATE_DEFAULT_AMOUNT_USD = _float("MANDATE_DEFAULT_AMOUNT_USD", 500.0)
+# Default ceiling when a caller doesn't specify one.
+#
+# $50, not more. A mandate authorized at $500 could not mint credentials on this sandbox
+# — every charge failed with "Visa 400 — Fetching cryptogram failed" — while $50 mandates
+# charge fine. The card the network provisions against has its own limit, and a mandate
+# above it is approved but unusable, which is a nasty shape of failure: it looks healthy
+# and `active` right up until the charge.
+#
+# Raising this without testing a real charge afterwards is how you get a demo that fails
+# on stage having "worked" in setup.
+MANDATE_DEFAULT_AMOUNT_USD = _float("MANDATE_DEFAULT_AMOUNT_USD", 50.0)
 
 # Where Prava returns the owner after they approve. Must be https, and without it a
 # hosted approval has nowhere to send them — they just stall on Prava's page. Point it

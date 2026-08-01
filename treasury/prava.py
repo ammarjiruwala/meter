@@ -170,6 +170,7 @@ async def create_mandate_session(
     description: str = "Inference credit top-up",
     callback_url: str | None = None,
     currency: str = "USD",
+    max_charges: int = 12,
 ):
     """Start mandate setup. Returns the session whose `iframe_url` the owner approves.
 
@@ -207,6 +208,11 @@ async def create_mandate_session(
             "intent": "mandate_setup",
             "recurring_frequency": recurring_frequency,
             "merchant_scope": "listed",
+            # Documented as advisory — "the enforced ceiling is the amount cap, not this
+            # count". Sent anyway because every mandate that has successfully minted
+            # credentials on this sandbox carried it, and every one that failed did not.
+            # Cheap to include, and not worth being clever about mid-hackathon.
+            "max_charges": max_charges,
         },
     }
     if callback_url:

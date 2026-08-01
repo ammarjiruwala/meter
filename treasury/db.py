@@ -126,7 +126,14 @@ CREATE TABLE IF NOT EXISTS mandates (
     -- Treasurer can refuse locally instead of eating a network decline.
     remaining_usd        REAL,
     renews_at            TEXT,
-    valid_until          TEXT
+    valid_until          TEXT,
+
+    -- Diagnostics only. `lastCharge` reports the most recent attempt, which may be a
+    -- decline even when an earlier charge already consumed the cycle — so it cannot be
+    -- used to decide whether a mandate is spent. Kept because it is the first thing you
+    -- want to see when asking why a mandate stopped working.
+    last_charge_status   TEXT,
+    last_charge_at       TEXT
 );
 
 -- Declared as an index as well as a column constraint, and this is the one that does the
@@ -207,6 +214,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("remaining_usd", "REAL"),
         ("renews_at", "TEXT"),
         ("valid_until", "TEXT"),
+        ("last_charge_status", "TEXT"),
+        ("last_charge_at", "TEXT"),
     ):
         if column not in existing:
             conn.execute(f"ALTER TABLE mandates ADD COLUMN {column} {ddl}")
@@ -312,6 +321,8 @@ def upsert_mandate(
     remaining_usd: float | None = None,
     renews_at: str | None = None,
     valid_until: str | None = None,
+    last_charge_status: str | None = None,
+    last_charge_at: str | None = None,
 ) -> str:
     """Record (or refresh) a Prava mandate. Keyed on ``prava_mandate_id``.
 
@@ -328,8 +339,9 @@ def upsert_mandate(
             " (id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,"
             "  prava_mandate_id, active, recurring_frequency, status,"
             "  approved_amount_usd, synced_at, project_id, external_user_id,"
-            "  customer_id, remaining_usd, renews_at, valid_until)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "  customer_id, remaining_usd, renews_at, valid_until,"
+            "  last_charge_status, last_charge_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(prava_mandate_id) DO UPDATE SET"
             "   provider = excluded.provider,"
             "   max_per_txn_usd = excluded.max_per_txn_usd,"
@@ -348,11 +360,14 @@ def upsert_mandate(
             "   customer_id = COALESCE(excluded.customer_id, mandates.customer_id),"
             "   remaining_usd = excluded.remaining_usd,"
             "   renews_at = excluded.renews_at,"
-            "   valid_until = excluded.valid_until",
+            "   valid_until = excluded.valid_until,"
+            "   last_charge_status = excluded.last_charge_status,"
+            "   last_charge_at = excluded.last_charge_at",
             (row_id, provider, max_per_txn_usd, max_daily_usd, cooldown_s,
              prava_mandate_id, active, recurring_frequency, status,
              approved_amount_usd, now_iso(), project_id, external_user_id_,
-             customer_id, remaining_usd, renews_at, valid_until),
+             customer_id, remaining_usd, renews_at, valid_until,
+             last_charge_status, last_charge_at),
         )
         conn.commit()
     return row_id
@@ -439,7 +454,15 @@ def chargeable_mandate(project_id: str, provider: str,
     """
     sql = ("SELECT * FROM mandates"
            " WHERE project_id = ? AND provider = ? AND active = 1"
-           "   AND (recurring_frequency IS NULL OR recurring_frequency != 'one_time')")
+           "   AND (recurring_frequency IS NULL OR recurring_frequency != 'one_time')"
+           # Spent for this cycle. Confirmed live: a second charge in the same cycle is
+           # declined by Visa with "Purchase already made in the current payment cycle",
+           # even though the mandate stays `active` with headroom left. `remaining` below
+           # `approvedAmount` is the observable signal that the cycle's one purchase is
+           # gone — `lastCharge` is not, since it reports the most recent *attempt* and
+           # may read `declined` while an earlier charge already consumed the cycle.
+           "   AND (remaining_usd IS NULL OR approved_amount_usd IS NULL"
+           "        OR remaining_usd >= approved_amount_usd)")
     params: list[Any] = [project_id, provider]
     if min_remaining_usd is not None:
         # NULL remaining means we have never synced it; treat as unknown-but-usable

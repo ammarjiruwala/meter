@@ -129,6 +129,14 @@ async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
     sit inside whatever the network already allows.
     """
     data = await list_mandates()
+
+    # Which mandates did we already know about? Anything new in this sync is an approval
+    # that just completed, and counting them is how we close out pending rows. Comparing
+    # timestamps instead would mean comparing Prava's `...Z` against our `...+00:00` as
+    # strings, which is not a reliable ordering.
+    known = {m["prava_mandate_id"] for m in db.list_stored_mandates(project_id)
+             if m["prava_mandate_id"]}
+
     synced = []
     for m in data.get("mandates", []):
         if m.get("externalUserId") != ext_uid:
@@ -148,20 +156,31 @@ async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
             remaining_usd=_num(m.get("remaining")),
             renews_at=m.get("renewsAt"),
             valid_until=m.get("validUntil"),
+            last_charge_status=(m.get("lastCharge") or {}).get("status"),
+            last_charge_at=(m.get("lastCharge") or {}).get("at"),
         )
         synced.append(m)
 
-    # Close out anything that was waiting on approval. A mandate that showed up after a
-    # pending row was opened is that row's outcome; one that never showed up inside the
-    # 15-minute session window will never show up at all.
-    for p in db.pending_mandates(project_id):
-        opened = p["synced_at"]
-        if any(m.get("createdAt", "") >= opened for m in synced):
-            db.resolve_pending_mandate(p["id"], "approved")
-        else:
-            age = db.seconds_since(opened)
-            if age is not None and age > 15 * 60:
-                db.resolve_pending_mandate(p["id"], "expired")
+    # Close out pending rows, one per newly-approved mandate. Resolving *all* of them
+    # because *one* mandate appeared is wrong when several approvals are outstanding at
+    # once — which is exactly the case when someone is setting up a pool. It would report
+    # "0 awaiting approval" while the user still had two links to click.
+    #
+    # We cannot tell which pending row produced which mandate: Prava's setup session
+    # returns no mandate id, and the mandate carries no session id. So this matches by
+    # count, oldest first, which is right in aggregate even if an individual pairing is a
+    # guess. The rows exist to answer "is anything still waiting?", and a count answers it.
+    newly_approved = len([m for m in synced if m["id"] not in known])
+    pending = db.pending_mandates(project_id)
+
+    for p in pending[:newly_approved]:
+        db.resolve_pending_mandate(p["id"], "approved")
+
+    # Anything left that outlived the 15-minute session window never will appear.
+    for p in pending[newly_approved:]:
+        age = db.seconds_since(p["synced_at"])
+        if age is not None and age > 15 * 60:
+            db.resolve_pending_mandate(p["id"], "expired")
 
     return synced
 
@@ -172,6 +191,7 @@ async def create_mandate(
     amount_usd: float | None = None,
     recurring_frequency: str = "monthly",
     user_email: str = "owner@example.com",
+    external_user_id: str | None = None,
 ):
     """Start mandate setup and return the URL the owner approves with a passkey.
 
@@ -184,7 +204,14 @@ async def create_mandate(
     show the result, while a booth visitor can happily do the whole thing themselves.
     """
     amount = amount_usd or config.MANDATE_DEFAULT_AMOUNT_USD
-    ext_uid = db.external_user_id(project_id)
+
+    # `user_id` decides which Prava *customer* the mandate belongs to, and cards are
+    # vaulted per customer. A new identity therefore starts with no enrolled card, and a
+    # charge against it fails at "Fetching cryptogram failed" — Visa has nothing to mint
+    # a credential from. That is correct for a new person onboarding, who enrols a card
+    # as part of approving. It is wrong when you meant to add a mandate for someone whose
+    # card is already enrolled under an existing identity, so the caller can name it.
+    ext_uid = external_user_id or db.external_user_id(project_id)
 
     session = await create_mandate_session(
         user_id=ext_uid,
@@ -223,13 +250,14 @@ async def create_mandate(
 
 
 @router.get("/mandates/status")
-async def mandate_status(project_id: str = "demo-project"):
+async def mandate_status(project_id: str = "demo-project",
+                         external_user_id: str | None = None):
     """Where this project stands: approved yet, and is anything chargeable?
 
     Poll this after sending someone to `approval_url`. `ready` is the single field a UI
     needs — it means a mandate exists that the Treasurer could actually charge.
     """
-    ext_uid = db.external_user_id(project_id)
+    ext_uid = external_user_id or db.external_user_id(project_id)
     await _sync_project(project_id, ext_uid)
 
     stored = db.list_stored_mandates(project_id)
