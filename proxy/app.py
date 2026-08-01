@@ -159,15 +159,42 @@ async def lifespan(app: FastAPI):
     treasurer_task = asyncio.create_task(treasurer_loop.treasurer_loop())
     log.info("treasurer agent started")
 
+    # The predictor's online learning loop. Without this the estimator only ever uses the
+    # constants fitted offline against a dataset, and never learns anything from the
+    # traffic this deployment actually serves — which is where the accuracy is: a feature
+    # calls one prompt template repeatedly, and output length inside a template is far
+    # more regular (p90/p10 spread ~1.2x) than across prompts in general (~10x).
+    #
+    # Kept off the request path entirely. It refits on a timer into an in-memory dict, and
+    # `predict()` only ever reads that dict, so the pre-flight estimate stays I/O-free and
+    # single-digit-millisecond (ARCHITECTURE.md §2).
+    refresh_task = None
+    if config.PREDICT_ENABLED and config.PREDICT_REFRESH_ENABLED:
+        try:
+            from predictor.refresh import start_background
+
+            refresh_task = asyncio.create_task(
+                start_background(interval_s=config.PREDICT_REFRESH_INTERVAL_S)
+            )
+            log.info("predictor refresh loop started (every %.0fs)",
+                     config.PREDICT_REFRESH_INTERVAL_S)
+        except Exception:
+            # Same posture as the tokenizer warmup: losing the learning loop costs
+            # accuracy over time, never correctness on any single request.
+            log.debug("predictor refresh loop not started", exc_info=True)
+
     try:
         yield
     finally:
-        # Cancel the treasurer loop cleanly on shutdown.
-        treasurer_task.cancel()
-        try:
-            await treasurer_task
-        except asyncio.CancelledError:
-            pass
+        # Cancel the background loops cleanly on shutdown.
+        for task in (treasurer_task, refresh_task):
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         # Let in-flight ledger writes land before the loop closes, but never hang
         # shutdown on them.
@@ -249,6 +276,20 @@ def _error(status: int, message: str, code: str) -> JSONResponse:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _learned_factor_count() -> int:
+    """Number of correction factors the online loop has installed, for /healthz.
+
+    Returns 0 rather than raising when the predictor is absent — this is a liveness
+    endpoint, and it must not be the thing that breaks on a box with no tiktoken.
+    """
+    try:
+        from predictor.engine import current_history
+
+        return len(current_history())
+    except Exception:
+        return 0
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     """Liveness plus enough config echo to diagnose a misconfigured demo box fast."""
@@ -294,6 +335,12 @@ async def healthz() -> dict[str, Any]:
             "enabled": config.PREDICT_ENABLED,
             "available": predict is not None,
             "reservation_ttl_s": config.RESERVATION_TTL_S,
+            # How many correction factors the online loop currently holds. Zero after a
+            # cold start, and zero forever on traffic too varied for the gate to accept a
+            # candidate — both are expected states, which is why this is reported rather
+            # than assumed.
+            "refresh_enabled": config.PREDICT_REFRESH_ENABLED,
+            "learned_factors": _learned_factor_count(),
         },
     }
 

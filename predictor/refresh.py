@@ -94,6 +94,62 @@ def compute(rows: List[sqlite3.Row]) -> Tuple[Dict[Tuple, Tuple[float, int]],
 
 HOLDOUT_FRAC = 0.25
 MIN_ROWS_TO_GATE = 60
+# Held-out rows a single key needs before its factor can be accepted on its own evidence.
+MIN_HOLDOUT_PER_KEY = 5
+
+
+def _key_for(row, factors) -> Tuple | None:
+    """The ladder rung `predict()` would use for this row. One definition, so the gate
+    scores rows against the same factor that will actually be applied to them."""
+    for key in ((row["project_id"], row["feature"], row["actor"]),
+                (row["project_id"], row["feature"]),
+                (row["project_id"],),
+                (row["bucket"], row["model"]),
+                (row["bucket"],)):
+        if all(k is not None for k in key) and key in factors:
+            return key
+    return None
+
+
+def _select_keys(holdout, candidate: Dict[Tuple, float]) -> Tuple[Dict[Tuple, float], dict]:
+    """Keep only the candidate keys that beat 1.0 on held-out rows they own.
+
+    All-or-nothing gating was rejecting genuinely good candidates. Measured on 200 calls
+    of templated traffic, one factor per feature: four of five features improved by 2-3x
+    (code-review-note 1417% -> 633%, commit-message 718% -> 279%) while the fifth got
+    worse, and because the pooled median happened to sit inside that fifth feature's
+    rows, the whole candidate was thrown away. One bad key vetoed four good ones.
+
+    Per-key selection has no such coupling, and it is the honest unit anyway: these
+    factors are independent by construction -- a correction for one feature says nothing
+    about another. Each is accepted on its own held-out evidence.
+    """
+    import numpy as np
+
+    owned: Dict[Tuple, list] = defaultdict(list)
+    for r in holdout:
+        key = _key_for(r, candidate)
+        scope = float(r["predicted_scope_tokens"] or 0)
+        actual = int(r["output_tokens"] or 0)
+        if key is not None and scope > 0 and actual > 0:
+            owned[key].append((scope, actual))
+
+    kept, report = {}, {}
+    for key, obs in owned.items():
+        f = candidate[key]
+        # Fewer than a handful of held-out rows cannot distinguish a real improvement
+        # from luck, so an unproven key is simply not installed.
+        if len(obs) < MIN_HOLDOUT_PER_KEY:
+            report[key] = "unproven"
+            continue
+        before = float(np.median([abs(s - a) / a for s, a in obs]))
+        after = float(np.median([abs(s * f - a) / a for s, a in obs]))
+        if after < before - 0.005:
+            kept[key] = f
+            report[key] = f"kept {before*100:.0f}%->{after*100:.0f}%"
+        else:
+            report[key] = f"dropped {before*100:.0f}%->{after*100:.0f}%"
+    return kept, report
 
 
 def _median_err(rows, factors: Dict[Tuple, float]) -> float:
@@ -161,27 +217,34 @@ def refresh_now(db_path: str | None = None, gate: bool = True) -> Dict[str, Any]
     holdout, fit_rows = usable[:cut], usable[cut:]
 
     candidate_h, buffers, outputs = compute(fit_rows)
-    candidate = {k: (n * raw + 20.0) / (n + 20.0) for k, (raw, n) in candidate_h.items()}
+    # Score exactly what would be installed. Reimplementing the shrinkage here meant
+    # gating on a different object than `load_history` produces — it missed the
+    # MIN_ROWS_FOR_KEY skip and the [0.5, 3.0] clamp.
+    candidate = engine.shrink_history(candidate_h)
     current = engine.current_history()
 
-    before = _median_err(holdout, current)
-    after = _median_err(holdout, candidate)
+    kept, report = _select_keys(holdout, candidate)
+
+    before = _median_err(holdout, engine.current_history())
+    after = _median_err(holdout, kept)
 
     # Buffers and bounds feed the BOUND, not the forecast, so they carry no accuracy
     # risk and are installed unconditionally.
     engine.load_buffers(buffers)
     engine.load_bounds(outputs)
 
-    if after < before - 0.005:
-        engine.load_history(candidate_h)
-        verdict = "installed"
-    else:
-        verdict = "rejected"
+    # Install the surviving keys directly. `load_history` would re-shrink values that
+    # `shrink_history` already shrank -- and re-shrinking is what silently pulled every
+    # factor back toward 1.0 twice over.
+    engine.set_history(kept)
 
     summary = {"rows": len(usable), "holdout": len(holdout),
-               "candidate_keys": len(candidate_h), "gated": True,
+               "candidate_keys": len(candidate_h), "installed_keys": len(kept),
+               "gated": True,
                "median_before": round(before * 100, 1),
-               "median_after": round(after * 100, 1), "verdict": verdict}
+               "median_after": round(after * 100, 1),
+               "verdict": "installed" if kept else "nothing survived",
+               "detail": {"/".join(str(x) for x in k): v for k, v in report.items()}}
     log.info("predictor refresh: %s", summary)
     return summary
 

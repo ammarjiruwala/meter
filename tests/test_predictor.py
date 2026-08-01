@@ -19,6 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from predictor import engine  # noqa: E402
 from predictor import (  # noqa: E402
     DEFAULT_BUFFER,
     PRIORS,
@@ -259,8 +260,30 @@ def test_buffer_and_history() -> None:
     barely = p.load_history({("proj",): (3.0, 20)})[("proj",)]
     strong = p.load_history({("proj",): (3.0, 500)})[("proj",)]
     check("shrinkage still applies above the threshold", barely < strong, f"{barely:.2f} vs {strong:.2f}")
-    check("factor is clamped at 3.0", p.load_history({("p",): (99.0, 500)})[("p",)] == 3.0)
-    check("factor is clamped at 0.5", p.load_history({("p",): (0.01, 500)})[("p",)] == 0.5)
+    # The clamp is a guard against the absurd, NOT the noise guard -- MIN_ROWS_FOR_KEY
+    # and shrinkage are. It used to sit at 3.0, which was measured to be inside the
+    # range real traffic asks for (a templated feature needed 18.2x), so it clamped
+    # good factors and the refresh gate then rejected them. See engine.FACTOR_MAX.
+    check("absurd factor is clamped", p.load_history({("p",): (999.0, 500)})[("p",)]
+          == engine.FACTOR_MAX)
+    check("a large but real factor survives the clamp",
+          p.load_history({("p",): (18.2, 500)})[("p",)] > 3.0)
+
+    # The refresh gate scores a candidate and then installs it; those must be the same
+    # object. `shrink_history` is what makes that possible, and `set_history` installs
+    # without shrinking a second time.
+    raw = {("proj", "feat"): (0.25, 40)}
+    check("shrink_history matches what load_history installs",
+          p.shrink_history(raw) == p.load_history(raw))
+    p.set_history({("proj", "feat"): 0.25})
+    check("set_history installs verbatim, no second shrink",
+          p._history[("proj", "feat")] == 0.25)
+    check("absurdly small factor is clamped", p.load_history({("p",): (0.0001, 500)})[("p",)]
+          == engine.FACTOR_MIN)
+    # The floor has the same history as the ceiling: a real templated feature needed
+    # 0.27, which the old 0.5 floor clamped away.
+    check("a small but real factor survives the floor",
+          p.load_history({("p",): (0.27, 500)})[("p",)] < 0.5)
 
     # The ladder: attribution rungs outrank the generic (bucket, model) rung, because
     # one team's prompting style predicts their next request better than a pattern
@@ -484,6 +507,63 @@ def test_ledger_migration() -> None:
     check2.close()
 
 
+def test_refresh_gate() -> None:
+    """The online loop's gate, on a ledger built to have one good key and one bad one.
+
+    Both properties here were live bugs. The loop was wired into the proxy, ran on a
+    timer, logged a verdict every pass — and installed nothing, ever.
+    """
+    import sqlite3
+    import tempfile
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
+    print("\nrefresh gate")
+    db = tempfile.mktemp(suffix=".db")
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE requests (id TEXT, ts TEXT, project_id TEXT, actor TEXT, "
+                 "feature TEXT, bucket TEXT, model TEXT, output_tokens INTEGER, "
+                 "predicted_scope_tokens INTEGER)")
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    # "good": actual is consistently 1/4 of scope, so a 0.25 factor is right and holds
+    # up out of sample. "noisy": actual alternates wildly, so no single factor helps.
+    for i in range(80):
+        for feat, actual in (("good", 100), ("noisy", 40 if i % 2 else 800)):
+            conn.execute("INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?)",
+                         (uuid.uuid4().hex,
+                          (base + timedelta(seconds=i * 10)).isoformat(),
+                          "proj", "actor", feat, "default", "gpt-4o", actual, 400))
+    conn.commit()
+    conn.close()
+
+    from predictor import refresh
+
+    p = Predictor()
+    p._history = {}
+    saved, engine._default = engine._default, p
+    try:
+        summary = refresh.refresh_now(db)
+    finally:
+        engine._default = saved
+
+    # Regression 1: the loop must actually install something on learnable traffic. It
+    # previously could not, because the factor a real feature needs (0.25 here, and
+    # 0.27-18.2 in the measured probe) fell outside the old [0.5, 3.0] clamp.
+    check("gate installs a factor for the learnable key", summary["installed_keys"] >= 1,
+          str(summary))
+    check("the good key is what got installed",
+          any("good" in k for k in p._history), str(list(p._history)))
+
+    # Regression 2: per-key selection. Under all-or-nothing gating one unlearnable key
+    # vetoed every good one -- measured on real traffic, four features that each improved
+    # 2-3x were discarded because a fifth got worse.
+    check("the unlearnable key is dropped, not installed",
+          not any("noisy" in k for k in p._history), str(list(p._history)))
+
+    installed = next(v for k, v in p._history.items() if "good" in k)
+    check("installed factor moves toward the truth", installed < 0.6, f"{installed:.3f}")
+
+
 def main() -> int:
     for suite in (
         test_determinism,
@@ -500,6 +580,7 @@ def main() -> int:
         test_priors,
         test_proxy_integration,
         test_ledger_migration,
+        test_refresh_gate,
     ):
         suite()
     print(f"\n{PASSED} checks passed")
