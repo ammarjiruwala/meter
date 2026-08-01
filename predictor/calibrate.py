@@ -24,15 +24,18 @@ Caveats worth stating before quoting these numbers at anyone:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import buckets, tokenizer
 from .learner import fit_bucket
+from .store import DATA_DIR, append, load_observations, path_for
 
 # A neutral passage used to build long-input variants. Input length must vary within
 # a bucket or there is no leverage to estimate how output scales with it -- the first
@@ -122,6 +125,12 @@ def run(model: str, repeats: int) -> Dict[str, List[Tuple[int, int]]]:
     client = OpenAI()
     observed: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
 
+    # Append each observation the moment it arrives rather than batching to the end.
+    # These calls cost money and the daily request cap is easy to hit mid-run; a crash
+    # on call 41 must not discard the 40 already paid for.
+    out_path = path_for(model)
+    written = 0
+
     total = len(PROBES) * repeats
     done = 0
     for expected_bucket, prompt in PROBES:
@@ -137,15 +146,47 @@ def run(model: str, repeats: int) -> Dict[str, List[Tuple[int, int]]]:
         for _ in range(repeats):
             done += 1
             print(f"  [{done}/{total}] {expected_bucket:<12} {prompt[:46]}", file=sys.stderr)
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            try:
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            except Exception as exc:  # rate limit, auth, network
+                # Stop cleanly and keep everything already collected. Re-running later
+                # appends to the same file, so a capped day is a pause, not a restart.
+                print(f"\n  ! stopped after {written} observations: "
+                      f"{type(exc).__name__}: {str(exc)[:160]}", file=sys.stderr)
+                if written:
+                    print(f"  saved so far -> {out_path}", file=sys.stderr)
+                return dict(observed)
             usage = resp.usage
             observed[expected_bucket].append(
                 (usage.prompt_tokens, usage.completion_tokens)
             )
-    return observed
+            append(out_path, {
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "model": model,
+                "bucket": expected_bucket,
+                "bucket_classified": actual_bucket,
+                "input_tokens": usage.prompt_tokens,
+                "output_tokens": usage.completion_tokens,
+                # The single most diagnostic field here. "length" means the model hit
+                # a cap and the completion is truncated, so that row is a lower bound
+                # on the real output length and must not be fitted as if it were the
+                # true value. "stop" means it finished on its own.
+                "finish_reason": resp.choices[0].finish_reason,
+                "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()[:16],
+                "prompt_preview": prompt[:80],
+                "source": "calibrate",
+            })
+            written += 1
+
+    print(f"\nwrote {written} observations -> {out_path}", file=sys.stderr)
+    return dict(observed)
+
+
+
+
 
 
 def summarize(observed: Dict[str, List[Tuple[int, int]]]) -> Dict[str, Dict[str, float]]:
@@ -182,13 +223,27 @@ def main() -> None:
     ap.add_argument("--model", default="gpt-4o-mini")
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--json", action="store_true", help="emit raw JSON")
+    ap.add_argument(
+        "--stored",
+        action="store_true",
+        help="re-analyse observations already on disk; makes no API calls",
+    )
     args = ap.parse_args()
 
     if not tokenizer.supports(args.model):
         sys.exit(f"{args.model}: no exact tokenizer; calibrate OpenAI models only")
 
-    print(f"Calibrating {args.model}...", file=sys.stderr)
-    measured = summarize(run(args.model, args.repeats))
+    if args.stored:
+        observed = load_observations(args.model)
+        if not observed:
+            sys.exit(f"no stored observations for {args.model} in {DATA_DIR}")
+        n = sum(len(v) for v in observed.values())
+        print(f"Re-analysing {n} stored observations for {args.model} "
+              f"(no API calls)...", file=sys.stderr)
+    else:
+        print(f"Calibrating {args.model}...", file=sys.stderr)
+        observed = run(args.model, args.repeats)
+    measured = summarize(observed)
 
     if args.json:
         print(json.dumps(measured, indent=2))

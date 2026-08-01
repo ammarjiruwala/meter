@@ -18,6 +18,7 @@ from .engine import (
     predict,
 )
 from .learner import Fit, accuracy_report, fit_all, fit_bucket
+from .store import load_observations, load_records
 from .tokenizer import UnsupportedModelError, count, supports
 
 __all__ = [
@@ -35,6 +36,8 @@ __all__ = [
     "fit_all",
     "fit_bucket",
     "load_fits",
+    "load_observations",
+    "load_records",
     "predict",
     "supports",
 ]
