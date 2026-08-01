@@ -293,6 +293,132 @@ export function getBudgets(): BudgetScope[] | null {
   return scopes;
 }
 
+// ── Cost per outcome ─────────────────────────────────────────────────────────
+
+/**
+ * The two CTEs every outcome query is built on. They exist to defuse one specific bug.
+ *
+ * `annotations` is append-only — proxy/db.py says so outright: "a trace can be annotated
+ * twice". So the obvious `requests JOIN annotations ON trace_id` fans out. A trace with
+ * 12 requests and 2 annotations yields 24 rows and reports **double** the cost actually
+ * spent. On a margin metric that is the error direction that turns a loss into a profit
+ * on screen, which is worse than no metric at all.
+ *
+ * `trace_rollup` therefore collapses requests to one row per trace *before* anything
+ * joins to it, and `latest` collapses annotations to one row per trace, so the join is
+ * strictly 1:1 and cannot multiply.
+ *
+ * `latest` keeps the newest annotation per trace rather than summing: a trace annotated
+ * twice is usually a correction (a ticket reopened, then resolved again), and summing
+ * would double-count the correction. Both halves of that choice live here — swapping to
+ * additive value is a change to this CTE alone.
+ */
+const OUTCOME_CTES = `
+  WITH latest AS (
+    SELECT a.project_id, a.trace_id, a.outcome, a.value_usd
+      FROM annotations a
+     WHERE a.id = (SELECT MAX(b.id)
+                     FROM annotations b
+                    WHERE b.project_id = a.project_id
+                      AND b.trace_id  = a.trace_id)
+  ),
+  trace_rollup AS (
+    SELECT project_id,
+           trace_id,
+           SUM(cost_usd) AS cost_usd,
+           COUNT(*)      AS request_count
+      FROM requests
+     WHERE trace_id IS NOT NULL
+     GROUP BY project_id, trace_id
+  )
+`;
+
+export type OutcomeRow = {
+  outcome: string | null;
+  trace_count: number;
+  request_count: number;
+  cost_usd: number;
+  /** Null when no annotation in this group carried a `value_usd`. */
+  value_usd: number | null;
+  /** Cost of only the traces that carried a value — the denominator margin can use. */
+  valued_cost_usd: number | null;
+  valued_trace_count: number;
+};
+
+export function getOutcomeCosts(): OutcomeRow[] {
+  const conn = getDb();
+  if (!conn || !tableExists(conn, "requests") || !tableExists(conn, "annotations")) {
+    return [];
+  }
+  // INNER JOIN, deliberately. `trace_id` is a caller-supplied string, so an annotation
+  // can name a trace that was never metered (a typo, or a ticket handled outside the
+  // proxy). Meter knows no cost for those, and letting them in would add traces to the
+  // count while adding nothing to cost, quietly deflating every cost-per-trace figure.
+  // They are surfaced separately as `orphan_annotations` in the coverage row instead.
+  return conn
+    .prepare(
+      `${OUTCOME_CTES}
+       SELECT l.outcome                        AS outcome,
+              COUNT(*)                         AS trace_count,
+              SUM(t.request_count)             AS request_count,
+              SUM(t.cost_usd)                  AS cost_usd,
+              SUM(l.value_usd)                 AS value_usd,
+              SUM(CASE WHEN l.value_usd IS NOT NULL THEN t.cost_usd END)
+                                               AS valued_cost_usd,
+              COUNT(l.value_usd)               AS valued_trace_count
+         FROM latest l
+         JOIN trace_rollup t
+           ON t.project_id = l.project_id AND t.trace_id = l.trace_id
+        GROUP BY l.outcome
+        ORDER BY cost_usd DESC`,
+    )
+    .all() as OutcomeRow[];
+}
+
+export type OutcomeCoverage = {
+  traced_traces: number;
+  traced_cost: number;
+  annotated_traces: number;
+  annotated_cost: number;
+  /** Annotations naming a trace that has no metered requests — almost always a typo. */
+  orphan_annotations: number;
+  total_cost: number;
+};
+
+/**
+ * How much of the ledger the outcome numbers actually speak for.
+ *
+ * This is not decoration. "$0.004 per resolved ticket" computed from 3% of traffic is a
+ * number nobody should quote on a stage, and it looks identical to one computed from 95%
+ * unless the coverage is stated beside it.
+ */
+export function getOutcomeCoverage(): OutcomeCoverage | null {
+  const conn = getDb();
+  if (!conn || !tableExists(conn, "requests") || !tableExists(conn, "annotations")) {
+    return null;
+  }
+  return conn
+    .prepare(
+      `${OUTCOME_CTES}
+       SELECT (SELECT COUNT(*)                       FROM trace_rollup) AS traced_traces,
+              (SELECT COALESCE(SUM(cost_usd), 0)     FROM trace_rollup) AS traced_cost,
+              (SELECT COUNT(*)
+                 FROM latest l JOIN trace_rollup t
+                   ON t.project_id = l.project_id AND t.trace_id = l.trace_id)
+                                                                        AS annotated_traces,
+              (SELECT COALESCE(SUM(t.cost_usd), 0)
+                 FROM latest l JOIN trace_rollup t
+                   ON t.project_id = l.project_id AND t.trace_id = l.trace_id)
+                                                                        AS annotated_cost,
+              (SELECT COUNT(*)
+                 FROM latest l LEFT JOIN trace_rollup t
+                   ON t.project_id = l.project_id AND t.trace_id = l.trace_id
+                WHERE t.trace_id IS NULL)                               AS orphan_annotations,
+              (SELECT COALESCE(SUM(cost_usd), 0)     FROM requests)     AS total_cost`,
+    )
+    .get() as OutcomeCoverage;
+}
+
 export type LiveLogRow = {
   id: string;
   ts: string;
