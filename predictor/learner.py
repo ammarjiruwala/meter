@@ -45,18 +45,32 @@ class Fit:
     mape: float  # in-sample mean absolute percentage error
 
 
-def fit_bucket(rows: Iterable[Tuple[int, int]]) -> Optional[Fit]:
+def fit_bucket(
+    rows: Iterable[Tuple[int, int]], min_rows: int = MIN_ROWS_PER_BUCKET
+) -> Optional[Fit]:
     """Least-squares fit of output tokens on input tokens for one bucket.
 
     `rows` is (input_tokens, actual_output_tokens). Returns None when there is
     too little data or the fit fails a sanity check, meaning: keep the prior.
+
+    `min_rows` is lowered by `calibrate.py`, which works from a deliberately small
+    sample. Sharing this function rather than duplicating the arithmetic is what
+    keeps calibration and production from drifting apart.
     """
     data = [(int(i), int(o)) for i, o in rows if i > 0 and o > 0]
-    if len(data) < MIN_ROWS_PER_BUCKET:
+    if len(data) < min_rows:
         return None
 
     x = np.array([d[0] for d in data], dtype=float)
     y = np.array([d[1] for d in data], dtype=float)
+
+    # Without spread in input length there is no leverage to separate slope from
+    # intercept -- the fit is arbitrary and explodes. Fall back to a flat model at
+    # the median, which is what the data actually supports.
+    if len({d[0] for d in data}) < 3 or float(np.std(x)) < 1.0:
+        med = float(np.median(y))
+        return Fit(ratio=0.0, base=med, n=len(data),
+                   mape=float(np.mean(np.abs(med - y) / np.maximum(y, 1)) * 100))
 
     # Design matrix with an explicit intercept column. The reference omitted the
     # intercept, forcing every fit through the origin -- wrong, since even a
@@ -69,6 +83,21 @@ def fit_bucket(rows: Iterable[Tuple[int, int]]) -> Optional[Fit]:
 
     if not np.isfinite([base, ratio]).all():
         return None
+
+    # If the unconstrained fit wants a negative slope or a negative intercept, the
+    # pair is not meaningful -- clamping one of them in isolation leaves the other
+    # describing a line that no longer passes near the data. (That bug produced a
+    # base of 164 for a bucket whose observed mean output was 17.) Refit the
+    # remaining free parameter instead, so the result stays coherent.
+    if ratio < 0 or base < 0:
+        if ratio < 0:
+            # Output does not grow with input here: flat model at the mean.
+            ratio, base = 0.0, float(np.mean(y))
+        else:
+            # Intercept wants to be negative: force it to zero, refit the slope.
+            ratio = float(np.dot(x, y) / max(np.dot(x, x), 1e-9))
+            base = 0.0
+
     ratio = float(np.clip(ratio, 0.0, _MAX_RATIO))
     base = float(np.clip(base, 0.0, _MAX_BASE))
 

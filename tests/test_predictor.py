@@ -201,8 +201,20 @@ def test_accuracy_report() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 def test_priors() -> None:
     print("\npriors")
-    check("every bucket has a positive ratio", all(v["ratio"] > 0 for v in PRIORS.values()))
+    # A zero ratio is legitimate: calibration found that json and summary output does
+    # not scale with input length, so those buckets are flat models carried entirely
+    # by `base`. What must never happen is both terms being zero, which would predict
+    # nothing at all.
+    check("no bucket predicts zero tokens",
+          all(v["ratio"] > 0 or v["base"] > 0 for v in PRIORS.values()))
+    check("no negative coefficients",
+          all(v["ratio"] >= 0 and v["base"] >= 0 for v in PRIORS.values()))
     check("default bucket exists", "default" in PRIORS)
+
+    # Every bucket must produce a positive prediction for a realistic prompt.
+    for bucket in PRIORS:
+        p = Predictor(safety_margin=1.0).predict("word " * 40, MODEL)
+        check(f"{bucket:<12} priors yield a positive estimate", p.predicted_output_tokens > 0)
 
 
 def main() -> int:

@@ -19,26 +19,37 @@ from typing import Dict, List
 # ---------------------------------------------------------------------------
 # predicted_output = ratio * input_tokens + base
 #
-# !! THESE ARE UNVERIFIED STARTING GUESSES !!
+# MEASURED 2026-08-01 on gpt-4o-mini, 24 real calls (3 input lengths x 8 buckets),
+# via `python -m predictor.calibrate`. These replace the values inherited from
+# PreflightLLMCost, which were guesses with no benchmark behind them.
 #
-# They came from PreflightLLMCost, whose repository contains no benchmark, no
-# dataset, and no evaluation script -- we checked. Treat every number below as a
-# placeholder that has never been measured against a real completion.
+# What the measurement changed, and why it matters: the inherited ratios assumed
+# output scales with input, with tiny intercepts (reasoning was ratio 0.80 / base
+# 40). Real short prompts do not behave that way -- a 22-token reasoning prompt
+# produced 569 output tokens. Output is driven mainly by the *task*, which lives in
+# `base`, not by input length. The old numbers would have under-predicted short
+# prompts by an order of magnitude, and under-prediction is the direction that
+# breaks a budget ceiling.
 #
-# Two things replace them, in order:
-#   1. `calibrate.py` -- run real prompts through OpenAI, read the actual usage
-#      object, and overwrite these with measured numbers. Do this early.
-#   2. `learner.py`   -- once the ledger has enough rows, per-bucket ratios are
-#      fitted from real traffic and these are never consulted again.
+# Still weak, and honest about it:
+#   * n=3 per bucket. Enough to correct an order-of-magnitude error, not enough to
+#     quote an accuracy figure to anyone.
+#   * Per-model. Measured on gpt-4o-mini; do not assume they hold for gpt-4o.
+#   * `translation` looks wrong (ratio 0.26, 331% MAPE). Translation output should
+#     track input near 1.0; the long probes likely were not translated in full.
+#     Re-measure with mid-length inputs before relying on that bucket.
+#
+# `learner.py` replaces all of this from live traffic once ~30 rows/bucket exist.
+# These are a cold start, not an answer.
 PRIORS: Dict[str, Dict[str, float]] = {
-    "translation": {"ratio": 0.92, "base": 8},
-    "reasoning": {"ratio": 0.80, "base": 40},
-    "explanation": {"ratio": 0.65, "base": 30},
-    "code": {"ratio": 0.45, "base": 55},
-    "default": {"ratio": 0.30, "base": 32},
-    "list": {"ratio": 0.25, "base": 25},
-    "json": {"ratio": 0.18, "base": 45},
-    "summary": {"ratio": 0.12, "base": 35},
+    "translation": {"ratio": 0.26, "base": 98},
+    "reasoning": {"ratio": 0.31, "base": 485},
+    "explanation": {"ratio": 0.29, "base": 443},
+    "code": {"ratio": 1.32, "base": 282},
+    "default": {"ratio": 0.47, "base": 119},
+    "list": {"ratio": 0.17, "base": 78},
+    "json": {"ratio": 0.00, "base": 97},
+    "summary": {"ratio": 0.00, "base": 168},
 }
 
 # Keyword sets per bucket.

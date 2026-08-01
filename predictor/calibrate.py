@@ -28,28 +28,73 @@ import json
 import os
 import sys
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 from . import buckets, tokenizer
+from .learner import fit_bucket
 
-# Two prompts per bucket, written so the intended bucket is unambiguous.
+# A neutral passage used to build long-input variants. Input length must vary within
+# a bucket or there is no leverage to estimate how output scales with it -- the first
+# version of this file used only short one-liners, every input landed in 15-23 tokens,
+# and the resulting fits were meaningless (ratio 153.5, base 2030).
+_PASSAGE = (
+    "The city council met on Tuesday to review the annual transit budget. Ridership "
+    "on the eastern line has risen fourteen percent since the new station opened, "
+    "while the western corridor continues to lose passengers to the expanded bus "
+    "network. Maintenance costs on the older rolling stock now exceed projections by "
+    "roughly two million dollars, driven mostly by brake and door assemblies that "
+    "were expected to last another four years. The transit authority has proposed "
+    "deferring the platform renovation at Elm Street in order to fund those repairs, "
+    "a trade-off that several council members questioned on the grounds that the "
+    "platform work was itself deferred twice before. Public comment ran long. "
+    "Residents of the eastern district argued that service frequency matters more "
+    "than station appearance, while a coalition of downtown businesses asked the "
+    "council to prioritise the renovation because of its effect on foot traffic. "
+    "The finance director noted that federal matching funds for the renovation "
+    "expire at the end of the fiscal year and cannot be carried forward. "
+)
+
+
+def _long(n: int) -> str:
+    """A passage of roughly n repetitions, for building long-input probes."""
+    return (_PASSAGE * n).strip()
+
+
+# Three input lengths per bucket -- short, medium, long -- so each bucket has enough
+# spread to fit. Roughly 20 / 250 / 900 tokens.
 PROBES: List[Tuple[str, str]] = [
     ("summary", "Summarize the causes of the French Revolution."),
-    ("summary", "Give me a TL;DR of how TCP congestion control works."),
+    ("summary", f"Summarize the following in two sentences:\n\n{_long(1)}"),
+    ("summary", f"Summarize the following in two sentences:\n\n{_long(4)}"),
+
     ("code", "Write a Python function that parses a CSV file into a list of dicts."),
-    ("code", "Implement binary search in TypeScript with unit tests."),
+    ("code", f"Write a Python function to extract every dollar amount from this text:\n\n{_long(1)}"),
+    ("code", f"Write a Python parser with tests for the structure of this text:\n\n{_long(4)}"),
+
     ("reasoning", "Explain step by step why the sky appears blue, and justify each step."),
-    ("reasoning", "Analyze whether a hash map or a sorted array is better for range queries."),
+    ("reasoning", f"Analyze the trade-offs described here step by step:\n\n{_long(1)}"),
+    ("reasoning", f"Analyze step by step and justify a recommendation:\n\n{_long(4)}"),
+
     ("explanation", "What is a database index and how does it work?"),
-    ("explanation", "Describe how DNS resolution happens end to end."),
+    ("explanation", f"Describe what is happening in the following:\n\n{_long(1)}"),
+    ("explanation", f"Describe in detail how the situation below developed:\n\n{_long(4)}"),
+
     ("json", "Return a JSON object with the keys name, age, and city for a fictional person."),
-    ("json", "Produce valid JSON matching a schema for a blog post with title and tags."),
+    ("json", f"Return valid JSON with keys topic, figures, decision for:\n\n{_long(1)}"),
+    ("json", f"Return valid JSON extracting every entity and amount from:\n\n{_long(4)}"),
+
     ("list", "List ten programming languages."),
-    ("list", "Enumerate the steps to deploy a Docker container to production."),
+    ("list", f"List the key points as bullets:\n\n{_long(1)}"),
+    ("list", f"Enumerate every distinct issue raised as bullet points:\n\n{_long(4)}"),
+
     ("translation", "Translate to Spanish: The weather is nice today and I plan to walk."),
-    ("translation", "Translate the following into French: Where is the nearest train station?"),
+    ("translation", f"Translate the following into French:\n\n{_long(1)}"),
+    ("translation", f"Translate the following into French:\n\n{_long(4)}"),
+
     ("default", "Hey, how's it going?"),
-    ("default", "Any thoughts on what makes a good weekend?"),
+    ("default", f"What do you make of this?\n\n{_long(1)}"),
+    ("default", f"Thoughts?\n\n{_long(4)}"),
 ]
 
 
@@ -57,10 +102,22 @@ def run(model: str, repeats: int) -> Dict[str, List[Tuple[int, int]]]:
     try:
         from openai import OpenAI
     except ImportError:
-        sys.exit("pip install openai")
+        sys.exit("openai is not installed — run: pip install -r requirements.txt")
+
+    # Read .env the same way proxy/config.py does, so a key placed there works
+    # here too rather than failing with a confusing "not set".
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+    except ImportError:
+        pass
 
     if not os.getenv("OPENAI_API_KEY"):
-        sys.exit("OPENAI_API_KEY is not set")
+        sys.exit(
+            "OPENAI_API_KEY is not set.\n"
+            "  Either add it to .env at the repo root, or: export OPENAI_API_KEY=sk-..."
+        )
 
     client = OpenAI()
     observed: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
@@ -92,30 +149,30 @@ def run(model: str, repeats: int) -> Dict[str, List[Tuple[int, int]]]:
 
 
 def summarize(observed: Dict[str, List[Tuple[int, int]]]) -> Dict[str, Dict[str, float]]:
-    """Solve ratio and base per bucket from measured (input, output) pairs."""
+    """Solve ratio and base per bucket from measured (input, output) pairs.
+
+    Uses `learner.fit_bucket` -- the same function that fits from live traffic --
+    with a lowered row threshold. Calibration and production must not use two
+    different estimators, or the numbers pasted into PRIORS describe a model the
+    engine does not actually run.
+    """
     out: Dict[str, Dict[str, float]] = {}
     for bucket, pairs in observed.items():
         if not pairs:
             continue
-        if len(pairs) >= 2 and len({p[0] for p in pairs}) >= 2:
-            # Enough spread in input length to separate slope from intercept.
-            import numpy as np
-
-            x = np.array([p[0] for p in pairs], dtype=float)
-            y = np.array([p[1] for p in pairs], dtype=float)
-            a = np.column_stack([np.ones_like(x), x])
-            (base, ratio), *_ = np.linalg.lstsq(a, y, rcond=None)
-            ratio, base = max(0.0, float(ratio)), max(0.0, float(base))
-        else:
-            # Degenerate: attribute everything to the ratio.
-            ratio = sum(o for _, o in pairs) / max(1, sum(i for i, _ in pairs))
-            base = 0.0
+        fit = fit_bucket(pairs, min_rows=2)
+        if fit is None:
+            continue
+        ins = [p[0] for p in pairs]
+        outs = [p[1] for p in pairs]
         out[bucket] = {
-            "ratio": round(ratio, 3),
-            "base": round(base, 1),
-            "n": len(pairs),
-            "mean_in": round(sum(i for i, _ in pairs) / len(pairs), 1),
-            "mean_out": round(sum(o for _, o in pairs) / len(pairs), 1),
+            "ratio": round(fit.ratio, 3),
+            "base": round(fit.base, 1),
+            "mape": round(fit.mape, 1),
+            "n": fit.n,
+            "min_in": min(ins),
+            "max_in": max(ins),
+            "mean_out": round(sum(outs) / len(outs), 1),
         }
     return out
 
@@ -137,18 +194,19 @@ def main() -> None:
         print(json.dumps(measured, indent=2))
         return
 
-    print(f"\n{'bucket':<14}{'n':>4}{'mean_in':>10}{'mean_out':>10}"
-          f"{'measured':>11}{'prior':>9}")
-    print("-" * 58)
+    print(f"\n{'bucket':<14}{'n':>3}{'in range':>13}{'mean_out':>10}"
+          f"{'ratio':>8}{'base':>8}{'mape':>7}{'was':>7}")
+    print("-" * 70)
     for bucket in buckets.BUCKETS:
         m = measured.get(bucket)
         prior = buckets.PRIORS[bucket]["ratio"]
         if not m:
-            print(f"{bucket:<14}{'-':>4}{'-':>10}{'-':>10}{'-':>11}{prior:>9.2f}")
+            print(f"{bucket:<14}{'-':>3}{'-':>13}{'-':>10}{'-':>8}{'-':>8}{'-':>7}{prior:>7.2f}")
             continue
-        flag = "  <-- prior is off" if abs(m["ratio"] - prior) > max(0.15, prior) else ""
-        print(f"{bucket:<14}{m['n']:>4}{m['mean_in']:>10}{m['mean_out']:>10}"
-              f"{m['ratio']:>11.2f}{prior:>9.2f}{flag}")
+        rng = f"{m['min_in']}-{m['max_in']}"
+        flag = "  <-- changed" if abs(m["ratio"] - prior) > max(0.15, prior * 0.5) else ""
+        print(f"{bucket:<14}{m['n']:>3}{rng:>13}{m['mean_out']:>10}"
+              f"{m['ratio']:>8.2f}{m['base']:>8.0f}{m['mape']:>6.0f}%{prior:>7.2f}{flag}")
 
     print(f"\n# Measured on {args.model}. Paste into buckets.py:")
     print("PRIORS = {")
