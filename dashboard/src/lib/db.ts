@@ -22,6 +22,19 @@ function getDb(): Database.Database | null {
   return db;
 }
 
+// The treasury tables (wallets/mandates/treasury_events) are created at boot by
+// proxy/app.py's lifespan, but a teammate's meter.db may predate that build — the
+// dashboard would then throw "no such table: wallets" on a file that otherwise reads
+// fine. Checking beats catching, since the card wants to distinguish "not set up yet"
+// from "set up and empty".
+function tableExists(conn: Database.Database, name: string): boolean {
+  return (
+    conn
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?")
+      .get(name) !== undefined
+  );
+}
+
 export type SpendRow = {
   project_id: string;
   actor: string | null;
@@ -32,7 +45,7 @@ export type SpendRow = {
 
 export function getTeamSpend(): SpendRow[] {
   const conn = getDb();
-  if (!conn) return [];
+  if (!conn || !tableExists(conn, "requests")) return [];
   return conn
     .prepare(
       `SELECT project_id,
@@ -47,8 +60,43 @@ export function getTeamSpend(): SpendRow[] {
     .all() as SpendRow[];
 }
 
+/**
+ * Whether the request ledger is usable — the file exists *and* has the `requests`
+ * table. Both halves matter: `treasury/db.py` creates meter.db with only the treasury
+ * tables, so running any treasury script before the proxy leaves a file that exists
+ * but has nothing to meter.
+ */
 export function isLedgerAvailable(): boolean {
-  return getDb() !== null;
+  const conn = getDb();
+  return conn !== null && tableExists(conn, "requests");
+}
+
+export type WalletRow = {
+  id: string;
+  project_id: string;
+  provider: string;
+  balance_usd: number;
+  updated_at: string;
+};
+
+/**
+ * Provider balances, mirroring treasury.db.list_wallets() — same ordering, so the
+ * card and the /treasury/wallets route can never disagree about row order.
+ *
+ * Returns null (rather than []) when the treasury tables have not been created yet,
+ * so the card can say "run the proxy" instead of "you have no money".
+ */
+export function getProviderBalances(): WalletRow[] | null {
+  const conn = getDb();
+  if (!conn) return null;
+  if (!tableExists(conn, "wallets")) return null;
+  return conn
+    .prepare(
+      `SELECT id, project_id, provider, balance_usd, updated_at
+         FROM wallets
+        ORDER BY project_id, provider`,
+    )
+    .all() as WalletRow[];
 }
 
 export type LiveLogRow = {
@@ -66,7 +114,7 @@ export type LiveLogRow = {
 
 export function getLiveLogs(limit = 50): LiveLogRow[] {
   const conn = getDb();
-  if (!conn) return [];
+  if (!conn || !tableExists(conn, "requests")) return [];
   return conn
     .prepare(
       `SELECT id,

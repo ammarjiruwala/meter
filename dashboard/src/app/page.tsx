@@ -1,8 +1,12 @@
 import { TeamSpendTable } from "@/components/TeamSpendTable";
 import { ProviderBalancesCard } from "@/components/ProviderBalancesCard";
 import { LiveLogsTable } from "@/components/LiveLogsTable";
-import { getTeamSpend, getLiveLogs, isLedgerAvailable } from "@/lib/db";
-import { getProviderBalancesPlaceholder } from "@/lib/wallets";
+import {
+  getTeamSpend,
+  getLiveLogs,
+  getProviderBalances,
+  isLedgerAvailable,
+} from "@/lib/db";
 
 // Reads meter.db on every request — must not be statically prerendered at build
 // time, or the dashboard would freeze on whatever spend existed the moment
@@ -12,7 +16,7 @@ export const dynamic = "force-dynamic";
 export default function Home() {
   const ledgerAvailable = isLedgerAvailable();
   const spend = getTeamSpend();
-  const balances = getProviderBalancesPlaceholder();
+  const wallets = getProviderBalances();
   const liveLogs = getLiveLogs();
 
   return (
@@ -32,7 +36,7 @@ export default function Home() {
           </div>
         )}
 
-        <ProviderBalancesCard balances={balances} />
+        <ProviderBalancesCard wallets={wallets} />
         <LiveLogsTable initialRows={liveLogs} />
         <TeamSpendTable rows={spend} />
       </main>

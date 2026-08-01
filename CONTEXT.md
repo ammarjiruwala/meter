@@ -170,19 +170,24 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
     (`dashboard/src/lib/db.ts`), WAL mode makes concurrent reads with the proxy's writer safe.
     *   "Team Spend" table (grouped by project/actor/feature from `requests`).
-    *   "Provider Balances" card — still placeholder data (`dashboard/src/lib/wallets.ts`), but the
-        `wallets` table now exists in the same `meter.db` (`treasury/db.py`). **Tanay: this is
-        unblocked** — swap the placeholder for
-        `SELECT provider, balance_usd FROM wallets ORDER BY provider`. Seed a wallet with
-        `POST /wallets/seed` (defaults to `$4.00`, the demo's "too low" state), or read
-        `GET /wallets`.
+    *   "Provider Balances" card — **now reading the real `wallets` table** (`treasury/db.py`,
+        same `meter.db`). Ordering mirrors `treasury.db.list_wallets()` so the card and
+        `GET /treasury/wallets` cannot disagree. Each row shows how stale the balance is, because
+        "$4.00" and "$4.00, three hours ago" call for different reactions. The project name is
+        shown only when more than one project has wallets, so it stays out of the way in the
+        single-project demo. Seed with `POST /treasury/wallets/seed` (defaults to `$4.00`, the
+        demo's "too low" state). The old `dashboard/src/lib/wallets.ts` placeholder is deleted.
     *   "Live Logs" table (`User | Model | Predicted Cost | Actual Cost | Status`), polling
         `GET /api/live-logs` every 3s. **Predicted Cost is always blank** — the ledger has no
         `predicted_output_tokens`/`bucket` columns yet; wire it for real once Shubh's predictor
         integration lands (see Predictive Engine entry above). Verified end-to-end against a
         seeded SQLite file: a row inserted mid-session shows up on the next poll with no restart.
-    *   Handles the ledger-not-created-yet case (nobody has run the proxy) with an empty state
-        instead of crashing.
+    *   **Every query guards on the table existing, not just the file.** `meter.db` can now be
+        created by either side — `treasury/db.py` makes it with only the treasury tables, so
+        running any treasury script before the proxy left a file that existed but had no
+        `requests` table, and the whole page 500'd with `no such table: requests`. Each read
+        checks `sqlite_master` first and degrades to an empty state per card, so a half-built
+        database shows what it has instead of nothing.
     *   Not yet done: Poke alert wiring (Phase 3, hooks into `breaker.notify()`), Model Efficiency
         view (Phase 3, needs Ammar's cross-model data), Agent Activity panel (Phase 3, Treasurer).
 
