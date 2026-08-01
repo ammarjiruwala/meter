@@ -28,7 +28,7 @@ pip install -r requirements.txt
 cp .env.example .env                            # provider + Prava keys; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
-python tests/test_proxy.py                      # 202 checks, no framework, ~3s
+python tests/test_proxy.py                      # 207 checks, no framework, ~3s
 python tests/test_predictor.py                  # 64 checks, same convention
 ```
 

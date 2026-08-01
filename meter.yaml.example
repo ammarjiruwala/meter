@@ -22,10 +22,14 @@ projects:
       # ceiling binds first refuses the request, and the 429 names which one it was in
       # `X-Meter-Budget-Scope`.
       #
-      # These must sum to no more than the project ceiling above (ARCHITECTURE.md §4).
-      # A project that allocates more to its features than it has is REJECTED at boot —
-      # not clamped, not warned about: none of its ceilings are enforced, and the proxy
-      # logs an error saying so. 200 + 500 <= 800 here.
+      # No single feature may exceed the project ceiling above — a feature can never
+      # outspend its project, so that config cannot mean what it says and is REJECTED at
+      # boot (none of that project's ceilings are enforced, and the proxy logs an error).
+      #
+      # The features MAY sum to more than the project ceiling. That is a normal policy —
+      # independent per-feature caps under a shared project cap — and it is safe, because
+      # both ceilings are checked separately on every request, so the project total still
+      # binds. It logs a warning and keeps enforcing. See ARCHITECTURE.md §4.
       summarize: { ceiling_usd_per_day: 200 }
       chat:      { ceiling_usd_per_day: 500 }
 

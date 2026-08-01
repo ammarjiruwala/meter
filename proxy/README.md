@@ -74,7 +74,7 @@ sqlite3 meter.db \
 ## Test it
 
 ```bash
-python tests/test_proxy.py     # 202 checks, no framework, ~3s
+python tests/test_proxy.py     # 207 checks, no framework, ~3s
 ```
 
 Covers model routing, provider key substitution, longest-prefix pricing, both SSE parser
@@ -157,17 +157,27 @@ first. The breaker is the cheaper check and is a pure rejection, so running it f
 keeps a revoked key or a throttled tag from taking and immediately releasing a hold on
 every attempt. Nothing outside `_proxy` can observe the difference.
 
-Steps 1–7 are what `X-Meter-Overhead-Ms` measures. Measured against a local fake upstream:
-**p50 +1.49 ms wall-clock, 0.29 ms self-reported in-process** over 300 requests. That is
-loopback with no TLS to a real provider, so treat it as a floor, not a production number —
-but it is comfortably inside the 5 ms budget ARCHITECTURE.md §8 sets.
+Steps 1–7 are what `X-Meter-Overhead-Ms` measures.
 
-⚠ **That number was measured before ESTIMATE and RESERVE existed and has not been re-run.**
-Both add cost the figure above does not include: the estimate is ~0.03 ms
-(`predictor/README.md`), and a reserve costs one or two SQLite reads — but only for a
-project that actually has a ceiling configured, since `budget.authorize` returns on a
-dict lookup when `meter.yaml` is absent. Re-measure before quoting the overhead number
-again, and quote it with a ceiling configured, which is the slower path.
+**Quote it as: "p50 +1.49 ms, measured Phase 1 on loopback."** Never without the
+qualifier. The full figure was p50 +1.49 ms wall-clock, 0.29 ms self-reported in-process,
+over 300 requests against a local fake upstream — loopback, no TLS, single client, so it is
+a floor rather than a production number, though comfortably inside the 5 ms budget
+ARCHITECTURE.md §8 sets.
+
+Two caveats, both load-bearing if this goes in front of judges:
+
+1. **It predates ESTIMATE and RESERVE.** The estimate adds ~0.03 ms
+   (`predictor/README.md`); a reserve costs one or two SQLite reads, but *only* when a
+   ceiling is configured — `budget.authorize` returns on a dict lookup when `meter.yaml`
+   is absent, so the demo path is barely affected and the enforced path is untested.
+2. **The harness that produced it was never committed**, so nobody can currently reproduce
+   the number on demand. `overhead_ms` is a column on `requests` and
+   `X-Meter-Overhead-Ms` is on every response, so re-deriving it is a loop plus one
+   `SELECT` — it just does not exist yet.
+
+Re-measuring is Phase 4 work (PLAN.md, Shubh). Do it in both configurations — no
+`meter.yaml` and with one — and commit the script that does it.
 
 ---
 
@@ -242,6 +252,21 @@ in the critical path; taking production down over a typo in a spend limit is pre
 "cost tool takes down production" failure README.md rules out. Ceilings of `0` or less are
 rejected for the same reason — enforced literally, a `0` blocks every request in the
 project, and nobody means to commit that.
+
+**Feature ceilings are validated per feature, never against their sum.** A single feature
+ceiling above its project's is rejected: the project ceiling binds first, so that config
+cannot mean what it says. But features *summing* past the project total is legal and
+common — independent caps under a shared cap — and it warns rather than rejecting, because
+both ceilings are evaluated separately in `authorize` and the project total still holds.
+The earlier rule rejected on the sum, which meant an over-restrictive config disabled
+enforcement for the whole project: an operator who fat-fingered one feature's ceiling would
+lose the project ceiling that was about to catch it (PROPOSALS.md B17).
+
+**Which ceiling a 429 names depends on which one is exhausted.** A feature at its own limit
+is refused in the feature's name; a feature with headroom stopped by the project total is
+refused in the project's. Both are asserted, because `X-Meter-Budget-Scope` is what tells an
+operator which line of `meter.yaml` to edit, and naming the wrong one sends them to the
+wrong place.
 
 **Untagged traffic is its own breaker scope, not the project total.** Summing the project
 for the `*` scope would let one tagged feature's burst trip the breaker for untagged

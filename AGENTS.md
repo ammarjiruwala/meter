@@ -60,7 +60,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                              # add provider keys
 uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
-python tests/test_proxy.py                        # 202 assertions, no framework, ~3s
+python tests/test_proxy.py                        # 207 assertions, no framework, ~3s
 python tests/test_predictor.py                    # 64 assertions, same convention
 
 cd dashboard && npm install && npm run dev        # reads ../meter.db, read-only

@@ -666,8 +666,23 @@ def test_meter_yaml() -> None:
           "project:proj-beta" not in budget.active_ceilings(),
           str(budget.active_ceilings()))
 
-    # ARCHITECTURE.md §4: features may not allocate more than their project has. Rejected
-    # outright rather than clamped, so the mistake is caught in review.
+    # ARCHITECTURE.md §4: a child budget may not exceed its parent's. Checked per feature.
+    # A single feature above its project's ceiling can never mean what it says — the
+    # project ceiling binds first — so the config is rejected and caught in review.
+    path.write_text(textwrap.dedent("""
+        projects:
+          proj-alpha:
+            ceiling_usd_per_day: 100
+            features:
+              a: { ceiling_usd_per_day: 250 }
+    """))
+    budget.load_meter_yaml(path)
+    check("a feature ceiling above its project's is rejected",
+          budget.active_ceilings() == {}, str(budget.active_ceilings()))
+
+    # Siblings summing past the project total is a different case and is legitimate —
+    # independent per-feature caps under a shared project cap. Warn, but keep enforcing:
+    # rejecting here would answer an over-restrictive config by enforcing nothing at all.
     path.write_text(textwrap.dedent("""
         projects:
           proj-alpha:
@@ -677,8 +692,12 @@ def test_meter_yaml() -> None:
               b: { ceiling_usd_per_day: 80 }
     """))
     budget.load_meter_yaml(path)
-    check("a project whose features over-allocate is rejected entirely",
-          budget.active_ceilings() == {}, str(budget.active_ceilings()))
+    ceilings = budget.active_ceilings()
+    check("features summing past the project total still load",
+          ceilings.get("project:proj-alpha") == 100.0, str(ceilings))
+    check("and both feature ceilings are enforced",
+          ceilings.get("feature:proj-alpha/a") == 80.0
+          and ceilings.get("feature:proj-alpha/b") == 80.0, str(ceilings))
 
     path.write_text(textwrap.dedent("""
         projects:
@@ -820,6 +839,40 @@ def test_reservations() -> None:
         check("extend() on an unknown reservation is a no-op, not a crash",
               budget.extend("rsv_does_not_exist") is None)
         check("release() of None is a no-op", await budget.release(None) is None)
+
+        # The claim the B17 decision rests on: features may allocate more in total than
+        # their project has, because the project ceiling is checked independently and
+        # still binds. If this ever fails, rejecting over-allocated configs at load time
+        # becomes necessary again.
+        over = Path(_TMP) / "meter-over.yaml"
+        over.write_text(textwrap.dedent("""
+            projects:
+              proj-over:
+                ceiling_usd_per_day: 10
+                features:
+                  a: { ceiling_usd_per_day: 8 }
+                  b: { ceiling_usd_per_day: 8 }
+        """))
+        budget.load_meter_yaml(over)
+        held = []
+        for feature in ("a", "b"):
+            for _ in range(8):
+                dn = await budget.authorize("proj-over", feature, 1.0)
+                if not dn.blocked:
+                    held.append(dn.reservation_id)
+        check("over-allocated features cannot breach the project ceiling",
+              len(held) == 10, f"{len(held)} of 16 allowed against a $10 project ceiling")
+        # Which ceiling reports the refusal depends on which one is exhausted, and both
+        # cases have to name themselves correctly or the 429 sends the operator to the
+        # wrong line of meter.yaml. `a` is at its own $8 limit; `b` still has feature
+        # headroom and is stopped by the project total instead.
+        check("a feature at its own limit is refused in the feature's name",
+              (await budget.authorize("proj-over", "a", 1.0)).scope
+              == "feature:proj-over/a")
+        check("a feature with headroom is refused in the project's name",
+              (await budget.authorize("proj-over", "b", 1.0)).scope == "project:proj-over")
+        for rid in held:
+            await budget.release(rid)
 
     asyncio.run(scenarios())
     budget.load_meter_yaml(Path(_TMP) / "absent.yaml")  # leave no ceilings behind

@@ -385,6 +385,13 @@ the same shape, so the same rule applies: validate at load time that the feature
 sum to no more than the project ceiling, and reject the config if they don't. Catching that
 in a pull request is the entire pitch of budget-as-code, and it is a 5-line check.
 
+> ⚠ **The last sentence above is wrong, and B17 corrects it.** The rule described in the
+> sentence before it — "a child budget cannot exceed its parent's" — is LiteLLM's actual
+> rule and is a *per-child* check. Restating it as a check on the *sum across siblings* is
+> a different rule that the cited prior art does not support, and it inverts the failure
+> mode. Left in place rather than edited away, because the drift is the useful part of the
+> record. See B17 for what shipped.
+
 **Applied to:** `ARCHITECTURE.md` §4, which now records both constraints on the loader —
 idempotent, and rejects a config whose feature ceilings exceed their project's — alongside
 the `meter.yaml`-wins precedence from A6. The enforcement code is Phase 2; the spec it has to
@@ -405,7 +412,9 @@ tool:
   written blocks every request in the project, and nobody commits that on purpose.
 
 Both are the same fail-open posture `FAIL_MODE` already takes, and both are loud in the
-log. See B17 for the one rule where erring toward availability was *not* chosen.
+log. B17 later applied the same reasoning to the third case — feature ceilings summing past
+their project's total now warn and keep enforcing, rather than rejecting the project's
+budgets outright.
 
 ### B8 — Reconciliation after a ledger outage can double-count · DONE
 
@@ -433,18 +442,18 @@ query) and it is the difference between "another cost dashboard" and a margin to
 is being cut, cut it from `README.md` too; documenting an endpoint that 404s is worse than
 not having it. Suggested owner: Shubh or Tanay, Phase 3.
 
-**Built 2026-08-01 (Shubh), alongside the Phase 2 proxy work.** ⚠ **Nobody formally
-assigned this** — it was taken because it is proxy surface and the recommendation above
-had been sitting unactioned. Flagging rather than quietly closing, since the process here
-is meant to be human-decides-then-build. Say so if it should have waited.
+**Built 2026-08-01 (Shubh), alongside the Phase 2 proxy work. Ratified the same day** —
+raised for a decision because it was taken without a formal assignment, and kept: the
+endpoint was already documented in `README.md` with a working `curl` and called "the margin
+metric" in `ARCHITECTURE.md` §4, so what was missing was an owner, not a decision.
 
 Two deliberate deviations from `ARCHITECTURE.md` §4's `annotations
 (id, trace_id, outcome, value_usd, ts)`:
 
-* **`project_id` added.** A `trace_id` is a caller-supplied string. Without scoping, any
-  key could annotate — or, via the returned totals, *read the cost of* — another
-  project's traces. The self-check plants an identical trace id under a second project
-  and asserts it is not counted.
+* **`project_id` added — explicitly approved 2026-08-01, on security grounds.** A
+  `trace_id` is a caller-supplied string. Without scoping, any key could annotate — or,
+  via the returned totals, *read the cost of* — another project's traces. The self-check
+  plants an identical trace id under a second project and asserts it is not counted.
 * **Response returns the trace's cost, request count and margin**, not just an ack. The
   number the endpoint exists to produce is dollars-per-outcome, and making the caller run
   a second query to see what they just annotated is a worse API for no saving.
@@ -548,12 +557,13 @@ chunk shape.
 The consequence we accept: on that endpoint the caller sees a `usage` field it did not request.
 Forwarding an extra field is a much smaller sin than deleting the end-of-stream signal.
 
-### B17 — Rejecting an over-allocated project removes all its enforcement · OPEN · **raised by Shubh, 2026-08-01**
+### B17 — Rejecting an over-allocated project removes all its enforcement · **RESOLVED & SHIPPED — rule changed, 2026-08-01**
 
-`ARCHITECTURE.md` §4 (via A6/B7) requires the loader to "reject a config whose feature
-ceilings sum to more than their project's ceiling". **This is implemented as specified**
-and the self-check asserts it. Raising it rather than quietly reinterpreting it, because
-building it surfaced two problems the rule's one-line statement hides.
+`ARCHITECTURE.md` §4 (via A6/B7) **used to require** the loader to "reject a config whose
+feature ceilings sum to more than their project's ceiling". It was first implemented
+exactly as specified, then raised here rather than quietly reinterpreted, because building
+it surfaced two problems the rule's one-line statement hides. The decision below changed
+the rule; §4 and the loader now match the recommendation, not the original text.
 
 **1. "Reject" is the most dangerous possible outcome here.** A rejected project gets *no*
 ceilings at all — not the project one, not the feature ones. So the response to "you
@@ -584,8 +594,24 @@ preserves the outer ceiling when the config is merely generous, and stops the lo
 disabling enforcement as a response to over-restriction. ~3 lines changed in
 `budget.load_meter_yaml`, plus one line in `ARCHITECTURE.md` §4.
 
-**Not changed pending a human decision** — the current rule is what the docs specify, so
-it is what shipped.
+**Decided 2026-08-01 (Shubh): recommendation accepted, rule changed.** The sum rule was
+never in the prior art it cited — the drift is visible inside B7's own paragraph, which
+correctly describes LiteLLM's rule as "a child budget cannot exceed its parent's" (a
+per-child check) and then restates it one sentence later as a check on the sum.
+
+**Applied to:** `ARCHITECTURE.md` §4, which now carries three loader rules instead of two —
+replace-don't-upsert, reject a single feature above its project, warn on the sibling sum.
+`proxy/budget.py` implements all three; `meter.yaml.example` documents them.
+
+**The claim the decision rests on is now asserted, not argued.** The self-check builds a
+project with a \$10 ceiling and two \$8 features, fires 16 authorizes, and asserts exactly
+10 pass — over-allocated features cannot breach the project total, because both ceilings
+are evaluated independently in `authorize`. It also pins which scope reports the refusal in
+each direction: a feature at its own limit is refused in the *feature's* name, a feature
+with headroom stopped by the project total is refused in the *project's*. That second pair
+came out of a failing assertion — the first version of the test assumed the project always
+wins, which is wrong, and the 429 would have sent an operator to the wrong line of
+`meter.yaml`.
 
 ---
 

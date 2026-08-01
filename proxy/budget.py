@@ -137,21 +137,43 @@ def load_meter_yaml(path: Path | None = None) -> int:
                 f"{project_id}.features.{feature}.ceiling_usd_per_day",
             )
 
-        # ARCHITECTURE.md §4 requires the loader to reject a config whose feature ceilings
-        # sum to more than their project's — "catching that in review is the whole of
-        # budget-as-code". Rejecting means this project's budgets are not applied at all,
-        # so the error cannot be scrolled past. See PROPOSALS.md B17: over-allocating
-        # features on purpose is a defensible pattern and this rule forbids it, which is
-        # a decision worth a second look rather than one to quietly reinterpret here.
-        allocated = sum(v for v in features.values() if v is not None)
-        if ceiling is not None and allocated > ceiling:
-            log.error(
-                "meter.yaml: project %r allocates $%.2f across its features but its own "
-                "ceiling is $%.2f. REJECTING this project's budgets — no ceiling is being "
-                "enforced for it. Lower the feature ceilings or raise the project's.",
-                project_id, allocated, ceiling,
-            )
-            continue
+        # A child budget may not exceed its parent's (ARCHITECTURE.md §4, PROPOSALS.md
+        # B17). Checked per feature, not against the sum of the siblings:
+        #
+        # * A single feature ceiling above its project's is unenforceable by construction
+        #   — the project ceiling always binds first — so it is always a mistake, and
+        #   rejecting it is what catches the fat-fingered extra zero in review.
+        # * Siblings *summing* past the project ceiling is a different thing and is
+        #   legitimate: "no feature over $200/day, project under $800/day" is a coherent
+        #   policy with six features. Nothing can breach the project total either way,
+        #   because both ceilings are checked independently in `authorize`. So it warns
+        #   and still enforces, rather than rejecting.
+        #
+        # Rejecting on the sum was the original rule; it made the response to an
+        # over-restrictive config "enforce nothing at all for this project", which
+        # inverted the failure mode. See PROPOSALS.md B17 for the full reasoning.
+        if ceiling is not None:
+            oversized = {f: v for f, v in features.items() if v is not None and v > ceiling}
+            if oversized:
+                log.error(
+                    "meter.yaml: project %r caps itself at $%.2f/day but gives %s a higher "
+                    "ceiling. A feature can never outspend its project, so this cannot mean "
+                    "what it says. REJECTING this project's budgets — nothing is enforced "
+                    "for it until the file is fixed.",
+                    project_id, ceiling,
+                    ", ".join(f"{f} (${v:.2f})" for f, v in sorted(oversized.items())),
+                )
+                continue
+
+            allocated = sum(v for v in features.values() if v is not None)
+            if allocated > ceiling:
+                log.warning(
+                    "meter.yaml: project %r allocates $%.2f across its features, more than "
+                    "its own $%.2f ceiling. Enforcing both anyway — the project ceiling "
+                    "still binds, so the features cannot all run to their limits at once. "
+                    "Intentional if the per-feature numbers are independent caps.",
+                    project_id, allocated, ceiling,
+                )
 
         budgets[str(project_id)] = (ceiling, features)
 
