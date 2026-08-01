@@ -99,7 +99,25 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-01 — **`shubh/phase2` merged into main.** The merge reconciled two
+*   **Last updated:** 2026-08-01 — **`shubh/phase2` merged into main** (prior entry below), then
+    **`shubh/phase3` + full-codebase audit (Shubh, same day).** Phase 3: the **Treasurer agent
+    loop** (`treasury/loop.py`, registered in `proxy/app.py` lifespan) watches burn rate every
+    `TREASURER_INTERVAL_S` and autonomously tops up when projected runway drops under
+    `TOPUP_WHEN_HOURS_REMAINING = 0.75h`; the full decision path was runtime-verified end to
+    end (runway 0.56h → top-up $0.79 computed → dry-run refusal → loop continues). Top-up
+    iMessages wired (`send_topup_alert`, cooldown-scoped like the breaker alerts).
+    **Overhead benchmark committed** (`tests/bench_overhead.py`): p50 **+0.26ms** (minimal)
+    / **+0.35ms** (enforced path) self-reported, consistent with the documented 0.29ms.
+    **Audit fixes (all verified):** treasury money routes now require a Meter key (B18,
+    recommendation 1 — 401 verified live in the container); `/mandates` + `/mandates/sync`
+    return a 503 envelope instead of a bare 500 when Prava is down (M3); `/report` validates
+    `transaction_id` shape (M4); every `execute_topup` refusal now leaves a
+    `treasury_events` row (was documented, wasn't true); `tests/test_treasury.py` added
+    (**18 checks** — suites now total **379**); `Dockerfile` + `compose.yaml` built and the
+    container smoke-tested (B10 closed); GitHub Actions CI (ruff + all four suites + dashboard
+    build/lint); ruff debt fixed and `ruff.toml` added; `.editorconfig` added. Remaining,
+    Shubh: `features.<name>.models` allowlist, Redis at replica #2 (never in the 48h build).
+    Prior entry — **`shubh/phase2` merged into main:** the merge reconciled two
     independent predictor integrations: Ammar's estimator v2 (scope stacking, history correction —
     `predictor/DESIGN.md`) wired ESTIMATE/CAPTURE on main while Shubh's branch wired
     ESTIMATE/RESERVE/CAPTURE. **Ammar's `_predict` + estimator v2 won the ESTIMATE step; Shubh's
@@ -134,7 +152,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Reservations are real** (`proxy/budget.py`), in-process per the A5 decision. Holds are counted alongside settled spend inside one `asyncio.Lock`, so concurrent requests cannot all pass the same ceiling — the self-check fires 40 at a ceiling admitting 4. Released *inside* the capture task so the hold never disappears before the row lands, and **heartbeat-extended during streams**, which ARCHITECTURE.md §2 flags as a silent failure if skipped. `reservation_id` is no longer written NULL.
     *   **`POST /v1/annotate`** (attribution rung 3, was PROPOSALS.md B9 and owned by nobody; ratified 2026-08-01). Returns the trace's total cost, request count and margin, scoped to the calling key's project — a `trace_id` is caller-supplied, so without that scope any key could read another project's spend.
     *   **Ledger migration:** `proxy/db.py` now ALTERs the four prediction columns onto an existing `requests` table at boot. A teammate with a Phase 1 `meter.db` just needs to pull and restart — no manual step, no dropped database.
-    *   Not yet done, Shubh: Redis-backed reservations (only needed at proxy replica #2), the `features.<name>.models` allowlist README.md shows in `meter.yaml`, and re-measuring overhead.
+    *   **`features.<name>.models` allowlist built 2026-08-01** (was listed as "not yet done"). A request whose model is not on its feature's list is refused with **403 `model_not_allowed`** and an `X-Meter-Allowed-Models` header between ATTRIBUTE and ESTIMATE — before any prediction or reservation — and the rejection is ledgered like the breaker's. Malformed lists are ignored with a warning, same posture as a bad ceiling. Verified in the self-check.
+    *   Not yet done, Shubh: Redis-backed reservations (only needed at proxy replica #2). **Overhead re-measured 2026-08-01 and the harness committed** (`tests/bench_overhead.py`) — p50 **+0.26ms** minimal, **+0.35ms** enforced path, replacing the Phase 1 number that "predates ESTIMATE and RESERVE".
 
 *   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
     *   **Phase 2 additions to carry into the port:** four prediction columns on `requests` (`predicted_output_tokens`, `predicted_cost_usd`, `bucket`, `prediction_method`), plus two new tables — `annotations` (§4's, with a `project_id` added so one project cannot annotate another's traces) and `feature_budgets` (not in §4; §4 has ceilings only at project level, but README.md's own `meter.yaml` example sets them per feature).
@@ -157,8 +176,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 
 *   **Treasurer Agent / Prava: PAYMENT RAIL VERIFIED + TREASURY SCHEMA WORKING; AGENT LOOP NOT STARTED.**
     `treasury/` — **mounted on Shubh's proxy app**, so there is one backend process on one port:
-    `uvicorn proxy.app:app --port 8080`. The old root-level `main.py` is now a deprecation shim
-    that re-exports the same app, so `uvicorn main:app` still works. Treasury routes are kept off
+    `uvicorn proxy.app:app --port 8080`. Treasury routes are kept off
     the `/v1` prefix, which stays the surface a caller's provider SDK targets.
     *   **We use a standing mandate, not a one-time virtual card.** §4/§5B and the pitch script still
         say "one-time scoped card"; the mandate is strictly better for the Treasurer — the human

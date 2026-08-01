@@ -124,6 +124,15 @@ second server nobody remembers to start. They are deliberately **off** the `/v1`
 `/v1` is the surface a caller's provider SDK targets, and control-plane routes do not
 belong in it.
 
+**Auth (B18, applied 2026-08-01):** the routes that move or mutate money —
+`POST /wallets/seed`, `POST /topup`, `POST /charge`, `POST /report`,
+`POST /charge-refusal` — require the same Meter key the proxy accepts, so the demo
+curls below all carry `-H 'Authorization: Bearer $METER_KEY'`. The read-only and
+demo surface (`GET /wallets`, `GET /treasury/events`, `GET /mandates*`,
+`POST /mock-openai/billing`) stays open; the mock billing endpoint cannot move real
+money, it only credits a local balance from a card token only a real Prava charge
+mints.
+
 | Route | Purpose |
 | --- | --- |
 | `GET /wallets` · `POST /wallets/seed` | Provider credit balances. The dashboard's Provider Balances card reads the table directly |
@@ -152,6 +161,10 @@ ARCHITECTURE.md §2, with reservations held in-process rather than in Redis.
                   already has its bytes
 ```
 
+Two additions interleave with those steps. The `features.<name>.models` allowlist
+refuses (403 `model_not_allowed`, with `X-Meter-Allowed-Models` naming the fix) between
+ATTRIBUTE and ESTIMATE. And the breaker runs before RESERVE:
+
 Steps 4 and 5 are swapped relative to ARCHITECTURE.md's numbering, which puts RESERVE
 first. The breaker is the cheaper check and is a pure rejection, so running it first
 keeps a revoked key or a throttled tag from taking and immediately releasing a hold on
@@ -159,11 +172,12 @@ every attempt. Nothing outside `_proxy` can observe the difference.
 
 Steps 1–7 are what `X-Meter-Overhead-Ms` measures.
 
-**Quote it as: "p50 +1.49 ms, measured Phase 1 on loopback."** Never without the
-qualifier. The full figure was p50 +1.49 ms wall-clock, 0.29 ms self-reported in-process,
-over 300 requests against a local fake upstream — loopback, no TLS, single client, so it is
-a floor rather than a production number, though comfortably inside the 5 ms budget
-ARCHITECTURE.md §8 sets.
+**Quote it as: "p50 +0.26 ms, measured 2026-08-01 on loopback."** Never without the
+qualifier. The full figure: p50 +0.26 ms wall-clock (minimal path) / +0.35 ms (enforced
+path), self-reported in-process, measured with the committed harness
+(`tests/bench_overhead.py`) against a local fake upstream — loopback, no TLS, single
+client, so it is a floor rather than a production number, though comfortably inside the
+5 ms budget ARCHITECTURE.md §8 sets.
 
 Two caveats, both load-bearing if this goes in front of judges:
 
@@ -302,7 +316,6 @@ Each of these is a deliberate omission with a reason, not an oversight.
 | Missing | Why | Who / when |
 | --- | --- | --- |
 | **Redis-backed reservations** | Reservations now exist, held in-process (`budget.py`). Redis is not what makes authorize/capture correct — serialisation is, and one proxy process plus an `asyncio.Lock` is an identical guarantee. Redis becomes load-bearing at replica #2; the upgrade is `_holds` → a Redis hash and `authorize` → the Lua script | Shubh, at replica #2 (PROPOSALS.md A5) |
-| **`features.<name>.models` allowlist** | README.md's `meter.yaml` example shows a per-feature model allowlist. The loader ignores the key rather than half-enforcing it; ceilings were the assigned scope | Unassigned |
 | **Postgres** | Still SQLite. Shivam's treasury tables (`wallets`, `mandates`, `treasury_events`) landed in this same file, also with ARCHITECTURE.md §4 column names verbatim, so the port stays one swap for both halves | Shivam, Phase 2 |
 | **Prediction for Claude models** | `tiktoken` has no Anthropic vocabulary, and the predictor raises rather than returning a number ~10-20% wrong. Those requests reserve `$0`, so a ceiling still stops them — one request later than it stops an OpenAI one | Needs Anthropic's `count_tokens` endpoint (a network call in the request path — not free) |
 | **The predictor's learning tier** | `learner.py` stays on priors until ~30 rows per bucket exist. The ledger now records `predicted_output_tokens` and `bucket`, so the feedback loop is *closed* — but nobody calls `load_fits()` on a schedule yet | Ammar |

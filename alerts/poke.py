@@ -76,7 +76,11 @@ def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:
     lines = [f"\U0001f6a8 Meter: circuit breaker tripped on {scope}"]
 
     if isinstance(spend, (int, float)) and isinstance(floor, (int, float)):
-        window = f"{int(window_s) // 60} min" if isinstance(window_s, (int, float)) else "the window"
+        window = (
+            f"{int(window_s) // 60} min"
+            if isinstance(window_s, (int, float))
+            else "the window"
+        )
         lines.append(f"${spend:,.2f} in {window} against a ${floor:,.2f} floor")
 
     ratio = metric.get("burst_ratio")
@@ -150,5 +154,48 @@ def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any]) -> bool:
     # — so a thread is the right primitive rather than a task.
     threading.Thread(
         target=_post, args=(body,), name=f"poke-alert-{scope}", daemon=True
+    ).start()
+    return True
+
+
+def compose_topup(
+    wallet_id: str, amount_usd: float, balance_after: float | None
+) -> str:
+    """The top-up notification body — the "morning after" message from README.md.
+
+    "Balance hit $12. Topped up $200 under mandate." The Treasurer agent spent
+    money autonomously, so the message leads with what it spent and what the
+    balance is now.
+    """
+    lines = [f"💰 Meter: topped up {wallet_id} by ${amount_usd:,.2f} under mandate"]
+    if balance_after is not None:
+        lines.append(f"New provider balance: ${balance_after:,.2f}")
+    return "\n".join(lines)
+
+
+def send_topup_alert(
+    wallet_id: str, amount_usd: float, balance_after: float | None
+) -> bool:
+    """Fire-and-forget an iMessage that the Treasurer topped up a wallet.
+
+    Same contract as :func:`send_breaker_alert`: never blocks, never raises,
+    per-scope cooldown so a burst of top-ups texts once, not ten times.
+    """
+    configured, reason = config.is_configured()
+    if not configured:
+        log.info("top-up alert skipped: %s", reason)
+        return False
+
+    if _within_cooldown(f"topup:{wallet_id}"):
+        log.info(
+            "top-up alert suppressed for %s (within %.0fs cooldown)",
+            wallet_id,
+            config.POKE_COOLDOWN_S,
+        )
+        return False
+
+    body = compose_topup(wallet_id, amount_usd, balance_after)
+    threading.Thread(
+        target=_post, args=(body,), name=f"poke-topup-{wallet_id}", daemon=True
     ).start()
     return True

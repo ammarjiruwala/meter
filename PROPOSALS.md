@@ -8,13 +8,13 @@ Each item states what is wrong or missing, why it matters, and a recommendation.
 applied to `README.md` / `CONTEXT.md` / `ARCHITECTURE.md` **only after a human approves
 them** — this file is the staging area, not the record.
 
-**Applied so far:** A1–A6, B1–B7, B15, B16, C1, C2, C4. Everything else is still a proposal; if you find a
+**Applied so far:** A1–A6, B1–B7, B15–B18, C1, C2, C4. Everything else is still a proposal; if you find a
 new contradiction, add it here and raise it rather than editing one source doc to match
 another (the one you "fixed" may have been the correct one).
 
 Status key: **OPEN** — needs a decision · **RESOLVED / DONE / SHIPPED** — closed, kept for the record.
 
-25 items: A1–A6 (contradictions), B1–B16 (gaps), C1–C4 (verification).
+26 items: A1–A6 (contradictions), B1–B18 (gaps), C1–C4 (verification).
 
 ---
 
@@ -461,14 +461,18 @@ Two deliberate deviations from `ARCHITECTURE.md` §4's `annotations
 `value_usd` is optional; when it is absent `margin_usd` comes back `null` rather than `0`,
 because "broke even" and "we don't know the value" are different facts.
 
-### B10 — `docker compose up` does not exist · OPEN
+### B10 — `docker compose up` does not exist · **DONE — shipped 2026-08-01 (Shubh)**
 
 It is the first command in the `README.md` quickstart and the whole of
 `ARCHITECTURE.md` §8. No phase assigns a `Dockerfile` or a `compose.yaml`.
 
-**Recommendation:** if self-hosting is the product, the quickstart has to run. A
-proxy-only compose file is ~30 lines; the full five-service one needs the other components
-to exist first. Suggested owner: Shubh, once Shivam's Postgres schema lands.
+**Shipped:** single-service `Dockerfile` (python:3.12-slim, `uvicorn proxy.app:app`,
+`METER_DB_PATH=/data/meter.db` on a named volume) + `compose.yaml` (port 8080,
+`env_file: .env`, read-only mounts for `meter.yaml` and `pricing/` so budget-as-code
+and pricing change by PR, not by exec). Verified: `docker compose config` valid, image
+builds, container boots, healthz 200, treasurer loop starts. The full five-service
+version is still future work once the other components exist; the dashboard remains a
+host-side dev process reading `meter.db` read-only.
 
 ### B11 — Cross-model routing doubles spend if it sits in the request path · OPEN
 
@@ -613,10 +617,44 @@ came out of a failing assertion — the first version of the test assumed the pr
 wins, which is wrong, and the 429 would have sent an operator to the wrong line of
 `meter.yaml`.
 
+### B18 — The treasury control plane is unauthenticated · **RESOLVED & SHIPPED — applied 2026-08-01, recommendation 1**
+
+Found during the full-codebase audit (2026-08-01, runtime-verified). Every `/v1` route
+authenticates the Meter key and scopes to its project (`_proxy`, `/v1/annotate`,
+`/v1/breaker/reset` — the annotate scoping was explicitly approved on security grounds in
+B9), but **none of the treasury surface does**: `/wallets`, `/wallets/seed`, `/topup`,
+`/charge`, `/report`, `/charge-refusal`, `/mock-openai/billing`, `/mandates*`,
+`/treasury/events`.
+
+What that means in practice, verified live against a running proxy: an unauthenticated
+`POST /charge` reached the Prava sandbox (the `AUTH_1001` returned was **Prava's** rejection,
+not Meter's — the local `.env` keys are placeholders, so no money moved). With real
+credentials, any process that can reach the port can top up, drain, or settle — the
+money-moving half of the whole product, with no key and no project scoping.
+
+No source-of-truth document says the treasury routes are public. `CONTEXT.md` §4 and
+`proxy/README.md` describe them as demo surface, but demo does not have to mean
+unauthenticated — the B9 decision shows the team already cares about this class of hole.
+
+**Shipped (Shubh, 2026-08-01): recommendation 1 — auth on the money moves only.**
+`treasury/routes.py` gains a `_authed_key` FastAPI dependency (same header handling and
+fail-closed behavior as `proxy/app.py`, which cannot be imported there without a cycle)
+applied to `/wallets/seed`, `/topup`, `/charge`, `/report`, `/charge-refusal`.
+Read-only and demo routes stay open. Verified live inside the built container: all five
+return 401 without a key, all five pass with one, reads still open.
+
+Two extras landed in the same pass, both audit findings:
+
+* **M3 — `/mandates` and `/mandates/sync` return a 503 envelope instead of a bare 500**
+  when Prava is unreachable.
+* **M4 — `/report` validates `transaction_id`** (`^[A-Za-z0-9_\-]{8,64}$`, matching both
+  Prava's `txn_…` and simulated `sim_…` shapes) and returns 400 otherwise.
+
+**Applied to:** `proxy/README.md` (auth note + the demo curls' header), `CONTEXT.md` §6a.
+
 ---
 
 ## C. Verification tasks
-
 Not design questions — things that are written down and might simply be wrong.
 
 ### C1 — Pricing rates · **DONE — verified 2026-08-01**

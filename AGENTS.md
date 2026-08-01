@@ -52,6 +52,9 @@ describe current reality, not a changelog. If you want a changelog, that's what 
 
 ## Running what exists
 
+**Requires Python 3.10+** (`proxy/breaker.py` uses `dataclass(slots=True)`; macOS system
+Python 3.9 will fail on import, not on logic).
+
 One command starts the whole backend — the proxy (Shubh) with Shivam's treasury routes
 mounted onto it, one process on one port. The dashboard (Tanay) runs separately.
 
@@ -60,24 +63,80 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                              # add provider keys
 uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
-python tests/test_proxy.py                        # 207 assertions, no framework, ~3s
-python tests/test_predictor.py                    # 64 assertions, same convention
+python tests/test_proxy.py                        # ~207 checks, no framework, ~3s
+python tests/test_predictor.py                    # ~108 checks, same convention
+python tests/test_alerts.py                       # 46 checks (alerts/)
 
 cd dashboard && npm install && npm run dev        # reads ../meter.db, read-only
+npm run build && npm run lint                     # dashboard type/lint check
 ```
 
 Run the matching self-check before you commit: `test_proxy.py` for anything under
-`proxy/` or `treasury/`, `test_predictor.py` for anything under `predictor/`. They are
-plain asserts, so they need no pytest and no fixtures — if you add non-trivial logic, add
-an assertion rather than starting a second test system.
+`proxy/` or `treasury/`, `test_predictor.py` for anything under `predictor/`,
+`test_alerts.py` for anything under `alerts/`. They are plain asserts, so they need no
+pytest and no fixtures — if you add non-trivial logic, add an assertion rather than
+starting a second test system.
 
 Daily spend ceilings are declared in `meter.yaml` at the repo root (see
 `meter.yaml.example`), deliberately in the repo so a limit changes by pull request. No
-file means no ceilings.
+file means no ceilings. Restart the proxy after editing; verify with
+`curl localhost:8080/healthz | jq .budget`.
 
 `proxy/README.md` documents the module map, the request lifecycle, and — importantly — the
 list of things deliberately *not* implemented in Phase 1 and why. Read that before
 concluding something is missing by accident.
+
+## How the pieces fit
+
+Four components, one process, one SQLite file (`meter.db`, gitignored):
+
+| Component | What it is | Owner |
+| --- | --- | --- |
+| `proxy/` | FastAPI hot path. Auth → attribute → estimate → breaker → reserve → forward → capture | Shubh |
+| `treasury/` | Wallets, Prava mandates/charges, mock provider billing. **Routers mounted onto the proxy app** | Shivam |
+| `predictor/` | Pre-flight `tiktoken` cost estimate. Called by proxy at ESTIMATE | Ammar |
+| `alerts/` | Poke/Linq iMessage dispatch. Called from `proxy/breaker.py` on trip | Tanay |
+| `dashboard/` | Next.js 16 App Router + Tailwind. Reads `meter.db` **read-only** | Tanay |
+
+Things an agent will get wrong without knowing:
+
+- **`uvicorn proxy.app:app --port 8080` starts everything.** There is no second server.
+- **Dependencies run one way:** `treasury.db` reads `proxy.config` for `DB_PATH`;
+  `predictor` reads `proxy.pricing` for rates. Nothing in `proxy/` imports `predictor/`
+  or `treasury/` at module scope beyond the router mount in `app.py`.
+- **`meter.db` has two writers.** Proxy writes `requests`; `treasury/db.py` writes
+  `wallets`, `mandates`, `treasury_events`. WAL + `busy_timeout` covers it *because*
+  every treasury write is a single statement with no transaction held open across a
+  network call. **Add a long-running transaction and that assumption breaks.**
+- **Treasury tables are created in `app.py`'s `lifespan`, not on first use.** Without
+  this, `wallets` wouldn't exist until a treasury route is hit, and the dashboard reads
+  that table directly.
+- **New `requests` columns need an entry in `_ADDED_REQUEST_COLUMNS`** (`proxy/db.py`).
+  `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without the ALTER,
+  teammates with an older `meter.db` get failing INSERTs.
+- **Dashboard is Next.js 16** — breaking changes from training data. Read
+  `dashboard/node_modules/next/dist/docs/` before writing dashboard code.
+- **Every dashboard query guards on the table existing** (checks `sqlite_master`), so a
+  half-built database shows what it has instead of 500ing. Keep both guards when adding
+  a card.
+
+## Gotchas that bite
+
+- **Pricing is versioned by file.** Rates live in `pricing/{version}.yaml`; each row
+  records its version. **Never edit an existing pricing file** — add a new dated one, or
+  every historical row silently reprices. Sonnet 5's introductory rate expires
+  2026-08-31; create `pricing/2026-09-01.yaml` then.
+- **The predictor raises `UnsupportedModelError` on Claude models** rather than returning
+  a `tiktoken` number ~10-20% off. Guard with `supports(model)` before calling
+  `predict()`. Claude requests reserve `$0` against ceilings.
+- **`.env` `PRAVA_MANDATE_ID`** — must point at the **monthly** mandate
+  (`mdt_01KYXWSK8YNAMTPHNY9VWM1DAE`), not the `one_time` one. Reporting a one-time
+  charge as APPROVED moves it to `consumed` and every later charge 409s.
+- **`PRAVA_LIVE_MODE` parsing changed** — `true`/`1`/`yes` now all mean ON (previously
+  only exact `"True"` worked and everything else silently simulated).
+- Two one-off Prava scripts at repo root (`create_mandate.py`, `check_mandates.py`) hit
+  the live sandbox directly. Don't add a `test_*` at root — a future pytest run would
+  spend real sandbox money.
 
 ## Proposals go in PROPOSALS.md, not into the source-of-truth docs
 

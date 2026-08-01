@@ -50,9 +50,9 @@ class Decision:
 
     blocked: bool
     reservation_id: str | None = None
-    scope: str = ""          # "project:api-prod" or "feature:api-prod/summarize"
+    scope: str = ""  # "project:api-prod" or "feature:api-prod/summarize"
     ceiling_usd: float = 0.0
-    spend_usd: float = 0.0   # settled + held, at the moment of the decision
+    spend_usd: float = 0.0  # settled + held, at the moment of the decision
 
     @property
     def detail(self) -> str:
@@ -81,6 +81,10 @@ _lock = asyncio.Lock()
 # put a query in front of every call and buy nothing.
 _ceilings: dict[tuple[str, str | None], float] = {}
 
+# (project_id, feature) -> model allowlist. Empty set (or an absent key) means the
+# feature may call any model. Same boot-time-read rationale as `_ceilings`.
+_models: dict[tuple[str, str], frozenset[str]] = {}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # meter.yaml
@@ -100,6 +104,7 @@ def load_meter_yaml(path: Path | None = None) -> int:
     """
     path = path or config.METER_YAML_PATH
     _ceilings.clear()
+    _models.clear()
 
     if not path.exists():
         log.info("no meter.yaml at %s — no daily ceilings configured", path)
@@ -136,6 +141,21 @@ def load_meter_yaml(path: Path | None = None) -> int:
                 fspec.get("ceiling_usd_per_day"),
                 f"{project_id}.features.{feature}.ceiling_usd_per_day",
             )
+            models = fspec.get("models")
+            if models is not None:
+                if not isinstance(models, list) or not all(
+                    isinstance(m, str) and m for m in models
+                ):
+                    # Same posture as a bad ceiling: warn and ignore the key rather than
+                    # refusing to boot over a typo in an allowlist.
+                    log.warning(
+                        "meter.yaml: %s.features.%s.models must be a list of model "
+                        "names — ignoring this allowlist",
+                        project_id,
+                        feature,
+                    )
+                else:
+                    _models[(str(project_id), str(feature))] = frozenset(models)
 
         # A child budget may not exceed its parent's (ARCHITECTURE.md §4, PROPOSALS.md
         # B17). Checked per feature, not against the sum of the siblings:
@@ -160,7 +180,8 @@ def load_meter_yaml(path: Path | None = None) -> int:
                     "ceiling. A feature can never outspend its project, so this cannot mean "
                     "what it says. REJECTING this project's budgets — nothing is enforced "
                     "for it until the file is fixed.",
-                    project_id, ceiling,
+                    project_id,
+                    ceiling,
                     ", ".join(f"{f} (${v:.2f})" for f, v in sorted(oversized.items())),
                 )
                 continue
@@ -172,7 +193,9 @@ def load_meter_yaml(path: Path | None = None) -> int:
                     "its own $%.2f ceiling. Enforcing both anyway — the project ceiling "
                     "still binds, so the features cannot all run to their limits at once. "
                     "Intentional if the per-feature numbers are independent caps.",
-                    project_id, allocated, ceiling,
+                    project_id,
+                    allocated,
+                    ceiling,
                 )
 
         budgets[str(project_id)] = (ceiling, features)
@@ -181,7 +204,8 @@ def load_meter_yaml(path: Path | None = None) -> int:
     _ceilings.update(db.load_ceilings())
     log.info(
         "meter.yaml loaded: %d project(s), %d ceiling(s) active",
-        len(budgets), len(_ceilings),
+        len(budgets),
+        len(_ceilings),
     )
     return len(budgets)
 
@@ -212,14 +236,36 @@ def _scope(project_id: str, feature: str | None) -> str:
     return f"project:{project_id}" if feature is None else f"feature:{project_id}/{feature}"
 
 
+def feature_models(project_id: str, feature: str | None) -> frozenset[str]:
+    """The models a feature may call. Empty means unrestricted — the Phase 1 default."""
+    if feature is None:
+        return frozenset()
+    return _models.get((project_id, feature), frozenset())
+
+
+def models_allowed(project_id: str, feature: str | None, model: str | None) -> bool:
+    """True unless the feature has an allowlist and ``model`` is not on it.
+
+    A request with no model has nothing to check against — the allowlist constrains
+    calls, and there is no call to constrain.
+    """
+    if model is None:
+        return True
+    allowed = feature_models(project_id, feature)
+    return not allowed or model in allowed
+
+
+def active_allowlists() -> dict[str, list[str]]:
+    """Configured model allowlists, for /healthz. Same scope strings ceilings report."""
+    return {f"feature:{p}/{f}": sorted(allowed) for (p, f), allowed in sorted(_models.items())}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Authorize / capture
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def authorize(
-    project_id: str, feature: str | None, estimate_usd: float
-) -> Decision:
+async def authorize(project_id: str, feature: str | None, estimate_usd: float) -> Decision:
     """Check every ceiling that applies, and hold ``estimate_usd`` against them if clear.
 
     Returns a Decision whose ``reservation_id`` must be passed to :func:`release` on
@@ -250,8 +296,10 @@ async def authorize(
             held = _held(project_id, feature)
             if settled + held + estimate_usd > feature_ceiling:
                 return Decision(
-                    blocked=True, scope=_scope(project_id, feature),
-                    ceiling_usd=feature_ceiling, spend_usd=settled + held,
+                    blocked=True,
+                    scope=_scope(project_id, feature),
+                    ceiling_usd=feature_ceiling,
+                    spend_usd=settled + held,
                 )
 
         if project_ceiling is not None:
@@ -259,8 +307,10 @@ async def authorize(
             held = _held(project_id, None)
             if settled + held + estimate_usd > project_ceiling:
                 return Decision(
-                    blocked=True, scope=_scope(project_id, None),
-                    ceiling_usd=project_ceiling, spend_usd=settled + held,
+                    blocked=True,
+                    scope=_scope(project_id, None),
+                    ceiling_usd=project_ceiling,
+                    spend_usd=settled + held,
                 )
 
         reservation_id = f"rsv_{uuid.uuid4().hex}"
