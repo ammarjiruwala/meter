@@ -1,0 +1,4 @@
+# Ruff configuration. Deliberately minimal: default rule set (E, F) only.
+# Lint debt that accumulated before this file existed was fixed in place;
+# `ruff check .` is expected to pass clean.
+line-length = 100

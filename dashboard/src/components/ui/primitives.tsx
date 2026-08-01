@@ -31,8 +31,11 @@ export function SectionLabel({
   trailing?: ReactNode;
 }) {
   return (
-    <div className="mb-[20px] flex items-baseline justify-between gap-[16px]">
-      <h2 className="t-readout uppercase text-ash">{children}</h2>
+    // Sentence case, sans, in paper — following the reference's table headers away
+    // from the uppercase mono label the old system used. Uppercase micro-labels read
+    // as instrument chrome; this reads as a product.
+    <div className="mb-[18px] flex items-baseline justify-between gap-[16px]">
+      <h2 className="t-subheading font-medium text-paper">{children}</h2>
       {trailing}
     </div>
   );
@@ -41,23 +44,35 @@ export function SectionLabel({
 /** Pill — the brief's floating stat badge. */
 export function Pill({ children }: { children: ReactNode }) {
   return (
-    <span className="t-readout-sm inline-flex items-center gap-[8px] rounded-[59px] bg-graphite px-[16px] py-[8px] text-ash shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset]">
+    <span className="t-cell inline-flex items-center gap-[8px] rounded-[59px] bg-graphite px-[16px] py-[8px] text-ash shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset]">
       {children}
     </span>
   );
 }
 
-type BadgeTone = "neutral" | "good" | "throttled" | "critical";
+export type BadgeTone =
+  | "neutral"
+  | "good"
+  | "throttled"
+  | "critical"
+  | "info"
+  | "emphasis";
 
-// Status keeps its own ramp, against the brief's monochrome rule — see the note
-// in globals.css. Surfaces stay in the black-to-charcoal range as the system
-// demands; only the text carries hue, so nothing light ever lands on the canvas.
-// The HTTP code is in the badge regardless, so state never rests on color alone.
+// Filled tints rather than the old text-on-flat treatment. Each fill/text pair is
+// measured against the 4.5:1 floor for small text — see the note beside the classes
+// in globals.css, and note that the previous tinted attempt failed at 3.49:1, which
+// is why these are computed rather than picked.
+//
+// The badge always contains its own label (an HTTP code, a state word), so meaning
+// never rests on the hue. That matters more here than usual: green and amber are the
+// pair that collapses under protanopia, and the ramp is chosen to survive it.
 const TONES: Record<BadgeTone, string> = {
-  neutral: "bg-graphite text-ash",
-  good: "bg-graphite text-status-good",
-  throttled: "bg-graphite text-status-warn",
-  critical: "bg-graphite text-status-bad",
+  neutral: "badge-outline",
+  good: "badge-good",
+  throttled: "badge-warn",
+  critical: "badge-bad",
+  info: "badge-info",
+  emphasis: "badge-invert",
 };
 
 export function StatusBadge({
@@ -67,13 +82,7 @@ export function StatusBadge({
   children: ReactNode;
   tone?: BadgeTone;
 }) {
-  return (
-    <span
-      className={`t-readout-sm inline-flex items-center rounded-[59px] px-[10px] py-[3px] shadow-[rgba(255,255,255,0.12)_0px_0px_0px_1px_inset] ${TONES[tone]}`}
-    >
-      {children}
-    </span>
-  );
+  return <span className={`badge ${TONES[tone]}`}>{children}</span>;
 }
 
 export function toneForStatus(status: number | null): BadgeTone {

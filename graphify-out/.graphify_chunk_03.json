@@ -1,0 +1,1796 @@
+{
+  "nodes": [
+    {
+      "id": "predictor_design_doc",
+      "label": "Predictor Design Spec",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_scope_insight",
+      "label": "Output Scope Determines Length",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_two_outputs",
+      "label": "Two Outputs: Forecast vs Bound",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_pipeline",
+      "label": "Six-Step Prediction Pipeline",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_cache",
+      "label": "Step 0: Prediction Cache",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_structural_override",
+      "label": "Step 1: Structural Override",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_length_instruction",
+      "label": "Step 2: Length Instruction",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_task_stacking",
+      "label": "Step 3: Task Stacking",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_safety_buffer",
+      "label": "Step 4: Asymmetric Safety Buffer",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_history",
+      "label": "Step 5: Historical Correction",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_clamp",
+      "label": "Step 6: Clamp and Bound",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_constant_provenance",
+      "label": "Constant Provenance",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_targets",
+      "label": "Accuracy Targets",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_design_known_limits",
+      "label": "Known Limits",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "predictor_readme_doc",
+      "label": "Predictive Engine README",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_predict",
+      "label": "predict() Entry Point",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_integration_contract",
+      "label": "Integration Contract",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_biased_high",
+      "label": "Biased High Rationale",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_feedback_loop",
+      "label": "CAPTURE Feedback Loop",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_unsupported_model_error",
+      "label": "UnsupportedModelError",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_buckets_priors",
+      "label": "Buckets.PRIORS",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_calibrate",
+      "label": "calibrate.py",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_learner",
+      "label": "learner.py",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_module_map",
+      "label": "Predictor Module Map",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "predictor_readme_preflightllmcost",
+      "label": "PreflightLLMCost",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "id": "_github_workflows_ci_doc",
+      "label": "CI Workflow",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/.github/workflows/ci.yml"
+    },
+    {
+      "id": "_github_workflows_ci_backend_job",
+      "label": "Backend CI Job",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/.github/workflows/ci.yml"
+    },
+    {
+      "id": "_github_workflows_ci_dashboard_job",
+      "label": "Dashboard CI Job",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/.github/workflows/ci.yml"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_doc",
+      "label": "Linq Key Concepts",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_handle",
+      "label": "Handles",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_chat",
+      "label": "Chats",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_message_parts",
+      "label": "Messages and Parts",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_attachment",
+      "label": "Attachments",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_service_protocol",
+      "label": "Services and Protocols",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_webhook",
+      "label": "Webhooks",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_trace_id",
+      "label": "Trace IDs",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_idempotency",
+      "label": "Idempotency",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_rate_limit",
+      "label": "Rate Limits",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_key_concepts_index_error",
+      "label": "Errors",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "id": "docs_linq_api_index_doc",
+      "label": "Linq API Reference",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/index.md"
+    },
+    {
+      "id": "docs_linq_api_index_chats_resource",
+      "label": "Chats Resource",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/index.md"
+    },
+    {
+      "id": "docs_linq_api_index_messages_resource",
+      "label": "Messages Resource",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/index.md"
+    },
+    {
+      "id": "docs_linq_api_index_capability_resource",
+      "label": "Capability Resource",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_capability_index_doc",
+      "label": "Capability Resource Docs",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_capability_index_check_imessage",
+      "label": "Check iMessage Capability",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_capability_index_check_rcs",
+      "label": "Check RCS Capability",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_capability_index_handlecheckresponse",
+      "label": "HandleCheckResponse",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_capability_methods_check_imessage_index_doc",
+      "label": "Check iMessage Endpoint",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/methods/check_imessage/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_chats_index_doc",
+      "label": "Chats Resource Docs",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_chats_index_message_effects",
+      "label": "Message Effects",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_chats_index_text_decorations",
+      "label": "Text Decorations",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_chats_index_health_status",
+      "label": "Chat Health Status",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_chats_index_first_message_restriction",
+      "label": "First-Message Link Restriction",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_chats_index_reuse_matching",
+      "label": "Chat Reuse Matching",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_chats_index_imessage_app",
+      "label": "iMessage App Cards",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_messages_index_doc",
+      "label": "Messages Resource Docs",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_messages_index_auto_from",
+      "label": "Auto From-Number Selection",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_messages_index_continuation",
+      "label": "Continuation Message",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/index.md"
+    },
+    {
+      "id": "docs_linq_api_resources_messages_methods_retrieve_index_doc",
+      "label": "Retrieve Message Endpoint",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/methods/retrieve/index.md"
+    },
+    {
+      "id": "docs_linq_error_index_doc",
+      "label": "Linq Error Codes",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/error/index.md"
+    },
+    {
+      "id": "docs_linq_error_index_envelope",
+      "label": "Error Envelope",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/error/index.md"
+    },
+    {
+      "id": "docs_linq_error_index_ranges",
+      "label": "Error Code Ranges",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/error/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_authentication_index_doc",
+      "label": "Linq Authentication",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/authentication/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_authentication_index_bearer_token",
+      "label": "Bearer Token Auth",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/authentication/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_best_practices_index_doc",
+      "label": "Linq Best Practices",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/best-practices/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_best_practices_index_messaging_flow",
+      "label": "Healthy Messaging Flow",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/best-practices/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_best_practices_index_optout",
+      "label": "Opt-Out Compliance",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/best-practices/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_quickstart_index_doc",
+      "label": "Linq Quickstart",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/quickstart/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_sdks_index_doc",
+      "label": "Client SDKs",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_sdks_index_typescript",
+      "label": "@linqapp/sdk (TypeScript)",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_sdks_index_python",
+      "label": "linq-python SDK",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "id": "docs_linq_getting_started_sdks_index_go",
+      "label": "linq-go SDK",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_index_doc",
+      "label": "Messaging Guide",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_index_ephemeral",
+      "label": "Ephemeral Messages",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_message_details_index_doc",
+      "label": "Message Details Guide",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/message-details/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "label": "Protocol Selection",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/protocol-selection/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_protocol_selection_index_fallback_chain",
+      "label": "Protocol Fallback Chain",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/protocol-selection/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_protocol_selection_index_capabilities",
+      "label": "Protocol Capability Matrix",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/protocol-selection/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "label": "Sending Messages Guide",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_sending_messages_index_parts",
+      "label": "Message Parts and Limits",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_sending_messages_index_reply",
+      "label": "Threading via reply_to",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_sending_messages_index_idempotency",
+      "label": "Send Idempotency",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "id": "docs_linq_guides_messaging_sending_messages_index_edit",
+      "label": "Message Editing",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "id": "docs_linq_guides_platform_debugging_index_doc",
+      "label": "Debugging Guide",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "id": "docs_linq_guides_platform_debugging_index_trace_correlation",
+      "label": "W3C Trace Context",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "id": "docs_linq_guides_platform_debugging_index_request_correlation",
+      "label": "Request Correlation Pattern",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "id": "docs_linq_guides_platform_rate_limits_index_doc",
+      "label": "Rate Limits Guide",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "id": "docs_linq_guides_platform_rate_limits_index_volume",
+      "label": "Daily Volume Guidelines",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "id": "docs_linq_guides_platform_rate_limits_index_per_pair",
+      "label": "Per-Pair Burst Limit",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "id": "docs_linq_guides_platform_rate_limits_index_capability",
+      "label": "Capability Check Limit",
+      "file_type": "concept",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_doc",
+      "label": "Collect Card Details",
+      "file_type": "document",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_collectpan",
+      "label": "collectPAN() Method",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_pci_vault",
+      "label": "PCI DSS Vault Tokenization",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_secure_iframe",
+      "label": "Secure Iframe",
+      "file_type": "rationale",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_result",
+      "label": "CollectPANResult",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_validation_state",
+      "label": "CardValidationState",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_errors",
+      "label": "Prava SDK Errors",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "id": "docs_prava_sdk_cards_collect_pan_prava_sdk",
+      "label": "PravaSDK",
+      "file_type": "code",
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    }
+  ],
+  "edges": [
+    {
+      "source": "predictor_design_doc",
+      "target": "predictor_design_scope_insight",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_doc",
+      "target": "predictor_design_pipeline",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_doc",
+      "target": "predictor_design_two_outputs",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_doc",
+      "target": "predictor_design_constant_provenance",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_doc",
+      "target": "predictor_design_targets",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_doc",
+      "target": "predictor_design_known_limits",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_pipeline",
+      "target": "predictor_design_cache",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_pipeline",
+      "target": "predictor_design_structural_override",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_pipeline",
+      "target": "predictor_design_length_instruction",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_pipeline",
+      "target": "predictor_design_task_stacking",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_pipeline",
+      "target": "predictor_design_safety_buffer",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_pipeline",
+      "target": "predictor_design_history",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_pipeline",
+      "target": "predictor_design_clamp",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_scope_insight",
+      "target": "predictor_design_task_stacking",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_two_outputs",
+      "target": "predictor_design_safety_buffer",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_two_outputs",
+      "target": "predictor_design_clamp",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_length_instruction",
+      "target": "predictor_design_constant_provenance",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_safety_buffer",
+      "target": "predictor_design_constant_provenance",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_history",
+      "target": "predictor_design_targets",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_design_known_limits",
+      "target": "predictor_design_targets",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_readme_predict",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_readme_integration_contract",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_readme_feedback_loop",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_readme_unsupported_model_error",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_readme_calibrate",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_readme_module_map",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_readme_preflightllmcost",
+      "relation": "cites",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_doc",
+      "target": "predictor_design_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_predict",
+      "target": "predictor_readme_integration_contract",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_biased_high",
+      "target": "predictor_readme_integration_contract",
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_integration_contract",
+      "target": "predictor_design_pipeline",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_integration_contract",
+      "target": "predictor_design_two_outputs",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_feedback_loop",
+      "target": "predictor_design_history",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_feedback_loop",
+      "target": "predictor_readme_learner",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_unsupported_model_error",
+      "target": "predictor_design_known_limits",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_buckets_priors",
+      "target": "predictor_design_constant_provenance",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "predictor_readme_calibrate",
+      "target": "predictor_readme_buckets_priors",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    },
+    {
+      "source": "_github_workflows_ci_doc",
+      "target": "_github_workflows_ci_backend_job",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/.github/workflows/ci.yml"
+    },
+    {
+      "source": "_github_workflows_ci_doc",
+      "target": "_github_workflows_ci_dashboard_job",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/.github/workflows/ci.yml"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_handle",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_chat",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_message_parts",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_attachment",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_service_protocol",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_webhook",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_trace_id",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_idempotency",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_rate_limit",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_key_concepts_index_error",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_api_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_getting_started_quickstart_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_doc",
+      "target": "docs_linq_error_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_trace_id",
+      "target": "docs_linq_guides_platform_debugging_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_idempotency",
+      "target": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_rate_limit",
+      "target": "docs_linq_guides_platform_rate_limits_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_service_protocol",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_message_parts",
+      "target": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    },
+    {
+      "source": "docs_linq_api_index_doc",
+      "target": "docs_linq_api_index_chats_resource",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/index.md"
+    },
+    {
+      "source": "docs_linq_api_index_doc",
+      "target": "docs_linq_api_index_messages_resource",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/index.md"
+    },
+    {
+      "source": "docs_linq_api_index_doc",
+      "target": "docs_linq_api_index_capability_resource",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_capability_index_doc",
+      "target": "docs_linq_api_resources_capability_index_check_imessage",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_capability_index_doc",
+      "target": "docs_linq_api_resources_capability_index_check_rcs",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_capability_index_doc",
+      "target": "docs_linq_api_resources_capability_index_handlecheckresponse",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_capability_methods_check_imessage_index_doc",
+      "target": "docs_linq_api_resources_capability_index_check_imessage",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/methods/check_imessage/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_capability_index_doc",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/capability/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_doc",
+      "target": "docs_linq_api_resources_chats_index_message_effects",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_doc",
+      "target": "docs_linq_api_resources_chats_index_text_decorations",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_doc",
+      "target": "docs_linq_api_resources_chats_index_health_status",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_doc",
+      "target": "docs_linq_api_resources_chats_index_first_message_restriction",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_doc",
+      "target": "docs_linq_api_resources_chats_index_reuse_matching",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_doc",
+      "target": "docs_linq_api_resources_chats_index_imessage_app",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_health_status",
+      "target": "docs_linq_getting_started_best_practices_index_optout",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_chats_index_first_message_restriction",
+      "target": "docs_linq_error_index_doc",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/chats/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_messages_index_doc",
+      "target": "docs_linq_api_resources_messages_index_auto_from",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_messages_index_doc",
+      "target": "docs_linq_api_resources_messages_index_continuation",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_messages_index_doc",
+      "target": "docs_linq_api_resources_chats_index_doc",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_messages_index_auto_from",
+      "target": "docs_linq_api_resources_chats_index_reuse_matching",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/index.md"
+    },
+    {
+      "source": "docs_linq_api_resources_messages_methods_retrieve_index_doc",
+      "target": "docs_linq_api_resources_messages_index_doc",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/api/resources/messages/methods/retrieve/index.md"
+    },
+    {
+      "source": "docs_linq_error_index_doc",
+      "target": "docs_linq_error_index_envelope",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/error/index.md"
+    },
+    {
+      "source": "docs_linq_error_index_doc",
+      "target": "docs_linq_error_index_ranges",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/error/index.md"
+    },
+    {
+      "source": "docs_linq_error_index_doc",
+      "target": "docs_linq_guides_platform_debugging_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/error/index.md"
+    },
+    {
+      "source": "docs_linq_error_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/error/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_authentication_index_doc",
+      "target": "docs_linq_getting_started_authentication_index_bearer_token",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/authentication/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_authentication_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/authentication/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_authentication_index_doc",
+      "target": "docs_linq_error_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/authentication/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_authentication_index_doc",
+      "target": "docs_linq_api_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/authentication/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_best_practices_index_doc",
+      "target": "docs_linq_getting_started_best_practices_index_messaging_flow",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/best-practices/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_best_practices_index_doc",
+      "target": "docs_linq_getting_started_best_practices_index_optout",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/best-practices/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_best_practices_index_doc",
+      "target": "docs_linq_api_resources_messages_index_auto_from",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/best-practices/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_best_practices_index_doc",
+      "target": "docs_linq_api_resources_chats_index_health_status",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/best-practices/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_quickstart_index_doc",
+      "target": "docs_linq_getting_started_best_practices_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/quickstart/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_quickstart_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/quickstart/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_quickstart_index_doc",
+      "target": "docs_linq_error_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/quickstart/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_quickstart_index_doc",
+      "target": "docs_linq_api_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/quickstart/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_quickstart_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/quickstart/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_sdks_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_typescript",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_sdks_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_python",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_sdks_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_go",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_sdks_index_doc",
+      "target": "docs_linq_getting_started_authentication_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_sdks_index_doc",
+      "target": "docs_linq_guides_platform_rate_limits_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "source": "docs_linq_getting_started_sdks_index_doc",
+      "target": "docs_linq_api_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/sdks/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_index_doc",
+      "target": "docs_linq_guides_messaging_index_ephemeral",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_index_doc",
+      "target": "docs_linq_guides_messaging_message_details_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_index_doc",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_message_details_index_doc",
+      "target": "docs_linq_api_resources_messages_methods_retrieve_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/message-details/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_message_details_index_doc",
+      "target": "docs_linq_api_resources_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/message-details/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_message_details_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/message-details/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_fallback_chain",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/protocol-selection/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_capabilities",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/protocol-selection/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_protocol_selection_index_fallback_chain",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_capabilities",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/protocol-selection/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_parts",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_reply",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_idempotency",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_edit",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "target": "docs_linq_guides_messaging_message_details_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "source": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_debugging_index_doc",
+      "target": "docs_linq_guides_platform_debugging_index_trace_correlation",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_debugging_index_doc",
+      "target": "docs_linq_guides_platform_debugging_index_request_correlation",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_debugging_index_doc",
+      "target": "docs_linq_error_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_debugging_index_doc",
+      "target": "docs_linq_getting_started_authentication_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_debugging_index_doc",
+      "target": "docs_linq_guides_messaging_protocol_selection_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_debugging_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_debugging_index_doc",
+      "target": "docs_linq_guides_platform_rate_limits_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/debugging/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_doc",
+      "target": "docs_linq_guides_platform_rate_limits_index_volume",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_doc",
+      "target": "docs_linq_guides_platform_rate_limits_index_per_pair",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_doc",
+      "target": "docs_linq_guides_platform_rate_limits_index_capability",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_doc",
+      "target": "docs_linq_error_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_doc",
+      "target": "docs_linq_guides_messaging_sending_messages_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_doc",
+      "target": "docs_linq_getting_started_sdks_index_doc",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_capability",
+      "target": "docs_linq_api_resources_capability_index_check_imessage",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_linq_guides_platform_rate_limits_index_capability",
+      "target": "docs_linq_api_resources_capability_index_check_rcs",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/platform/rate-limits/index.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_doc",
+      "target": "docs_prava_sdk_cards_collect_pan_collectpan",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_doc",
+      "target": "docs_prava_sdk_cards_collect_pan_secure_iframe",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_doc",
+      "target": "docs_prava_sdk_cards_collect_pan_pci_vault",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_doc",
+      "target": "docs_prava_sdk_cards_collect_pan_result",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_doc",
+      "target": "docs_prava_sdk_cards_collect_pan_validation_state",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_doc",
+      "target": "docs_prava_sdk_cards_collect_pan_errors",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_doc",
+      "target": "docs_prava_sdk_cards_collect_pan_prava_sdk",
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_secure_iframe",
+      "target": "docs_prava_sdk_cards_collect_pan_pci_vault",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "docs_prava_sdk_cards_collect_pan_collectpan",
+      "target": "docs_prava_sdk_cards_collect_pan_result",
+      "relation": "conceptually_related_to",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/prava/sdk/cards/collect-pan.md"
+    },
+    {
+      "source": "predictor_design_cache",
+      "target": "docs_linq_guides_platform_rate_limits_index_capability",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.65,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "source": "docs_linq_getting_started_key_concepts_index_idempotency",
+      "target": "predictor_design_cache",
+      "relation": "semantically_similar_to",
+      "confidence": "INFERRED",
+      "confidence_score": 0.55,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/getting-started/key-concepts/index.md"
+    }
+  ],
+  "hyperedges": [
+    {
+      "id": "predictor_pipeline",
+      "label": "Meter Predictor Six-Step Pipeline",
+      "nodes": [
+        "predictor_design_cache",
+        "predictor_design_structural_override",
+        "predictor_design_length_instruction",
+        "predictor_design_task_stacking",
+        "predictor_design_safety_buffer",
+        "predictor_design_history",
+        "predictor_design_clamp"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/DESIGN.md"
+    },
+    {
+      "id": "linq_message_composition",
+      "label": "Linq Message Composition and Sending",
+      "nodes": [
+        "docs_linq_getting_started_key_concepts_index_message_parts",
+        "docs_linq_guides_messaging_sending_messages_index_parts",
+        "docs_linq_api_resources_chats_index_text_decorations",
+        "docs_linq_api_resources_chats_index_message_effects",
+        "docs_linq_guides_messaging_sending_messages_index_idempotency",
+        "docs_linq_guides_messaging_sending_messages_index_reply"
+      ],
+      "relation": "participate_in",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/docs/linq/guides/messaging/sending-messages/index.md"
+    },
+    {
+      "id": "predictor_learning_loop",
+      "label": "Predictor Learning Loop (CAPTURE to Learned)",
+      "nodes": [
+        "predictor_readme_feedback_loop",
+        "predictor_readme_learner",
+        "predictor_design_history"
+      ],
+      "relation": "form",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "/Users/shubh/Desktop/Projects/meter/predictor/README.md"
+    }
+  ],
+  "input_tokens": 0,
+  "output_tokens": 0
+}

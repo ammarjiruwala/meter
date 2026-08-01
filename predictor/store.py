@@ -51,33 +51,26 @@ def load_observations(
     of error that breaks a budget ceiling.
     """
     rows: Dict[str, List[Tuple[int, int]]] = defaultdict(list)
-    if not DATA_DIR.exists():
-        return dict(rows)
-
-    paths = [path_for(model)] if model else sorted(DATA_DIR.glob("*.jsonl"))
-    for path in paths:
-        if not path.exists():
+    for rec in load_records(model):
+        if not include_truncated and rec.get("finish_reason") != "stop":
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            rec = json.loads(line)
-            if not include_truncated and rec.get("finish_reason") != "stop":
-                continue
-            rows[rec["bucket"]].append((rec["input_tokens"], rec["output_tokens"]))
+        rows[rec["bucket"]].append((rec["input_tokens"], rec["output_tokens"]))
     return dict(rows)
 
 
 def load_records(model: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Every stored field, unfiltered — for inspection and diagnostics."""
-    out: List[Dict[str, Any]] = []
+    """Every stored field, unfiltered — for inspection and diagnostics.
+
+    Also the file-walk both readers share; `load_observations` filters this rather than
+    repeating the glob-and-parse loop.
+    """
     if not DATA_DIR.exists():
-        return out
+        return []
     paths = [path_for(model)] if model else sorted(DATA_DIR.glob("*.jsonl"))
-    for path in paths:
-        if not path.exists():
-            continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                out.append(json.loads(line))
-    return out
+    return [
+        json.loads(line)
+        for path in paths
+        if path.exists()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]

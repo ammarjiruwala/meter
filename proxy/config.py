@@ -72,6 +72,44 @@ PRICING_DIR = REPO_ROOT / "pricing"
 # open is the default and closed is the deliberate opt-in.
 FAIL_MODE = _str("FAIL_MODE", "open").strip().lower()
 
+# ── Budgets and reservations ─────────────────────────────────────────────────
+# Budgets are declared in `meter.yaml` at the repo root so spend limits are reviewed by
+# pull request (README.md). No file means no ceilings, which is the Phase 1 behaviour.
+METER_YAML_PATH = Path(_str("METER_YAML_PATH", str(REPO_ROOT / "meter.yaml")))
+
+# The window a `ceiling_usd_per_day` is measured over. Rolling, not calendar-aligned: a
+# midnight reset would let a runaway loop spend a full ceiling at 23:59 and another at
+# 00:01, which is the failure the ceiling exists to prevent.
+BUDGET_WINDOW_S = _int("BUDGET_WINDOW_S", 86_400)
+
+# How long an unreleased reservation survives. Short on purpose (ARCHITECTURE.md §2): a
+# crashed worker must release its holds rather than deadlock the ceiling. Streams outlive
+# this routinely, which is why `budget.extend()` heartbeats it rather than raising it.
+RESERVATION_TTL_S = _float("RESERVATION_TTL_S", 120.0)
+
+# How often a live stream pushes its reservation's expiry forward. Must stay comfortably
+# under RESERVATION_TTL_S or a slow stream reaps its own hold mid-flight.
+RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
+
+# The pre-flight estimate (ARCHITECTURE.md §2 step 3). Off puts `predicted_*` NULL on
+# every row and reserves nothing, which is Phase 1 behaviour exactly.
+PREDICT_ENABLED = _bool("PREDICT_ENABLED", True)
+
+# The predictor's online learning loop: periodically re-fit the per-(project, feature)
+# correction from the ledger. Safe to leave on — `refresh.refresh_now` fits on the older
+# 75% of rows and installs a candidate ONLY if it beats the current factors on the newest
+# 25%, which the fit never saw, so the worst case is "no change" rather than "worse".
+#
+# Measured value depends on traffic shape and both numbers are real: on templated feature
+# traffic it takes median error from 82.6% to 28.8% out-of-sample; on unrelated one-off
+# prompts it is flat and the gate simply keeps rejecting. See CONTEXT.md §6a.
+PREDICT_REFRESH_ENABLED = _bool("PREDICT_REFRESH_ENABLED", True)
+
+# Seconds between refreshes. This reads the ledger and re-fits, so it is deliberately not
+# frequent: the factors move on the timescale of hundreds of requests, not seconds, and
+# the request path never waits on it either way.
+PREDICT_REFRESH_INTERVAL_S = _float("PREDICT_REFRESH_INTERVAL_S", 120.0)
+
 # ── Meter keys ───────────────────────────────────────────────────────────────
 # `key:project:environment` triples, comma separated. Phase 1 shim; superseded once
 # key provisioning moves into the database.

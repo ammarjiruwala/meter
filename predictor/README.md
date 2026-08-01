@@ -21,11 +21,15 @@ result = predict(
 )
 
 result.input_tokens              # int   — exact, from tiktoken
-result.predicted_output_tokens   # int   — estimated, safety margin applied
-result.predicted_cost_usd        # float — reserve against this
+result.predicted_output_tokens   # int   — forecast: dashboard, treasurer runway
+result.bound_output_tokens       # int   — what this CANNOT exceed: ceiling check
+result.predicted_cost_usd        # float
+result.bound_cost_usd            # float — reserve against THIS for a hard ceiling
 result.bucket                    # str   — "code" | "summary" | ... (log it)
-result.method                    # str   — "prior" | "learned" | "capped"
+result.method                    # str   — which rule fired: "sentences", "stacked", ...
+result.tasks                     # tuple — detected tasks, e.g. ("summary", "code")
 result.capped_by_max_tokens      # bool
+result.history_factor            # float — the per-team correction applied
 ```
 
 Three guarantees you can rely on:
@@ -33,6 +37,7 @@ Three guarantees you can rely on:
 | Property | Detail |
 |---|---|
 | **Deterministic** | Identical input always gives an identical number. Never random. |
+| **Two numbers** | `predicted_*` forecasts; `bound_*` is a guarantee. See `DESIGN.md` §1. |
 | **Fast, no I/O** | p50 **0.031ms**, p99 0.041ms. No network, no database. ~0.6% of the 5ms pre-flight budget. |
 | **Biased high** | Aims slightly over, never accurate-on-average. See below. |
 
@@ -43,7 +48,7 @@ Accuracy here is asymmetric:
 - **Under-predict** → a request slips through that should have been blocked → ceiling breached. Bad.
 - **Over-predict** → budget briefly held, released at CAPTURE seconds later. Harmless.
 
-`SAFETY_MARGIN = 1.15`. Tune it from the measured `under_prediction_rate` once data exists.
+Per-bucket buffer, default 1.30, fitted from data via `load_buffers()`. See `DESIGN.md` §7.
 
 **The predictor never affects billing.** Billing uses the provider's actual usage. This only
 answers *"do we have room for this request?"*
@@ -94,19 +99,26 @@ has been run.**
 ## Tests
 
 ```bash
-python tests/test_predictor.py      # 43 checks, plain asserts, no framework
+python tests/test_predictor.py      # 64 checks, plain asserts, no framework
 ```
 
 Same convention as `tests/test_proxy.py`. They pin determinism, the `max_tokens` hard cap,
 classifier buckets, the high bias, and the learner's ability to recover a known relationship.
 Run it before committing anything under `predictor/`.
 
+## Method
+
+`DESIGN.md` documents the full step-by-step method, every formula, which constants are
+measured versus guessed, and the measurements behind each design choice. Read it before
+changing any constant in `scope.py`.
+
 ## Files
 
 | File | Purpose |
 |---|---|
 | `engine.py` | `predict()` — the public entry point |
-| `buckets.py` | Prompt classifier + `PRIORS` table |
+| `buckets.py` | Prompt classifier (grouping key for buffers and the learner) |
+| `scope.py` | Scope extraction — length instructions, task stacking, multipliers |
 | `tokenizer.py` | Exact `tiktoken` counting, incl. chat framing overhead |
 | `learner.py` | Per-bucket least-squares fit + accuracy reporting |
 | `calibrate.py` | Measures real ratios against the OpenAI API |

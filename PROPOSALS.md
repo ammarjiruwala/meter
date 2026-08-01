@@ -8,13 +8,13 @@ Each item states what is wrong or missing, why it matters, and a recommendation.
 applied to `README.md` / `CONTEXT.md` / `ARCHITECTURE.md` **only after a human approves
 them** — this file is the staging area, not the record.
 
-**Applied so far:** A1–A6, B1–B7, B15, B16, C1, C2, C4. Everything else is still a proposal; if you find a
+**Applied so far:** A1–A6, B1–B7, B15–B18, C1, C2, C4. Everything else is still a proposal; if you find a
 new contradiction, add it here and raise it rather than editing one source doc to match
 another (the one you "fixed" may have been the correct one).
 
 Status key: **OPEN** — needs a decision · **RESOLVED / DONE / SHIPPED** — closed, kept for the record.
 
-25 items: A1–A6 (contradictions), B1–B16 (gaps), C1–C4 (verification).
+33 items: A1–A6 (contradictions), B1–B18 (gaps), C1–C5 (verification), D1–D4 (research findings).
 
 ---
 
@@ -137,7 +137,7 @@ exists. This is a documentation fix, not a code change. Owner: Ammar + Shubh.
 and step 3 of the lifecycle rewritten) and `CONTEXT.md` §5A. Zero code — the predictor is
 Ammar's Phase 2 work and now has an unambiguous spec to build against.
 
-### A5 — Datastore: Postgres, SQLite, or Redis? · **DECIDED — Shubh, Phase 2**
+### A5 — Datastore: Postgres, SQLite, or Redis? · **DECIDED & SHIPPED — Shubh, 2026-08-01**
 
 `CONTEXT.md` §4 says Postgres **and** Redis. `PLAN.md` Phase 1 says "Postgres/SQLite". The
 Redis Lua reservations in `ARCHITECTURE.md` §2 are meaningless against SQLite, and **no
@@ -173,7 +173,23 @@ the closest open-source equivalent to Meter — does run FastAPI + Redis + Postg
 knowing that the reference architecture agrees with `ARCHITECTURE.md` at scale; it just
 isn't what a 48-hour demo needs to prove the concept.
 
-### A6 — Budget source of truth: `meter.yaml` or the `projects` table? · **RESOLVED — YAML wins, documented**
+**Shipped 2026-08-01 (Shubh):** `proxy/budget.py`. Holds live in a process-local dict
+behind an `asyncio.Lock`; `authorize()` counts outstanding holds alongside settled ledger
+spend inside one critical section, and `reservation_id` is now written to every row
+instead of NULL. Two implementation notes that were not obvious from the design:
+
+* **Holds are deliberately not persisted.** A restart drops them, which is correct — a
+  restart also drops every in-flight request they were covering. Settled spend is in the
+  ledger; only the in-flight delta lives in memory.
+* **The release must happen after the ledger row lands, not alongside it.** Capture is
+  scheduled, not awaited, so releasing next to `_schedule_capture` leaves a window where
+  the cost is counted by neither the hold nor the ledger. The release is therefore done
+  *inside* the capture task.
+
+The self-check fires 40 concurrent authorizes at a ceiling admitting four and asserts
+exactly four pass — without serialisation all 40 do.
+
+### A6 — Budget source of truth: `meter.yaml` or the `projects` table? · **RESOLVED & SHIPPED — YAML wins**
 
 `README.md` and `ARCHITECTURE.md` §9 make budget-as-code a *lock-in mechanism* — limits live
 in the customer's repo and change by pull request. `ARCHITECTURE.md` §4 also has
@@ -186,6 +202,15 @@ boot; the table is a read cache the hot path uses. Say so in `ARCHITECTURE.md` �
 **Applied to:** `ARCHITECTURE.md` §4, which now states the precedence explicitly and carries
 the two rules that follow from it: the loader must be idempotent, and it must reject a config
 whose feature ceilings exceed their project's.
+
+**Shipped 2026-08-01 (Shubh):** `budget.load_meter_yaml()` at boot, feeding
+`db.replace_budgets()`. Both rules are implemented and asserted. One thing the design did
+not anticipate: **the loader has to REPLACE, not upsert.** Upserting makes deletion
+impossible — a ceiling removed from `meter.yaml` would keep being enforced from a stale
+row, which is precisely the failure budget-as-code exists to prevent, and it would be
+invisible because the file no longer mentions it. `replace_budgets` clears every ceiling
+and rebuilds from the file in one transaction, so what the file says is what is enforced,
+including when the file says nothing.
 
 ---
 
@@ -238,7 +263,7 @@ most-asked integration question and currently has no written answer.
 subsection with the diff a caller actually makes, the `x-api-key` note for Anthropic SDKs,
 and why the whitelist means a client credential cannot reach the provider.
 
-### B3 — Reservation TTL contradicts streaming duration · **SPEC'D in ARCHITECTURE §2; builds with reservations (Shubh, Phase 2)**
+### B3 — Reservation TTL contradicts streaming duration · **DONE — shipped with reservations, 2026-08-01**
 
 `ARCHITECTURE.md` §2 sets a 120s reservation TTL "so a crashed worker releases its holds".
 `README.md` says the proxy holds SSE streams open "for minutes at a time".
@@ -256,6 +281,15 @@ mid-flight on the longest calls *and fails silently* — nothing errors when a r
 disappears, the ceiling just stops holding. The requirement is recorded ahead of the
 reservations themselves (A5, Phase 2) so it lands with them rather than being discovered
 after.
+
+**Shipped 2026-08-01 (Shubh).** `budget.extend()` plus a heartbeat in `_forward_stream`'s
+chunk loop: `RESERVATION_TTL_S=120` kept short, pushed forward every
+`RESERVATION_HEARTBEAT_S=30` for as long as bytes keep arriving. The stream is its own
+clock, so no background task is needed. `extend()` is deliberately lock-free — a single
+float write on the single-threaded event loop — because taking the async lock per chunk
+would serialise every stream in the process against every authorize. Self-check asserts
+both halves: that `extend()` rescues a hold whose expiry has passed, and that the
+rescued hold still counts against the ceiling.
 
 ### B4 — Client disconnect is harder than the doc implies · DONE
 
@@ -321,7 +355,7 @@ against a defined hash rather than reverse-engineering one.
 framed as part of the schema rather than an implementation detail — because changing it later
 silently changes every dedupe result computed before the change.
 
-### B7 — Per-project ceilings are specified but nothing enforces them · **ASSIGNED — Shubh, Phase 2**
+### B7 — Per-project ceilings are specified but nothing enforces them · **DONE — shipped 2026-08-01 (Shubh)**
 
 `projects.ceiling_usd_day` is in the schema, `meter.yaml` is in the README, `CONTEXT.md`
 §3 "Check: verifies if the team has enough budget" is step 3 of the system flow — and no
@@ -351,10 +385,36 @@ the same shape, so the same rule applies: validate at load time that the feature
 sum to no more than the project ceiling, and reject the config if they don't. Catching that
 in a pull request is the entire pitch of budget-as-code, and it is a 5-line check.
 
+> ⚠ **The last sentence above is wrong, and B17 corrects it.** The rule described in the
+> sentence before it — "a child budget cannot exceed its parent's" — is LiteLLM's actual
+> rule and is a *per-child* check. Restating it as a check on the *sum across siblings* is
+> a different rule that the cited prior art does not support, and it inverts the failure
+> mode. Left in place rather than edited away, because the drift is the useful part of the
+> record. See B17 for what shipped.
+
 **Applied to:** `ARCHITECTURE.md` §4, which now records both constraints on the loader —
 idempotent, and rejects a config whose feature ceilings exceed their project's — alongside
 the `meter.yaml`-wins precedence from A6. The enforcement code is Phase 2; the spec it has to
 satisfy is now written down rather than living only in this file.
+
+**Shipped 2026-08-01 (Shubh).** All three numbered steps, folded into the reservation as
+step 3 anticipated — the ceiling check and the hold happen in one critical section, so it
+is never a read-then-call race. Both loader constraints are implemented and asserted.
+Refusal is `429` with `X-Meter-Budget-Scope` / `-Ceiling-Usd` / `-Spend-Usd`, because a
+project can have several ceilings and the caller cannot see `meter.yaml`.
+
+Two behaviours chosen where the spec was silent, both erring toward availability, since
+Meter is in the critical path and a cost tool that takes down production is not a cost
+tool:
+
+* **A malformed `meter.yaml` boots with no ceilings** rather than refusing to boot.
+* **Ceilings of `0` or less are ignored,** not enforced literally. A `0` enforced as
+  written blocks every request in the project, and nobody commits that on purpose.
+
+Both are the same fail-open posture `FAIL_MODE` already takes, and both are loud in the
+log. B17 later applied the same reasoning to the third case — feature ceilings summing past
+their project's total now warn and keep enforcing, rather than rejecting the project's
+budgets outright.
 
 ### B8 — Reconciliation after a ledger outage can double-count · DONE
 
@@ -368,7 +428,7 @@ rather than duplicates.
 
 **Recommendation:** note the constraint in §7 so the Postgres port keeps it.
 
-### B9 — `POST /v1/annotate` is documented but assigned to nobody · OPEN
+### B9 — `POST /v1/annotate` is documented but assigned to nobody · **DONE — built 2026-08-01 (Shubh)**
 
 `README.md` documents it as attribution rung 3 with a working `curl` example.
 `ARCHITECTURE.md` §4 calls the `requests × annotations` join on `trace_id` "the interesting
@@ -382,14 +442,37 @@ query) and it is the difference between "another cost dashboard" and a margin to
 is being cut, cut it from `README.md` too; documenting an endpoint that 404s is worse than
 not having it. Suggested owner: Shubh or Tanay, Phase 3.
 
-### B10 — `docker compose up` does not exist · OPEN
+**Built 2026-08-01 (Shubh), alongside the Phase 2 proxy work. Ratified the same day** —
+raised for a decision because it was taken without a formal assignment, and kept: the
+endpoint was already documented in `README.md` with a working `curl` and called "the margin
+metric" in `ARCHITECTURE.md` §4, so what was missing was an owner, not a decision.
+
+Two deliberate deviations from `ARCHITECTURE.md` §4's `annotations
+(id, trace_id, outcome, value_usd, ts)`:
+
+* **`project_id` added — explicitly approved 2026-08-01, on security grounds.** A
+  `trace_id` is a caller-supplied string. Without scoping, any key could annotate — or,
+  via the returned totals, *read the cost of* — another project's traces. The self-check
+  plants an identical trace id under a second project and asserts it is not counted.
+* **Response returns the trace's cost, request count and margin**, not just an ack. The
+  number the endpoint exists to produce is dollars-per-outcome, and making the caller run
+  a second query to see what they just annotated is a worse API for no saving.
+
+`value_usd` is optional; when it is absent `margin_usd` comes back `null` rather than `0`,
+because "broke even" and "we don't know the value" are different facts.
+
+### B10 — `docker compose up` does not exist · **DONE — shipped 2026-08-01 (Shubh)**
 
 It is the first command in the `README.md` quickstart and the whole of
 `ARCHITECTURE.md` §8. No phase assigns a `Dockerfile` or a `compose.yaml`.
 
-**Recommendation:** if self-hosting is the product, the quickstart has to run. A
-proxy-only compose file is ~30 lines; the full five-service one needs the other components
-to exist first. Suggested owner: Shubh, once Shivam's Postgres schema lands.
+**Shipped:** single-service `Dockerfile` (python:3.12-slim, `uvicorn proxy.app:app`,
+`METER_DB_PATH=/data/meter.db` on a named volume) + `compose.yaml` (port 8080,
+`env_file: .env`, read-only mounts for `meter.yaml` and `pricing/` so budget-as-code
+and pricing change by PR, not by exec). Verified: `docker compose config` valid, image
+builds, container boots, healthz 200, treasurer loop starts. The full five-service
+version is still future work once the other components exist; the dashboard remains a
+host-side dev process reading `meter.db` read-only.
 
 ### B11 — Cross-model routing doubles spend if it sits in the request path · OPEN
 
@@ -478,8 +561,100 @@ chunk shape.
 The consequence we accept: on that endpoint the caller sees a `usage` field it did not request.
 Forwarding an extra field is a much smaller sin than deleting the end-of-stream signal.
 
-## C. Verification tasks
+### B17 — Rejecting an over-allocated project removes all its enforcement · **RESOLVED & SHIPPED — rule changed, 2026-08-01**
 
+`ARCHITECTURE.md` §4 (via A6/B7) **used to require** the loader to "reject a config whose
+feature ceilings sum to more than their project's ceiling". It was first implemented
+exactly as specified, then raised here rather than quietly reinterpreted, because building
+it surfaced two problems the rule's one-line statement hides. The decision below changed
+the rule; §4 and the loader now match the recommendation, not the original text.
+
+**1. "Reject" is the most dangerous possible outcome here.** A rejected project gets *no*
+ceilings at all — not the project one, not the feature ones. So the response to "you
+allocated slightly too much" is to switch budget enforcement **off** for that project. The
+failure mode is inverted: a config that is too restrictive on paper results in nothing
+being restricted. An operator who fat-fingers `500` to `5000` on one feature loses the
+project ceiling that would have caught it. The alternative — apply the project ceiling,
+warn about the features — keeps the outer limit intact, which is the one that actually
+bounds spend.
+
+**2. Over-allocation is a legitimate pattern, not only a typo.** The rule assumes feature
+ceilings are a partition of the project budget. In practice they are usually *independent
+caps on unrelated things*: "no single feature may exceed \$200/day, and the project may not
+exceed \$800/day" is a coherent policy with six features at \$200 each. Every feature
+maxing out simultaneously is exactly what the project ceiling exists to stop, and it stops
+it correctly — the two limits are checked independently, so nothing can actually breach the
+project total no matter what the features sum to. The validation forbids a configuration
+the runtime handles correctly.
+
+Worth noting the cited prior art does not do this either: LiteLLM's rule is that a *child*
+budget cannot exceed its *parent's* — a per-feature check (`feature <= project`), not a sum
+across siblings. That check has neither problem above.
+
+**Recommendation:** replace the sum rule with LiteLLM's actual one — reject a config where
+any single feature ceiling exceeds its project's, and *warn* (do not reject) when the
+siblings sum to more. That keeps the review-time catch for the mistake that matters,
+preserves the outer ceiling when the config is merely generous, and stops the loader from
+disabling enforcement as a response to over-restriction. ~3 lines changed in
+`budget.load_meter_yaml`, plus one line in `ARCHITECTURE.md` §4.
+
+**Decided 2026-08-01 (Shubh): recommendation accepted, rule changed.** The sum rule was
+never in the prior art it cited — the drift is visible inside B7's own paragraph, which
+correctly describes LiteLLM's rule as "a child budget cannot exceed its parent's" (a
+per-child check) and then restates it one sentence later as a check on the sum.
+
+**Applied to:** `ARCHITECTURE.md` §4, which now carries three loader rules instead of two —
+replace-don't-upsert, reject a single feature above its project, warn on the sibling sum.
+`proxy/budget.py` implements all three; `meter.yaml.example` documents them.
+
+**The claim the decision rests on is now asserted, not argued.** The self-check builds a
+project with a \$10 ceiling and two \$8 features, fires 16 authorizes, and asserts exactly
+10 pass — over-allocated features cannot breach the project total, because both ceilings
+are evaluated independently in `authorize`. It also pins which scope reports the refusal in
+each direction: a feature at its own limit is refused in the *feature's* name, a feature
+with headroom stopped by the project total is refused in the *project's*. That second pair
+came out of a failing assertion — the first version of the test assumed the project always
+wins, which is wrong, and the 429 would have sent an operator to the wrong line of
+`meter.yaml`.
+
+### B18 — The treasury control plane is unauthenticated · **RESOLVED & SHIPPED — applied 2026-08-01, recommendation 1**
+
+Found during the full-codebase audit (2026-08-01, runtime-verified). Every `/v1` route
+authenticates the Meter key and scopes to its project (`_proxy`, `/v1/annotate`,
+`/v1/breaker/reset` — the annotate scoping was explicitly approved on security grounds in
+B9), but **none of the treasury surface does**: `/wallets`, `/wallets/seed`, `/topup`,
+`/charge`, `/report`, `/charge-refusal`, `/mock-openai/billing`, `/mandates*`,
+`/treasury/events`.
+
+What that means in practice, verified live against a running proxy: an unauthenticated
+`POST /charge` reached the Prava sandbox (the `AUTH_1001` returned was **Prava's** rejection,
+not Meter's — the local `.env` keys are placeholders, so no money moved). With real
+credentials, any process that can reach the port can top up, drain, or settle — the
+money-moving half of the whole product, with no key and no project scoping.
+
+No source-of-truth document says the treasury routes are public. `CONTEXT.md` §4 and
+`proxy/README.md` describe them as demo surface, but demo does not have to mean
+unauthenticated — the B9 decision shows the team already cares about this class of hole.
+
+**Shipped (Shubh, 2026-08-01): recommendation 1 — auth on the money moves only.**
+`treasury/routes.py` gains a `_authed_key` FastAPI dependency (same header handling and
+fail-closed behavior as `proxy/app.py`, which cannot be imported there without a cycle)
+applied to `/wallets/seed`, `/topup`, `/charge`, `/report`, `/charge-refusal`.
+Read-only and demo routes stay open. Verified live inside the built container: all five
+return 401 without a key, all five pass with one, reads still open.
+
+Two extras landed in the same pass, both audit findings:
+
+* **M3 — `/mandates` and `/mandates/sync` return a 503 envelope instead of a bare 500**
+  when Prava is unreachable.
+* **M4 — `/report` validates `transaction_id`** (`^[A-Za-z0-9_\-]{8,64}$`, matching both
+  Prava's `txn_…` and simulated `sim_…` shapes) and returns 400 otherwise.
+
+**Applied to:** `proxy/README.md` (auth note + the demo curls' header), `CONTEXT.md` §6a.
+
+---
+
+## C. Verification tasks
 Not design questions — things that are written down and might simply be wrong.
 
 ### C1 — Pricing rates · **DONE — verified 2026-08-01**
@@ -512,9 +687,25 @@ header comment; not worth building until someone actually runs 1-hour TTLs.
 
 See B1. Confirmed to exist, with OpenAI-shaped errors and dual auth-header support.
 
-### C3 — Prava sandbox rate limits are unknown · OPEN
+### C3 — Prava sandbox rate limits · OPEN — researched 2026-08-01: not documented anywhere
 
 Blocks A3. Owner: Shivam.
+
+**Research result (2026-08-01, full read of `docs.prava.space` — errors.md, OpenAPI spec,
+create-session.md, developer FAQ, go-live checklist):** no RPM/RPS figures exist for any
+endpoint. The only documented throttle is `429 TRIES_EXHAUSTED` on `POST /v1/sessions`,
+described inconsistently as either a session-allowance depletion or a sandbox
+test-transaction limit. No `Retry-After` / `X-RateLimit-*` headers are documented anywhere.
+The mandate charge/report paths declare no 429 at all (charge: 400/401/403/409/500; report:
+400/401/404/500).
+
+**Implication for the loop-interval decision:** no published number constrains either 30s or
+3s. The real limiters are (a) the undocumented sandbox test-transaction allowance (ask
+`support@prava.space`, quoting an `X-Response-ID`, or measure empirically) and (b) the
+mandate's per-cycle cap (see the mandate finding in CONTEXT.md §6a). Prava's own docs
+recommend a **3s poll cadence** for session credentials — a precedent that supports the
+demo-box `TREASURER_INTERVAL_S=3`. Implement backoff on 429 and treat `TRIES_EXHAUSTED` as
+a loop trip rather than a retryable blip.
 
 ### C4 — Provider credit balances · **RESOLVED — both providers funded and verified live**
 
@@ -569,3 +760,80 @@ committed; verified by scan before every commit.
 request is, verbatim, the failure Meter exists to prevent — "when the balance hits zero at
 3am, production returns errors until a human wakes up." We have an unusually authentic
 screenshot of the problem statement.
+
+### C5 — Linq sandbox requires the recipient to message first · OPEN — verify before demo day
+
+Found in a full read of `docs.linqapp.com` (2026-08-01). The sandbox error reference lists
+`2008 Recipient not allowed` with the rule *"in sandbox, recipients must message you first"*.
+If the demo `.env` uses a sandbox Linq token, breaker alerts to the CTO's number may silently
+fail with 2008 until that number has messaged the sending line once.
+
+**Recommendation:** before demo rehearsal, send one iMessage from the line to the demo
+number (or confirm with the Linq token whether the account is sandbox). One sentence in
+CONTEXT.md §6a records the gotcha; this item closes when someone has verified which mode
+the token is in. Owner: Tanay.
+
+---
+
+## D. Research findings (2026-08-01)
+
+Patterns from a review of the major open-source LLM gateways (LiteLLM, Helicone, Portkey,
+OpenRouter, one-api/new-api, Langfuse) — things Meter deliberately does not yet have, or does
+have and was validated on. These are recorded for the team to pick from; none block the demo.
+
+### D1 — Client-visible request id / idempotency key · OPEN
+
+Every major gateway exposes a request id — Helicone accepts a client-supplied
+`Helicone-Request-Id` header (idempotent retries, links retries to one logical request),
+OpenRouter returns `request_id`, LiteLLM has a `request_id` column. Meter's request id is
+generated internally (B8) but never echoed to the caller, and nothing accepts a client
+idempotency key.
+
+**Recommendation (post-hackathon unless a judge asks):** echo an `X-Meter-Request-Id`
+response header and accept an optional client-supplied `X-Meter-Request-Id`, `INSERT OR
+REPLACE` semantics already make a replay idempotent (B8). ~5 lines, answers "what happens
+when the client retries?". Owner: Shubh.
+
+### D2 — Soft-budget alert below the hard ceiling · OPEN
+
+LiteLLM distinguishes `soft_budget` (warn only) from `max_budget` (block). Meter has the
+block side (`meter.yaml` ceilings → 429) and the alert rail (`alerts/` → iMessage) but no
+"approaching the ceiling" warning. An iMessage at ~80% of a ceiling turns a binary block
+into a preventable incident — and is a demo beat the current 429-only flow cannot show.
+
+**Recommendation:** a per-ceiling threshold check in the Treasurer loop (it already scans
+burn rate) that fires `alerts/` when spend crosses a configurable fraction of a ceiling.
+Cheap; the pieces all exist. Owner: Shubh or Tanay, post-hackathon.
+
+### D3 — `402` vs `429` for budget refusals · OPEN — documentation decision
+
+OpenRouter splits the two: credit/balance exhaustion is `402 Payment Required`, rate limits
+are `429` with `X-RateLimit-*` headers. Meter refuses budget-exhausted requests with `429`
+(no rate-limit headers) — which matches LiteLLM's budget-block behaviour, but conflates
+"out of money" with "too fast" on the wire.
+
+**Recommendation:** keep `429` (it is what SDKs already back off on, and LiteLLM does the
+same), but add one sentence to `proxy/README.md` stating that Meter's `429` means "budget
+exhausted", not "rate limited", and reserve `402` for a future paywall. Owner: Shubh, if
+anyone asks.
+
+### D4 — Things Meter already does that the gateways validate (recorded, no action)
+
+- **Reserve/reconcile/release** authorize-capture matches LiteLLM's budget reservation and
+  one-api's pre/post consumption exactly (A5, B7).
+- **Throttle-vs-block split** (429 tag-scoped vs 403 key-scoped) mirrors LiteLLM's
+  budget-throttle escape hatch and Portkey's breaker-on-429 handling.
+- **Keys stored as SHA-256 hashes** (`proxy/db.py` `hash_key`) matches LiteLLM's
+  `hash_token`.
+- **Versioned pricing files** match Langfuse's cost-at-ingestion rule: never reprice
+  history (C1).
+- **`stream_options.include_usage` injection** is Helicone's canonical streaming-cost fix
+  and LiteLLM's `always_include_stream_usage` (B15/B16).
+- **Floor+burst detection** is the SRE multi-window pattern (A1).
+
+**Deliberately not copied (post-hackathon candidates):** provider retries with backoff and
+fallback routing (Portkey), per-key RPM/TPM token buckets (LiteLLM), response caching with
+cache-hit accounting (Helicone), pre-aggregated daily spend rollups (LiteLLM), mid-stream
+error encoding as SSE `finish_reason: "error"` (OpenRouter). All are real industry features;
+none are needed for the 48-hour demo, and a few (retries) would obscure the ledger's
+one-row-per-request contract.

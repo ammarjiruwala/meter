@@ -45,6 +45,12 @@ from treasury import config, db, prava, topup, treasurer  # noqa: E402
 PASSED = 0
 CLIENT: TestClient
 
+# The money-moving routes (`/topup`, `/wallets/seed`, `/charge`, `/report`,
+# `/charge-refusal`) require a Meter key — added in the repo audit, and right: an
+# unauthenticated endpoint that charges a card is not an endpoint. `mk_dev_local` is what
+# METER_KEYS seeds by default, so it resolves to `demo-project`.
+AUTH = {"Authorization": "Bearer mk_dev_local"}
+
 
 def check(label: str, condition: bool, detail: str = "") -> None:
     global PASSED
@@ -72,7 +78,7 @@ def mandate(project: str, prava_id: str, *, remaining: float = 500.0,
 
 
 def seed(project: str, balance: float) -> None:
-    CLIENT.post("/wallets/seed", params={"project_id": project, "provider": "openai",
+    CLIENT.post("/wallets/seed", headers=AUTH, params={"project_id": project, "provider": "openai",
                                          "balance_usd": balance, "reset": True})
 
 
@@ -232,33 +238,33 @@ def test_topup_rails() -> None:
     mandate("rails", "mdt_rails", per_txn=200.0, daily=500.0, cooldown=0)
     seed("rails", 4.0)
 
-    r = CLIENT.post("/topup", params={"project_id": "none-such",
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "none-such",
                                       "amount_usd": 10}).json()
     check("no mandate refuses rather than charging blindly",
           r["reason"] == "no_chargeable_mandate")
 
     # Our configured policy answers before the rail's own limit: "over your $200 cap" is
     # more actionable than "not enough headroom" when both are true.
-    r = CLIENT.post("/topup", params={"project_id": "rails", "amount_usd": 999}).json()
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "rails", "amount_usd": 999}).json()
     check("over per-transaction cap", r["reason"] == "over_per_txn_cap")
 
-    r = CLIENT.post("/topup", params={"project_id": "rails", "amount_usd": 50}).json()
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "rails", "amount_usd": 50}).json()
     check("a valid top-up succeeds", r.get("ok") is True, r.get("reason", ""))
     check("wallet credited $4 -> $54", balances()["rails"] == 54.0)
     check("idempotency key derives from the event row",
           r["idempotency_key"].startswith("tev_"))
 
     mandate("rails", "mdt_rails", daily=60.0, cooldown=0)
-    r = CLIENT.post("/topup", params={"project_id": "rails", "amount_usd": 50}).json()
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "rails", "amount_usd": 50}).json()
     check("rolling 24h cap refuses", r["reason"] == "over_daily_cap")
 
     mandate("rails", "mdt_rails", daily=500.0, cooldown=300)
-    r = CLIENT.post("/topup", params={"project_id": "rails", "amount_usd": 10}).json()
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "rails", "amount_usd": 10}).json()
     check("cooldown refuses", r["reason"] == "cooldown")
     check("cooldown reports how long to wait", r["wait_s"] > 0)
 
     mandate("rails", "mdt_rails", remaining=20.0, cooldown=0)
-    r = CLIENT.post("/topup", params={"project_id": "rails", "amount_usd": 50}).json()
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "rails", "amount_usd": 50}).json()
     check("mandate headroom refuses locally, not via a network decline",
           r["reason"] == "insufficient_mandate_headroom")
 
@@ -271,7 +277,7 @@ def test_isolation() -> None:
     seed("ours", 4.0)
     seed("theirs", 7.0)
 
-    r = CLIENT.post("/topup", params={"project_id": "ours", "amount_usd": 50}).json()
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "ours", "amount_usd": 50}).json()
     check("top-up succeeds", r.get("ok") is True, r.get("reason", ""))
     check("charged our mandate", r["mandate"] == "mdt_ours")
     b = balances()
@@ -289,7 +295,7 @@ def test_dry_run() -> None:
     seed("dry", 4.0)
     config.TREASURER_DRY_RUN = True
     try:
-        r = CLIENT.post("/topup", params={"project_id": "dry", "amount_usd": 50}).json()
+        r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "dry", "amount_usd": 50}).json()
         check("dry run refuses", r["reason"] == "dry_run")
         check("dry run moves no money", balances()["dry"] == 4.0)
         ev = CLIENT.get("/treasury/events", params={"project_id": "dry"}).json()
@@ -390,7 +396,7 @@ def test_failure_handling() -> None:
         # A timeout is not an answer: the charge may have landed and only the reply been
         # lost. Settling `failed` would discard the only handle on a charge that exists.
         topup.charge_mandate = timeout_charge
-        r = CLIENT.post("/topup", params={"project_id": "fail",
+        r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "fail",
                                           "amount_usd": 50}).json()
         check("a timeout does not raise", r["reason"] == "prava_unreachable")
         check("no money moves on a timeout", balances()["fail"] == 4.0)
@@ -400,7 +406,7 @@ def test_failure_handling() -> None:
 
         # This is the property the whole write-ahead design exists for.
         topup.charge_mandate = ok_charge
-        r = CLIENT.post("/topup", params={"project_id": "fail",
+        r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "fail",
                                           "amount_usd": 50}).json()
         check("the retry reuses the same idempotency key",
               r["idempotency_key"] == key, f"{key} -> {r['idempotency_key']}")
@@ -412,7 +418,7 @@ def test_failure_handling() -> None:
         seed("dec", 4.0)
         wid2 = db.ensure_wallet("dec", "openai")
         topup.charge_mandate = declined_charge
-        r = CLIENT.post("/topup", params={"project_id": "dec", "amount_usd": 50}).json()
+        r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "dec", "amount_usd": 50}).json()
         check("a decline is reported as declined", r["reason"] == "charge_declined")
         check("a decline settles rather than staying pending",
               db.pending_event(wid2) is None)
@@ -422,7 +428,7 @@ def test_failure_handling() -> None:
         mandate("g5", "mdt_g5")
         seed("g5", 4.0)
         topup.charge_mandate = bad_gateway
-        r = CLIENT.post("/topup", params={"project_id": "g5", "amount_usd": 50}).json()
+        r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "g5", "amount_usd": 50}).json()
         check("a non-JSON 500 is handled, not raised",
               r["reason"] == "charge_declined")
 
@@ -433,7 +439,7 @@ def test_failure_handling() -> None:
         wid3 = db.ensure_wallet("rep", "openai")
         topup.charge_mandate = ok_charge
         topup.report_charge = failed_report
-        r = CLIENT.post("/topup", params={"project_id": "rep", "amount_usd": 50}).json()
+        r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "rep", "amount_usd": 50}).json()
         check("the charge still succeeds when only the report fails", r["ok"] is True)
         ev = db.recent_events(wid3, 1)[0]
         check("settled, not misreported as failed", ev["status"] == "settled")
@@ -529,7 +535,7 @@ def test_pending_mandates() -> None:
     check("a pending mandate is NOT chargeable",
           db.chargeable_mandate("zeta", "openai") is None)
 
-    r = CLIENT.post("/topup", params={"project_id": "zeta", "amount_usd": 10}).json()
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "zeta", "amount_usd": 10}).json()
     check("and cannot be charged through the API",
           r["reason"] == "no_chargeable_mandate")
 
@@ -545,18 +551,24 @@ def test_event_ledger() -> None:
     mandate("audit", "mdt_audit", per_txn=100.0)
     seed("audit", 4.0)
 
-    CLIENT.post("/topup", params={"project_id": "audit", "amount_usd": 50})
+    CLIENT.post("/topup", headers=AUTH, params={"project_id": "audit", "amount_usd": 50})
     before = len(CLIENT.get("/treasury/events", params={"project_id": "audit"}).json())
-    CLIENT.post("/topup", params={"project_id": "audit", "amount_usd": 999})
-    after = len(CLIENT.get("/treasury/events", params={"project_id": "audit"}).json())
-    # A refusal happens before the write-ahead row, by design: nothing was attempted, so
-    # there is nothing to reconcile. What matters is that a *charge* always leaves one.
-    check("a cap refusal does not fabricate an attempt", after == before, f"{before}/{after}")
-
+    CLIENT.post("/topup", headers=AUTH, params={"project_id": "audit", "amount_usd": 999})
     rows = CLIENT.get("/treasury/events", params={"project_id": "audit"}).json()
-    check("the settled attempt is recorded", rows[0]["status"] == "settled")
-    check("with the amount", rows[0]["amount_usd"] == 50.0)
-    check("and an idempotency key", rows[0]["idempotency_key"].startswith("tev_"))
+
+    # Rails refusals record a `refused` row too (repo audit). Worth having: a refusal that
+    # leaves no trace is invisible to the Agent Activity panel, so a judge whose top-up was
+    # blocked sees an empty log and concludes the product is broken rather than careful.
+    check("a rails refusal is recorded, not silent", len(rows) == before + 1,
+          f"{before} -> {len(rows)}")
+    check("recorded as refused", rows[0]["status"] == "refused", rows[0]["status"])
+    check("with the reason", "over_per_txn_cap" in (rows[0]["error"] or ""),
+          str(rows[0]["error"]))
+
+    settled = [r for r in rows if r["status"] == "settled"]
+    check("the settled attempt is recorded", len(settled) == 1)
+    check("with the amount", settled[0]["amount_usd"] == 50.0)
+    check("and an idempotency key", settled[0]["idempotency_key"].startswith("tev_"))
 
     wid = db.ensure_wallet("audit", "openai")
     check("settled totals feed the 24h cap",
@@ -686,7 +698,7 @@ def test_persistence() -> None:
     print("\npersistence across reconnect")
     mandate("persist", "mdt_persist")
     seed("persist", 33.0)
-    CLIENT.post("/topup", params={"project_id": "persist", "amount_usd": 10})
+    CLIENT.post("/topup", headers=AUTH, params={"project_id": "persist", "amount_usd": 10})
 
     conn = db.connect()
     conn.close()
@@ -708,7 +720,7 @@ def test_money_conservation() -> None:
     wid = db.ensure_wallet("conserve", "openai")
 
     for amount in (10.0, 25.0, 40.0):
-        r = CLIENT.post("/topup", params={"project_id": "conserve",
+        r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "conserve",
                                           "amount_usd": amount}).json()
         check(f"${amount:.0f} top-up settled", r.get("ok") is True, r.get("reason", ""))
 
@@ -734,15 +746,15 @@ def test_multi_provider() -> None:
                       recurring_frequency="monthly", status="active",
                       approved_amount_usd=500.0, remaining_usd=500.0,
                       project_id="dual", external_user_id_="meter_dual")
-    CLIENT.post("/wallets/seed", params={"project_id": "dual", "provider": "openai",
+    CLIENT.post("/wallets/seed", headers=AUTH, params={"project_id": "dual", "provider": "openai",
                                          "balance_usd": 4.0, "reset": True})
-    CLIENT.post("/wallets/seed", params={"project_id": "dual", "provider": "anthropic",
+    CLIENT.post("/wallets/seed", headers=AUTH, params={"project_id": "dual", "provider": "anthropic",
                                          "balance_usd": 9.0, "reset": True})
 
     check("provider selects its own mandate",
           db.chargeable_mandate("dual", "anthropic")["prava_mandate_id"] == "mdt_ant")
 
-    r = CLIENT.post("/topup", params={"project_id": "dual", "provider": "openai",
+    r = CLIENT.post("/topup", headers=AUTH, params={"project_id": "dual", "provider": "openai",
                                       "amount_usd": 50}).json()
     check("openai top-up succeeds", r.get("ok") is True, r.get("reason", ""))
     check("it charged the openai mandate", r["mandate"] == "mdt_oai")

@@ -1,5 +1,7 @@
 # create_mandate.py
-import os, httpx, json
+import os
+import httpx
+import json
 from dotenv import load_dotenv
 load_dotenv()
 

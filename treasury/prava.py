@@ -6,25 +6,21 @@ the treasury routes folded into the proxy app.
 
 import asyncio
 import logging
-import os
 import uuid
-from pathlib import Path
 
 import httpx
-from dotenv import load_dotenv
 
-# Load from the repo root explicitly rather than the working directory, matching
-# proxy/config.py. Without this, `uvicorn proxy.app:app` started from anywhere other
-# than the repo root silently gets no Prava credentials.
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
+from . import config
 
-PRAVA_LIVE_MODE = os.getenv("PRAVA_LIVE_MODE", "False") == "True"
-PRAVA_API_BASE = os.getenv("PRAVA_API_BASE", "https://sandbox.api.prava.space")
-PRAVA_API_KEY = os.getenv("PRAVA_API_KEY")
-PRAVA_MANDATE_ID = os.getenv("PRAVA_MANDATE_ID")
+# Config comes from `treasury/config.py`, which already loads `.env` from the repo root.
+# This module used to re-read the same four variables with its own `os.getenv` and its own
+# `load_dotenv`, which meant two sources of truth for the same credentials — and they did
+# not agree: this file compared `PRAVA_LIVE_MODE` with `== "True"` while config.py parsed
+# it leniently, so `PRAVA_LIVE_MODE=true` put the two halves of the treasury into
+# different modes. One source now, parsed one way. (Shubh, repo audit 2026-08-01.)
 
 HEADERS = {
-    "Authorization": f"Bearer {PRAVA_API_KEY}",
+    "Authorization": f"Bearer {config.PRAVA_API_KEY}",
     "Content-Type": "application/json",
 }
 
@@ -68,7 +64,7 @@ async def _request(method: str, path: str, json_body: dict | None = None,
     their support needs to trace a failure, and it is useless if we discard it at the
     moment things go wrong.
     """
-    url = f"{PRAVA_API_BASE}{path}"
+    url = f"{config.PRAVA_API_BASE}{path}"
     try:
         async with httpx.AsyncClient(timeout=timeout or _TIMEOUT) as client:
             r = await client.request(method, url, headers=HEADERS, json=json_body)
@@ -119,9 +115,9 @@ async def charge_mandate(amount_usd: float, reference: str,
     authorization, so the caller's choice always wins over the environment.
     """
     amount = f"{amount_usd:.2f}"
-    target = mandate_id or PRAVA_MANDATE_ID
+    target = mandate_id or config.PRAVA_MANDATE_ID
 
-    if not PRAVA_LIVE_MODE:
+    if not config.PRAVA_LIVE_MODE:
         await asyncio.sleep(1.2)
         return {"_ok": True, "status": "awaiting_result", "simulated": True,
                 "mandateId": target,
@@ -142,7 +138,7 @@ async def report_charge(transaction_id: str, approved: bool = True,
     ``mandate_id`` must be the same mandate the charge was made against; reporting
     against a different one is not a settlement, it is a 404.
     """
-    if not PRAVA_LIVE_MODE:
+    if not config.PRAVA_LIVE_MODE:
         await asyncio.sleep(0.4)
         return {"_ok": True, "status": "completed", "simulated": True,
                 "transactionId": transaction_id}
@@ -154,7 +150,7 @@ async def report_charge(transaction_id: str, approved: bool = True,
     if amount_paid is not None:
         body["amount_paid"] = amount_paid
 
-    target = mandate_id or PRAVA_MANDATE_ID
+    target = mandate_id or config.PRAVA_MANDATE_ID
     return await _request(
         "POST", f"/v1/mandates/{target}/charges/{transaction_id}/report", body)
 
@@ -241,7 +237,7 @@ async def verify_credentials() -> dict:
 
     Never raises and never blocks startup: it reports, and the operator decides.
     """
-    if not PRAVA_LIVE_MODE:
+    if not config.PRAVA_LIVE_MODE:
         return {"_ok": True, "simulated": True,
                 "detail": "PRAVA_LIVE_MODE is off; no credentials needed"}
 
