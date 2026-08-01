@@ -486,6 +486,87 @@ export function getOutcomeCoverage(): OutcomeCoverage | null {
     .get() as OutcomeCoverage;
 }
 
+// ── Treasurer activity ───────────────────────────────────────────────────────
+
+/**
+ * What the Treasurer recorded about one top-up attempt.
+ *
+ * `treasury_events` is a lifecycle row, NOT a log stream: one row per attempt, moving
+ * from `pending` to a terminal status. There is no "scanning" event — a tick that
+ * decides nothing writes nothing — so the panel is quiet whenever the Treasurer is
+ * healthy, and says so rather than inventing heartbeat lines.
+ */
+export type TreasuryEvent = {
+  id: number;
+  wallet_id: string;
+  project_id: string | null;
+  provider: string | null;
+  mandate_id: string | null;
+  amount_usd: number;
+  /** pending | settled | dry_run | refused | failed */
+  status: string;
+  prava_txn_id: string | null;
+  error: string | null;
+  created_at: string;
+  settled_at: string | null;
+  /** Parsed `decision_inputs`; null when absent or unparseable. */
+  decision: TreasuryDecision | null;
+};
+
+export type TreasuryDecision = {
+  balance_usd?: number;
+  burn_usd_per_hour?: number;
+  runway_hours?: number | null;
+  threshold_hours?: number;
+  floor_usd?: number;
+  trigger?: string | null;
+  recommended_topup_usd?: number;
+};
+
+export function getTreasuryEvents(limit = 40): TreasuryEvent[] {
+  const conn = getDb();
+  if (!conn || !tableExists(conn, "treasury_events")) return [];
+
+  // The wallet join supplies project and provider, which the event row does not carry.
+  // LEFT JOIN, and guarded: a ledger can have treasury_events without wallets if the
+  // schema was created piecemeal, and losing the whole panel over a missing label
+  // would be the wrong trade.
+  const joined = tableExists(conn, "wallets");
+  const rows = conn
+    .prepare(
+      `SELECT e.id, e.wallet_id, e.mandate_id, e.amount_usd, e.status,
+              e.prava_txn_id, e.error, e.created_at, e.settled_at,
+              e.decision_inputs,
+              ${joined ? "w.project_id, w.provider" : "NULL AS project_id, NULL AS provider"}
+         FROM treasury_events e
+         ${joined ? "LEFT JOIN wallets w ON w.id = e.wallet_id" : ""}
+        ORDER BY e.id DESC
+        LIMIT ?`,
+    )
+    .all(limit) as (Omit<TreasuryEvent, "decision"> & {
+    decision_inputs: string | null;
+  })[];
+
+  return rows.map(({ decision_inputs, ...row }) => ({
+    ...row,
+    // decision_inputs is free-form JSON written by the treasurer. A shape change
+    // there must not take the dashboard down, so parsing failure degrades to null
+    // and the line that needs it is simply omitted.
+    decision: parseDecision(decision_inputs),
+  }));
+}
+
+function parseDecision(raw: string | null): TreasuryDecision | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") return parsed as TreasuryDecision;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export type LiveLogRow = {
   id: string;
   ts: string;

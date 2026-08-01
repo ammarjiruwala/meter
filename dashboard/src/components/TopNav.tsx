@@ -7,6 +7,7 @@ const LINKS = [
   { label: "Overview", href: "#top" },
   { label: "Budget", href: "#budget" },
   { label: "Balances", href: "#balances" },
+  { label: "Agent", href: "#agent" },
   { label: "Logs", href: "#logs" },
   { label: "Spend", href: "#spend" },
   { label: "Outcomes", href: "#outcomes" },

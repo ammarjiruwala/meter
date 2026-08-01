@@ -5,10 +5,12 @@ import { TeamBudgetCard } from "@/components/TeamBudgetCard";
 import { ProviderBalancesCard } from "@/components/ProviderBalancesCard";
 import { LiveLogsTable } from "@/components/LiveLogsTable";
 import { CostPerOutcomeTable } from "@/components/CostPerOutcomeTable";
+import { AgentLog } from "@/components/AgentLog";
 import {
   getTeamSpend,
   getBudgets,
   getBreakerState,
+  getTreasuryEvents,
   getOutcomeCosts,
   getOutcomeCoverage,
   getLiveLogs,
@@ -29,6 +31,7 @@ export default function Home() {
   const wallets = getProviderBalances();
   const budgets = getBudgets();
   const breaker = getBreakerState();
+  const treasuryEvents = getTreasuryEvents();
   const liveLogs = getLiveLogs();
   const outcomes = getOutcomeCosts();
   const outcomeCoverage = getOutcomeCoverage();
@@ -72,11 +75,15 @@ export default function Home() {
           <TeamBudgetCard scopes={budgets} />
         </div>
 
-        <div className="mb-[20px] grid grid-cols-1 gap-[20px] lg:grid-cols-[1fr_2fr]">
+        {/* Balances and the agent acting on them sit side by side: the panel on the
+            right is what the numbers on the left caused. */}
+        <div className="mb-[20px] grid grid-cols-1 gap-[20px] lg:grid-cols-2">
           <ProviderBalancesCard wallets={wallets} />
-          <div className="animate-in delay-5">
-            <TeamSpendTable rows={spend} />
-          </div>
+          <AgentLog initialEvents={treasuryEvents} />
+        </div>
+
+        <div className="animate-in delay-5 mb-[20px]">
+          <TeamSpendTable rows={spend} />
         </div>
 
         <div className="animate-in delay-6 mb-[20px]">
