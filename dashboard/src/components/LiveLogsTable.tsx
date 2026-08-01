@@ -2,13 +2,9 @@
 
 import { useEffect, useState } from "react";
 import type { LiveLogRow } from "@/lib/db";
+import { formatUsd } from "@/lib/format";
 
 const POLL_INTERVAL_MS = 3000;
-
-function formatUsd(n: number | null): string {
-  if (n === null) return "—";
-  return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
-}
 
 function statusLabel(status: number | null): { text: string; className: string } {
   if (status === null) return { text: "—", className: "text-zinc-500" };

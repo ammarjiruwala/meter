@@ -1,8 +1,5 @@
 import type { ProviderBalance } from "@/lib/wallets";
-
-function formatUsd(n: number): string {
-  return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
-}
+import { formatUsd, providerLabel } from "@/lib/format";
 
 export function ProviderBalancesCard({
   balances,
@@ -22,8 +19,8 @@ export function ProviderBalancesCard({
             key={b.provider}
             className="flex items-center justify-between px-4 py-3"
           >
-            <span className="text-sm capitalize text-zinc-700 dark:text-zinc-300">
-              {b.provider}
+            <span className="text-sm text-zinc-700 dark:text-zinc-300">
+              {providerLabel(b.provider)}
             </span>
             <span className="text-sm tabular-nums text-zinc-900 dark:text-zinc-100">
               {formatUsd(b.balance_usd)}
