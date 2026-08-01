@@ -526,6 +526,27 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         B11, and that data does not exist: nothing routes one prompt to two providers and there is
         no `model_efficiency` table). The Agent Activity panel that used to sit on this line
         **shipped** — see the "Treasurer Agent" panel entry above.
+    *   **PLANNED, NOT STARTED — a marketing homepage in front of the dashboard** (Tanay,
+        decided 2026-08-01). A flashy hero, a concise product overview, a "how to use it"
+        section, and an entry point into the dashboard. **Deliberately a different character
+        from the dashboard**: the homepage is creative and expressive, the dashboard stays
+        simple, productive and professional — an operations screen someone watches while
+        production is live is not the place to be impressive. Awaiting design direction; no
+        code written and nothing designed yet. Three consequences worth settling before it
+        starts, recorded here so they are decided rather than discovered:
+        *   **The dashboard currently owns `/`.** A homepage there moves it — `/dashboard` is
+            the obvious target. Small change, but it touches the nav and any shared link.
+        *   **Tokens should stay shared even though the characters differ.** Same canvas,
+            accent and type, varying only density and motion budget, or the two halves stop
+            reading as one product. A genuinely separate look for the homepage is a legitimate
+            choice, but it is a bigger one and needs saying explicitly.
+        *   **The animated background is mounted in the root layout**, so today it renders on
+            both. It likely belongs at full strength on the homepage and dialled down or absent
+            on the dashboard — drifting orbs behind live financial numbers work against the
+            "professional" half of this split.
+        *   The "how to use it" section can be **accurate rather than illustrative**: Meter
+            keys, `POST /v1/chat/completions`, `meter.yaml` ceilings and `POST /v1/annotate` all
+            work and are verified, which is unusual for a hackathon landing page.
 
 *   **Alerts (Poke / Linq): WORKING, VERIFIED LIVE.** A real iMessage was delivered end to end
     through the shipping code path on 2026-08-01 (Linq returned `202 Accepted`). `alerts/` — a sibling
