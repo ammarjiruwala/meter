@@ -246,6 +246,42 @@ def test_priors() -> None:
         check(f"{bucket:<12} priors yield a positive estimate", p.predicted_output_tokens > 0)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+def test_proxy_integration() -> None:
+    """The ESTIMATE seam in proxy/app.py, which must never fail a request."""
+    print("\nproxy integration")
+    import os, tempfile
+    os.environ.setdefault("METER_DB_PATH", str(Path(tempfile.mkdtemp()) / "t.db"))
+    from proxy.app import _predict
+
+    r = _predict({"messages": [{"role": "user", "content": "Write a Python function."}]},
+                 "gpt-4o", "openai")
+    check("predicts from an OpenAI messages body", r is not None and r.bucket == "code")
+
+    # Anthropic has no local tokenizer. Returning None is correct; raising would 500 a
+    # request that was going to succeed.
+    check("claude yields None rather than raising",
+          _predict({"messages": [{"role": "user", "content": "hi"}]},
+                   "claude-sonnet-5", "anthropic") is None)
+
+    check("no model -> None", _predict({"messages": []}, None, "openai") is None)
+    check("empty messages -> None", _predict({"messages": []}, "gpt-4o", "openai") is None)
+    check("malformed body -> None", _predict({"messages": "nope"}, "gpt-4o", "openai") is None)
+    check("unknown model -> None", _predict(
+        {"messages": [{"role": "user", "content": "hi"}]}, "llama-3-70b", "openai") is None)
+
+    # max_tokens must reach the predictor, since it is a hard provider-enforced bound.
+    capped = _predict({"messages": [{"role": "user", "content": "Write an essay. " * 50}],
+                       "max_tokens": 20}, "gpt-4o", "openai")
+    check("max_tokens is honoured through the seam",
+          capped is not None and capped.predicted_output_tokens == 20)
+
+    # The ledger must be able to store every field the seam produces.
+    from proxy.db import _REQUEST_COLUMNS
+    for col in ("predicted_output_tokens", "predicted_cost_usd", "bucket", "prediction_method"):
+        check(f"ledger column {col} exists", col in _REQUEST_COLUMNS)
+
+
 def main() -> int:
     for suite in (
         test_determinism,
@@ -257,6 +293,7 @@ def main() -> int:
         test_learner,
         test_accuracy_report,
         test_priors,
+        test_proxy_integration,
     ):
         suite()
     print(f"\n{PASSED} checks passed")
