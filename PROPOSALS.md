@@ -8,7 +8,7 @@ Each item states what is wrong or missing, why it matters, and a recommendation.
 applied to `README.md` / `CONTEXT.md` / `ARCHITECTURE.md` **only after a human approves
 them** — this file is the staging area, not the record.
 
-**Applied so far:** A1–A6, B2–B7, C1. Everything else is still a proposal; if you find a
+**Applied so far:** A1–A6, B1–B7, C1, C2. Everything else is still a proposal; if you find a
 new contradiction, add it here and raise it rather than editing one source doc to match
 another (the one you "fixed" may have been the correct one).
 
@@ -193,7 +193,7 @@ whose feature ceilings exceed their project's.
 
 Things no document specifies that an implementation is forced to decide anyway.
 
-### B1 — Nothing defines how a request picks its provider · OPEN (worked around)
+### B1 — Nothing defines how a request picks its provider · **RESOLVED — compat path verified live**
 
 `README.md` promises a one-line base-URL swap for "every model provider", but an Anthropic
 SDK calls `/v1/messages` with an `x-api-key` header and will never touch
@@ -202,12 +202,24 @@ SDK calls `/v1/messages` with an `x-api-key` header and will never touch
 **What Phase 1 shipped:** both routes mounted; routing by model prefix (`claude-*` →
 Anthropic), overridable with `X-Meter-Provider`.
 
-**Still open:** a `claude-*` model sent to `/v1/chat/completions` is currently forwarded to
-Anthropic's OpenAI-compatibility path. **That path has not been verified against the live
-API.** If it does not exist, that request 404s (passed through, not swallowed). Someone with
-an Anthropic key should confirm before the demo. The alternative — writing a bidirectional
-OpenAI↔Anthropic translator including for streams — is a multi-day job and would be the
-least reliable code in the build.
+**Verified live 2026-08-01.** `https://api.anthropic.com/v1/chat/completions` **exists**.
+Three independent signals, from a real key:
+
+| Probe | Result | Reading |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | request-level error, **not** `404` | the route is real |
+| `POST /v1/definitely-not-a-route` (control) | `404 not_found_error` | absent routes do 404, so the above is meaningful |
+| error envelope on the compat path | `{"error":{"code":…,"param":null,…}}` | **OpenAI's** shape, not Anthropic's `{"type":"error",…}` — this is a genuine compatibility layer |
+
+It also accepts **both** `x-api-key` and `Authorization: Bearer`, so the header substitution
+works whichever style the caller's SDK uses. Model-prefix routing is confirmed end to end:
+a `claude-*` model posted to `/v1/chat/completions` reached Anthropic (not OpenAI), the
+provider's status and body passed through unmodified, and every attempt produced a ledger row
+attributed to `anthropic` at zero cost — which also confirms the `ARCHITECTURE.md` §7
+provider-error behaviour against a real provider rather than a fake one.
+
+The alternative — writing a bidirectional OpenAI↔Anthropic translator including for streams —
+remains a multi-day job and is now definitively unnecessary.
 
 ### B2 — Nothing defines what the client puts in `Authorization` · **RESOLVED — README quickstart updated**
 
@@ -457,10 +469,48 @@ to provide — which is the one property `ARCHITECTURE.md` §3 is explicit about
 rates are already in the YAML as `cache_write_1h`, unused. Upgrade path is in the file's
 header comment; not worth building until someone actually runs 1-hour TTLs.
 
-### C2 — Anthropic OpenAI-compatibility path is unverified · OPEN
+### C2 — Anthropic OpenAI-compatibility path · **DONE — verified 2026-08-01**
 
-See B1. Needs one live call with a real Anthropic key.
+See B1. Confirmed to exist, with OpenAI-shaped errors and dual auth-header support.
 
 ### C3 — Prava sandbox rate limits are unknown · OPEN
 
 Blocks A3. Owner: Shivam.
+
+### C4 — The Anthropic account has a $0 credit balance · OPEN · **blocks a MUST BUILD item**
+
+Found while verifying B1. The key authenticates correctly — it is a real, working
+credential — but **every** call returns:
+
+```json
+{"type":"error","error":{"type":"invalid_request_error",
+ "message":"Your credit balance is too low to access the Anthropic API..."}}
+```
+
+This is not a proxy problem and nothing in the code needs to change; it is an account
+problem, and it blocks work that `CONTEXT.md` §3 lists under MUST BUILD:
+
+> **REAL LLM CALLS:** We WILL forward requests to real OpenAI/Anthropic APIs using a master
+> company key. We need real token usage data to train our predictive engine and prove it works.
+
+Concretely, with no credits:
+
+- **Ammar's predictive engine has nothing to calibrate against.** The output-token heuristic
+  and the predicted-vs-actual variance column both need real completions. Fake upstreams can
+  exercise the plumbing but cannot produce a defensible accuracy number.
+- **Cross-model efficiency analysis (PLAN.md Phase 3) cannot run.** It is defined as a real
+  prompt suite across GPT-4o and Claude; half of it has no provider.
+- **The pitch line "Across 50 test prompts, Claude was 15% more token-efficient for coding
+  tasks" has no data behind it.**
+
+**Recommendation:** put credits on the Anthropic account, or supply a funded key. Nothing
+downstream of real token usage can be finished until then. **Owner: whoever owns the
+account.**
+
+⚠ Note also that the key currently in `.env` was shared over chat and should be **rotated**
+once a funded credential is in place.
+
+*Silver lining for the demo narrative:* an account at zero balance returning errors on every
+request is, verbatim, the failure Meter exists to prevent — "when the balance hits zero at
+3am, production returns errors until a human wakes up." We have an unusually authentic
+screenshot of the problem statement.

@@ -105,10 +105,13 @@ def upstream_path(provider_name: str, shape: str) -> str:
     OpenAI<->Anthropic request/response translator — including for streams — is a
     multi-day job on its own and would be the least reliable code in the demo.
 
-    ⚠ This compatibility path has not been verified against the live Anthropic API. If
-    it 404s, the 404 is passed through to the caller unmodified rather than swallowed.
-    Callers wanting guaranteed Anthropic support should use ``/v1/messages``. See
-    PROPOSALS.md item B1.
+    ✅ Verified live 2026-08-01: ``https://api.anthropic.com/v1/chat/completions`` exists.
+    It returns a request-level error rather than the ``404 not_found_error`` a genuinely
+    absent route returns, and its error envelope carries OpenAI's ``code``/``param``
+    fields instead of Anthropic's ``{"type":"error",...}`` shape — which is what a real
+    compatibility layer looks like from the outside. It accepts both ``x-api-key`` and
+    ``Authorization: Bearer``, so the substitution in :func:`upstream_headers` works
+    whichever style the caller's SDK uses. See PROPOSALS.md B1/C2.
     """
     if shape == SHAPE_ANTHROPIC:
         return "messages"
