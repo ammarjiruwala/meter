@@ -232,6 +232,11 @@ async def _soft_budget_loop() -> None:
     Does no work at all when nothing is configured — no `meter.yaml` means no ceilings
     means the loop sleeps, which keeps this free for anyone who has not opted in.
     """
+    # Imported once, not per iteration. Kept local to the function rather than at module
+    # scope so `alerts` stays an optional dependency of the proxy, the same posture the
+    # predictor import takes at the top of this file.
+    from alerts import send_budget_alert
+
     ratio = config.BUDGET_SOFT_ALERT_RATIO
     while True:
         try:
@@ -245,8 +250,6 @@ async def _soft_budget_loop() -> None:
                         b["scope"], b["ratio"] * 100, b["spend_usd"], b["ceiling_usd"],
                     )
                     try:
-                        from alerts import send_budget_alert
-
                         send_budget_alert(b["scope"], b["spend_usd"], b["ceiling_usd"])
                     except Exception:
                         # An alerting failure must never take down the loop that finds
@@ -411,6 +414,10 @@ async def healthz() -> dict[str, Any]:
             "refresh_enabled": config.PREDICT_REFRESH_ENABLED,
             "learned_factors": _learned_factor_count(),
         },
+        # Whether the Treasurer has backed off the payment rail (PROPOSALS.md C3). A
+        # tripped Treasurer is not topping anything up, which is exactly the state you
+        # want visible on a liveness check rather than buried in a log line.
+        "treasurer": treasurer.trip_state(),
     }
 
 

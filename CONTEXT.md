@@ -99,7 +99,32 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Last updated:** 2026-08-02 — **Shubh's lane closed out completely (`shubh/final`).** The
+*   **Last updated:** 2026-08-02 — **Treasury hardening (Shubh, in Shivam's module, on
+    instruction while that lane was idle).** Three things, all in `treasury/`:
+    *   ✅ **M5 fixed.** `GET /treasury/assess` no longer creates a wallet — it uses a new
+        `db.wallet_id_for()` instead of `ensure_wallet`. The demo trap is gone: on a fresh
+        database, seeding $4.00 after an `assess` now yields **$4.00** rather than the $0.00 it
+        silently produced before. Verified on a running app.
+    *   ✅ **C3 implemented** — the recommendation from Shubh's own research, which nothing had
+        built. Reads retry a 429 with exponential backoff (`Retry-After` honoured *and*
+        clamped); **writes are never retried in the transport helper**, because resuming a
+        charge safely means `topup`'s pending-event path with the original idempotency key, not
+        a second POST hidden inside `_request`; and **`TRIES_EXHAUSTED` is a trip, not a blip**
+        — the allowance is spent, so the Treasurer backs off 300s and says so on
+        `/healthz .treasurer`. A demo box ticks every 3s, which is 1,200 calls an hour into a
+        throttled rail without this. ⚠ **The rate limit itself is still undocumented by Prava,
+        so A3's interval question remains open** — this makes either interval survivable, it
+        does not answer it.
+    *   ✅ **The Treasurer no longer does blocking SQLite on the proxy's event loop.**
+        `tick()`, `assess()`, `execute_topup()` and the mock-billing credit all now run their
+        database work in threads. There is one process and one event loop, so a background
+        top-up decision was previously able to stall **every in-flight request** — bounded at
+        five seconds by `busy_timeout` under write contention. Soak-measured worst-case
+        event-loop stall fell from 44ms to **19ms**, and is now structurally bounded rather
+        than merely observed to be small.
+    *   `test_treasury.py` is now **183 checks** (was 159).
+
+*   Prior entry — **Shubh's lane closed out completely (`shubh/final`).** The
     streaming soak landed (see the soak entry below), and the three remaining Shubh-owned
     proposals shipped: **D1** (a caller may supply `X-Meter-Request-Id`, so a retry overwrites
     its own ledger row instead of double-counting — `INSERT OR REPLACE` on a caller-supplied
@@ -111,13 +136,6 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     scope string. Refusals now also carry `X-Meter-Request-Id` — found because the live check
     caught a 429 with no id on it, and a breaker trip and a budget refusal both write ledger
     rows the id is supposed to point at. `test_proxy.py` is now **241 checks**.
-
-*   ⚠ **Demo trap found 2026-08-01 (Shubh, debug pass) — `PROPOSALS.md` M5, open, owner Shivam.**
-    `GET /treasury/assess` is documented "reads only" but **creates a wallet at $0.00**, and
-    `POST /wallets/seed` applies its balance on creation only. So on a fresh database, anything
-    that touches `/treasury/assess` first makes the seeded "$4.00 too low" demo state silently
-    no-op to $0.00 — no error, and a successful-looking response. **Rehearse with
-    `POST /wallets/seed?reset=true`** until it is fixed. Reproduced on a clean DB.
 
 *   Prior entry — **Sustained-load soak built and passing; overhead numbers corrected (Shubh).** `tests/load_soak.py` closes the last open item in the proxy lane. It
     found three real bugs in the test harnesses. The benchmark's fake upstream had been

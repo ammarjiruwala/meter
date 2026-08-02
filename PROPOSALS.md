@@ -687,7 +687,7 @@ header comment; not worth building until someone actually runs 1-hour TTLs.
 
 See B1. Confirmed to exist, with OpenAI-shaped errors and dual auth-header support.
 
-### C3 — Prava sandbox rate limits · OPEN — researched 2026-08-01: not documented anywhere
+### C3 — Prava sandbox rate limits · **HANDLED IN CODE 2026-08-02 (Shubh)** — the limit itself is still undocumented by Prava
 
 Blocks A3. Owner: Shivam.
 
@@ -706,6 +706,29 @@ mandate's per-cycle cap (see the mandate finding in CONTEXT.md §6a). Prava's ow
 recommend a **3s poll cadence** for session credentials — a precedent that supports the
 demo-box `TREASURER_INTERVAL_S=3`. Implement backoff on 429 and treat `TRIES_EXHAUSTED` as
 a loop trip rather than a retryable blip.
+
+**Both implemented 2026-08-02 (Shubh).** The number is still unknown — Prava has not
+published one — but an undocumented limit is precisely the kind you meet on stage, and
+nothing handled it at all before this.
+
+* **Reads retry with exponential backoff** (2 retries, 1s→2s, capped at 8s), because a GET
+  has no side effect and the worst case of a retry is a wasted second. `Retry-After` is
+  honoured if it ever appears and **clamped**, so a bad value cannot wedge the loop for
+  hours.
+* **Writes are never retried in the transport helper.** A 429 on a charge is a definite
+  refusal, but the safe way to resume a charge is `topup`'s pending-event path with its
+  original idempotency key — a second POST from inside `_request` would be a second charge
+  attempt wearing the same clothes.
+* **`TRIES_EXHAUSTED` is a trip, not a blip.** It means an allowance is *spent*, so
+  retrying sooner cannot refill it. It is flagged separately from an ordinary 429 and is
+  never retried, on any method.
+* **The Treasurer backs off for 300s** on either signal, mirroring the circuit breaker, and
+  reports it on `/healthz .treasurer`. Without this a demo box ticking every 3s hammers a
+  throttled rail 1,200 times an hour and turns a recoverable throttle into a dead one.
+
+15 checks across `test_treasury.py`. **A3 is still not settled** — this makes either
+interval survivable, but it does not tell us what the real limit is. Measuring it, or
+asking `support@prava.space`, is still open.
 
 ### C4 — Provider credit balances · **RESOLVED — both providers funded and verified live**
 
@@ -868,7 +891,7 @@ one-row-per-request contract.
 
 ---
 
-### M5 — `GET /treasury/assess` creates a wallet, which silently defeats `/wallets/seed` · OPEN — found 2026-08-01
+### M5 — `GET /treasury/assess` creates a wallet, which silently defeats `/wallets/seed` · **DONE — fixed 2026-08-02 (Shubh, with Shivam's lane idle)**
 
 `treasurer.assess()` documents itself as *"Would we top up right now, and why? Reads only —
 never spends."* The second half is true. The first is not: its first statement is
@@ -910,3 +933,12 @@ a fresh-looking database.
 
 Owner: Shivam (`treasury/`). Raised rather than patched because it is another lane's
 module and the fix is a behaviour change to a documented endpoint.
+
+**Fixed 2026-08-02 (Shubh), on instruction, with Shivam's lane idle.** `assess()` now calls
+a new `db.wallet_id_for()` — pure string work — instead of `ensure_wallet`, so the read
+endpoint reads. A project with no wallet reports `balance_usd: 0.0`, which is what having
+no wallet means, and the floor trigger still fires. `tick()` only ever assesses wallets
+`list_wallets()` returned, so nothing depended on the creation side effect. Verified on a
+running app against a fresh database: `/wallets` stays `[]` across an `assess`, and seeding
+$4.00 afterwards now yields $4.00 rather than the $0.00 it silently produced before.
+5 checks in `test_treasury.py`.
