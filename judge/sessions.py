@@ -35,9 +35,12 @@ from proxy import db
 
 log = logging.getLogger("meter.judge")
 
-# Every judge project id starts with this. `replace_budgets` uses it to leave judge
-# ceilings alone (PROPOSALS.md), and the dashboard uses it to keep judge traffic out of
-# the public "All traffic" view.
+# Every judge project id starts with this, so judge traffic is recognisable in the
+# ledger and can be kept out of the public "All traffic" view.
+#
+# It is *not* what exempts a judge's ceilings from `replace_budgets` — that keys off
+# `projects.environment = 'judge'`, so the rule is a property of the project rather than
+# a naming convention that a rename would silently break.
 PROJECT_PREFIX = "judge-"
 
 # How long a session lives. Long enough for an unhurried run of PITCH.md's six acts
@@ -54,6 +57,25 @@ DEFAULT_CEILING_USD_DAY = 0.50
 # A cap on how many proxied calls one session may make. PITCH.md's flow uses about ten;
 # this is the difference between a judge exploring and a judge looping our provider key.
 DEFAULT_CALL_CAP = 25
+
+# The feature tags the console offers, each with its own ceiling.
+#
+# They exist so the Team Spend card has something to render — `meter.yaml` names only
+# `demo-project`, so a judge inherits no ceilings at all and the card comes up empty
+# (EXPERIENCE.md #14, PITCH.md §2.3). The tags are the ones PITCH.md's script uses, and
+# they are the ones measured best in a real run: `sql-from-question` at 9% median error
+# and `pr-description` at 2%.
+#
+# Sizing is deliberately generous against a ~$0.0002 call. These are not there to bind —
+# the call cap does that — they are there so a judge can watch a real ceiling with real
+# spend measured against it.
+DEFAULT_FEATURE_CEILINGS: dict[str, float] = {
+    "ticket-summary": 0.05,
+    "sql-from-question": 0.05,
+    "pr-description": 0.05,
+    "changelog-entry": 0.05,
+    "commit-message": 0.05,
+}
 
 _lock = threading.Lock()
 
@@ -122,6 +144,7 @@ def create(
     ttl_s: int = SESSION_TTL_S,
     breaker_floor_usd: float = DEFAULT_BREAKER_FLOOR_USD,
     ceiling_usd_day: float = DEFAULT_CEILING_USD_DAY,
+    feature_ceilings: dict[str, float] | None = None,
     call_cap: int = DEFAULT_CALL_CAP,
 ) -> Session:
     """Provision a fresh, isolated tenant for one judge.
@@ -138,7 +161,12 @@ def create(
     path honours a judge's floor without a single extra query. The copy in
     `judge_sessions` is what the console reports back; `projects` is what enforces it.
     """
+    from proxy import budget
+
     conn = db.connect()
+    feature_ceilings = (
+        DEFAULT_FEATURE_CEILINGS if feature_ceilings is None else feature_ceilings
+    )
 
     project_id = PROJECT_PREFIX + secrets.token_hex(8)
     token = "js_" + secrets.token_urlsafe(24)
@@ -151,10 +179,22 @@ def create(
 
     with _lock:
         conn.execute(
-            "INSERT INTO projects (id, name, environment, breaker_floor_usd)"
-            " VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-            (project_id, display_name or project_id, "judge", breaker_floor_usd),
+            # `environment = 'judge'` is load-bearing, not a label: `replace_budgets`
+            # keys the wipe exemption off it, so without it this project's ceilings are
+            # erased at the next boot.
+            "INSERT INTO projects "
+            "(id, name, environment, breaker_floor_usd, ceiling_usd_day, sort_order)"
+            " VALUES (?, ?, ?, ?, ?, 0) ON CONFLICT DO NOTHING",
+            (project_id, display_name or project_id, "judge", breaker_floor_usd,
+             ceiling_usd_day),
         )
+        for order, (feature, feature_ceiling) in enumerate(feature_ceilings.items()):
+            conn.execute(
+                "INSERT INTO feature_budgets "
+                "(project_id, feature, ceiling_usd_day, sort_order) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT DO NOTHING",
+                (project_id, feature, feature_ceiling, order),
+            )
         conn.execute(
             "INSERT INTO meter_keys (id, project_id, hash) VALUES (?, ?, ?)"
             " ON CONFLICT DO NOTHING",
@@ -170,8 +210,15 @@ def create(
         )
         conn.commit()
 
-    log.info("judge session created: project=%s ttl=%ss cap=%s",
-             project_id, ttl_s, call_cap)
+    # Bind the ceilings in-process now. `_ceilings` is read once at boot, so without
+    # this the judge's very first request is unenforced until something restarts.
+    budget.register_ceilings(
+        {(project_id, None): ceiling_usd_day,
+         **{(project_id, f): c for f, c in feature_ceilings.items()}}
+    )
+
+    log.info("judge session created: project=%s ttl=%ss cap=%s ceiling=$%s",
+             project_id, ttl_s, call_cap, ceiling_usd_day)
     return Session(
         token=token, project_id=project_id, key_id=key_id, meter_key=raw_key,
         display_name=display_name, email=email, created_at=created_at,

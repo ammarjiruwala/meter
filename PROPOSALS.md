@@ -1056,3 +1056,35 @@ considered and passed over, because it makes `replace_budgets` mean something su
 different from what it says.
 
 Owner: Shubh (`replace_budgets` and the budget model) + Ammar (the judge flow).
+
+**DECIDED 2026-08-03 (Ammar): option 1, keyed on `environment`.** Option 2 was chosen
+first and then reversed on evidence, which is worth recording because the reasoning above
+is incomplete rather than wrong.
+
+`dashboard/src/lib/db.ts` reads `projects.ceiling_usd_day` and `feature_budgets`
+**directly**, in both `getBudgets` and `getHeadlineMetrics`. So holding judge ceilings
+anywhere else means changing two dashboard queries as well as the proxy, and the Team
+Spend card renders empty until all three agree. Option 2 was picked as the smaller change
+and is in fact the larger one — the recommendation above was written without checking what
+the dashboard actually queries.
+
+So judge ceilings live in the ordinary tables, and `replace_budgets` exempts them:
+
+```sql
+DELETE FROM feature_budgets WHERE project_id NOT IN
+    (SELECT id FROM projects WHERE environment = 'judge');
+UPDATE projects SET ceiling_usd_day = NULL, sort_order = NULL
+    WHERE environment IS DISTINCT FROM 'judge';
+```
+
+Keyed on `environment = 'judge'`, **not** the `judge-` id prefix. The objection to option 1
+was that it puts a magic string in a budget function; `environment` is an existing column
+that already describes what a project *is*, so the exemption is a property of the project
+rather than a naming convention a rename would silently break. That is option 3's
+discriminator without option 3's new column.
+
+The rule this establishes, stated so the next person does not have to infer it:
+**meter.yaml is the source of truth for the ceilings it declares, and it cannot declare
+one for a tenant that did not exist when it was written.** `budget.register_ceilings` only
+ever adds, so a runtime caller can never widen or remove a ceiling that was reviewed in a
+pull request.

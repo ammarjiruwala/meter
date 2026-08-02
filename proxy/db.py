@@ -664,8 +664,26 @@ def replace_budgets(budgets: dict[str, tuple[float | None, dict[str, float | Non
     # and commit on its own. Silently non-atomic, which is the failure this docstring
     # exists to rule out.
     with _lock, pg.transaction() as tx:
-        tx.execute("DELETE FROM feature_budgets")
-        tx.execute("UPDATE projects SET ceiling_usd_day = NULL, sort_order = NULL")
+        # Runtime-owned projects are exempt from the wipe. meter.yaml is the source of
+        # truth for ceilings *it declares*, and it cannot declare a ceiling for a tenant
+        # that did not exist when the file was written — a judge session mints its project
+        # at runtime, from someone who cannot open a pull request (PROPOSALS.md M8).
+        #
+        # Without this, a judge's ceilings survive exactly until the next boot, and on
+        # Render's free tier a spin-down guarantees one within fifteen idle minutes: they
+        # come back to an empty Team Spend card and unenforced limits, with nothing
+        # anywhere reporting a problem.
+        #
+        # Keyed on `environment` rather than an id prefix, so the rule is a property of
+        # the project rather than a naming convention someone can break by renaming.
+        tx.execute(
+            "DELETE FROM feature_budgets WHERE project_id NOT IN "
+            "(SELECT id FROM projects WHERE environment = 'judge')"
+        )
+        tx.execute(
+            "UPDATE projects SET ceiling_usd_day = NULL, sort_order = NULL "
+            "WHERE environment IS DISTINCT FROM 'judge'"
+        )
         for order, (project_id, (ceiling, features)) in enumerate(budgets.items()):
             tx.execute(
                 "INSERT INTO projects (id, name, ceiling_usd_day, sort_order) "

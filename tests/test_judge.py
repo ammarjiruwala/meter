@@ -332,6 +332,76 @@ def test_floor_actually_decides_the_trip() -> None:
     check("so is the spend", "spend=$0.0004/" in described, described)
 
 
+# ── Ceilings ─────────────────────────────────────────────────────────────────
+
+def test_ceilings_are_written_where_the_dashboard_reads() -> None:
+    print("\na judge gets ceilings in the tables the dashboard queries")
+    s = sessions.create(ceiling_usd_day=0.50)
+    conn = db.connect()
+
+    project = dict(conn.execute(
+        "SELECT * FROM projects WHERE id = ?", (s.project_id,)).fetchone())
+    check("the project carries its own ceiling", project["ceiling_usd_day"] == 0.50)
+    check("and is marked a judge tenant", project["environment"] == "judge")
+
+    features = [dict(r) for r in conn.execute(
+        "SELECT * FROM feature_budgets WHERE project_id = ? ORDER BY sort_order",
+        (s.project_id,)).fetchall()]
+    check("every offered feature has a ceiling",
+          len(features) == len(sessions.DEFAULT_FEATURE_CEILINGS))
+    check("the tags are the ones the console offers",
+          {f["feature"] for f in features} == set(sessions.DEFAULT_FEATURE_CEILINGS))
+    check("sort_order is set, so the cards do not reshuffle between reloads",
+          all(f["sort_order"] is not None for f in features))
+
+    loaded = db.load_ceilings()
+    check("load_ceilings picks up the project ceiling",
+          loaded.get((s.project_id, None)) == 0.50)
+    check("and the feature ceilings",
+          loaded.get((s.project_id, "ticket-summary")) == 0.05)
+
+
+def test_a_boot_does_not_wipe_judge_ceilings() -> None:
+    """PROPOSALS.md M8. On Render's free tier a spin-down guarantees a boot."""
+    print("\nreloading meter.yaml leaves a judge's ceilings alone")
+    from proxy import budget
+
+    s = sessions.create(ceiling_usd_day=0.50)
+    db.seed_keys("mk_wipe_probe:file-project:dev")
+
+    # Exactly what `lifespan` does at every boot: rebuild every ceiling from the file.
+    db.replace_budgets({"file-project": (3.00, {"ticket-summary": 0.25})})
+
+    after = db.load_ceilings()
+    check("the judge's project ceiling survived", after.get((s.project_id, None)) == 0.50)
+    check("the judge's feature ceilings survived",
+          after.get((s.project_id, "ticket-summary")) == 0.05)
+    check("the file's own ceilings are applied",
+          after.get(("file-project", None)) == 3.00)
+
+    # And the property that made the wipe correct in the first place must still hold:
+    # a ceiling removed from the file must stop being enforced.
+    db.replace_budgets({"file-project": (3.00, {})})
+    reloaded = db.load_ceilings()
+    check("a ceiling deleted from meter.yaml stops being enforced",
+          ("file-project", "ticket-summary") not in reloaded)
+    check("while the judge is still untouched",
+          reloaded.get((s.project_id, "ticket-summary")) == 0.05)
+
+    # `_ceilings` is loaded once at boot, so a session minted afterwards is only
+    # enforced because `create()` registered it in-process. Without that the judge's
+    # first request bypasses every ceiling they were just told they have.
+    active = budget.active_ceilings()
+    check("register_ceilings binds the project ceiling in-process",
+          active.get(f"project:{s.project_id}") == 0.50, str(active)[:200])
+    check("and the feature ceilings",
+          active.get(f"feature:{s.project_id}/ticket-summary") == 0.05)
+
+    budget.register_ceilings({(s.project_id, None): 0.0})
+    check("a runtime caller cannot widen a ceiling to zero",
+          budget.active_ceilings().get(f"project:{s.project_id}") == 0.50)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -348,6 +418,8 @@ def main() -> int:
             test_call_cap_counts_down,
             test_breaker_floor_is_per_project,
             test_floor_actually_decides_the_trip,
+            test_ceilings_are_written_where_the_dashboard_reads,
+            test_a_boot_does_not_wipe_judge_ceilings,
         ):
             suite()
     finally:
