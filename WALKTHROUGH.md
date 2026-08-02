@@ -43,8 +43,14 @@ is another 2–3 minutes the first time.
 ## 1. Prerequisites
 
 - Python 3.12+ and Node 20+
+- **A bash-capable shell.** Every command here is bash. On macOS/Linux you already have
+  one. **On Windows use Git Bash** (ships with Git for Windows) or WSL — PowerShell will
+  not run `./scripts/try.sh`, and it fails *silently*, with no output and no error. See
+  [Windows notes](#windows-notes) before starting.
 - `DATABASE_URL` for the shared Supabase ledger — ask Shivam
-- An OpenAI key with credit (Tier 1+; the free tier's 50 requests/day will not survive §4)
+- An OpenAI key. **A free-tier key is fine** — see the box above; the core walkthrough is
+  17 requests. Pace yourself at roughly one command every 20 seconds and skip the
+  `demo_live.py --n 2` sweep in §5.
 
 Optional, needed only for the section that uses them:
 
@@ -52,6 +58,31 @@ Optional, needed only for the section that uses them:
 | --- | --- |
 | §6 iMessage alert | `POKE_API_KEY`, `POKE_CTO_PHONE` — ask Tanay |
 | §8 Prava top-up | `PRAVA_API_KEY` + an approved mandate — Shivam |
+
+### Windows notes
+
+Everything works on Windows, but four commands differ. Skip this section on macOS/Linux.
+
+| The guide says | On Windows |
+| --- | --- |
+| `./scripts/try.sh <tag> "<prompt>"` | **Run it from Git Bash.** PowerShell does not execute `.sh` and gives **no output and no error** — it looks like the product silently did nothing. |
+| `curl -s ...` | `curl.exe -s ...` — in PowerShell, `curl` is an alias for `Invoke-WebRequest`, so `-s` is rejected with a confusing *"missing mandatory parameters: Uri"*. |
+| `curl ... \| python3 -m json.tool` | Use `Invoke-RestMethod <url> \| ConvertTo-Json`. Piping to a native command inserts a UTF-8 BOM and `json.tool` fails on it. |
+| `VAR=value python -m uvicorn ...` | `$env:VAR = "value"; python -m uvicorn ...` — **in the same command**, since `$env:` does not survive into a new shell. |
+| `source .venv/bin/activate` | `.venv\Scripts\Activate.ps1`, or skip the venv entirely if your system Python already has the dependencies. |
+
+Also: `Ctrl-C` is not available if you started the proxy in the background. Kill it by port:
+
+```powershell
+$pids = (Get-NetTCPConnection -LocalPort 8080 -State Listen).OwningProcess
+Stop-Process -Id $pids -Force
+```
+
+> ⚠ **After any "restart with this setting" step, check the value actually changed** —
+> not just that `/healthz` answers. If the restart fails to bind the port, the *old*
+> proxy keeps serving and `/healthz` still reports `"status": "ok"` with the old
+> settings. In §6 that means the breaker never trips and it looks like the feature is
+> broken.
 
 ---
 
@@ -129,8 +160,12 @@ curl -s localhost:8080/healthz | python3 -m json.tool
 > reason this walkthrough "does not work". Fix it with `python scripts/seed_demo.py`,
 > which loads 1,224 real observations, then restart the proxy.
 
-Open **http://localhost:3000**. You should see spend, a Team Budget card, a Live Logs
-table, and a Treasurer Agent panel.
+Open **http://localhost:3000/dashboard** — note the path. `/` is the marketing homepage
+since the two-root-layout split; both return 200, so landing on the wrong one shows you a
+product page rather than an error.
+
+You should see **Team Spend**, **Live Requests**, **Cost per Outcome**, and the
+**Treasurer** panel.
 
 ---
 
@@ -163,7 +198,7 @@ and an actor, **estimated before the call**, forwarded, captured, and priced.
 `history factor 0.67` means the learned correction was applied. **`1.00` means no
 history for that tag** — the prediction is uncorrected and will be much worse.
 
-Watch **http://localhost:3000** — the row appears in Live Logs within 3 seconds, and
+Watch **http://localhost:3000/dashboard** — the row appears in Live Requests within 3s, and
 "total requests" increments.
 
 ---
@@ -273,7 +308,10 @@ BREAKER_WINDOW_USD=0.0001 python -m uvicorn proxy.app:app --port 8080
 > This is a **runtime override**. `.env` still says `$20`, so restarting without it
 > returns you to production settings. Write the command down before demo day.
 
-Now run these four in quick succession:
+Now run these four. **Spacing them ~15 seconds apart is fine** — the floor accumulates
+across the whole 5-minute window, so "as fast as possible" is not required, and on a
+free-tier key firing them back to back risks OpenAI's own `429` masquerading as the
+breaker (see the box at the top of this guide for how to tell them apart).
 
 ```bash
 ./scripts/try.sh ticket-summary "Summarise this support ticket in two sentences for the on-call engineer: The auth gateway leaks file descriptors. Users report it started this morning. Logs point at the connection pool. We saw OOMKilled at 512Mi in the pod events."
