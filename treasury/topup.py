@@ -56,8 +56,25 @@ async def execute_topup(
     provider: str | None = None,
     amount_usd: float = 50.00,
     decision_inputs: dict[str, Any] | None = None,
+    dry_run: bool | None = None,
 ) -> dict[str, Any]:
-    """Run one top-up. Safe to retry — see the pending-event handling below."""
+    """Run one top-up. Safe to retry — see the pending-event handling below.
+
+    `dry_run` overrides `TREASURER_DRY_RUN` for this one call, and defaults to it.
+
+    It exists because the global is the wrong granularity, in a way that only became
+    visible once strangers could reach this. WALKTHROUGH.md §B5 tells every judge to
+    `POST /treasury/tick` and promises they will see it stop at `dry_run`. Turning the
+    global off to let one judge charge their own card would mean the next judge to follow
+    the walkthrough charges *ours* — and Prava allows one purchase per mandate per cycle,
+    so the first would succeed and everyone after would collect a Visa decline.
+
+    So the global stays on, permanently, and the only caller that passes `False` is the
+    judge console — where the judge supplied their own merchant key, the charge lands on
+    their own account, and a human just pressed the button. Same reasoning as
+    `prava.use_api_key`: process-wide is not a safe unit for a decision about whose money
+    moves.
+    """
     provider = provider or config.TREASURER_PROVIDER
     wallet_id = await asyncio.to_thread(db.ensure_wallet, project_id, provider)
 
@@ -133,14 +150,15 @@ async def execute_topup(
             mandate_id=mandate["id"], decision_inputs=decision_inputs,
         )
 
-    if config.TREASURER_DRY_RUN:
+    if config.TREASURER_DRY_RUN if dry_run is None else dry_run:
         await asyncio.to_thread(db.settle_event, event["id"], "dry_run")
         return {
             "ok": False,
             "reason": "dry_run",
             "event_id": event["id"],
             "would_have_charged": amount_usd,
-            "hint": "set TREASURER_DRY_RUN=false to move real money",
+            "hint": "set TREASURER_DRY_RUN=false to move real money, or run this from "
+                    "the judge console with your own Prava merchant key",
         }
 
     # ── Charge the mandate ───────────────────────────────────────────────────
