@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import type { BreakerState } from "@/lib/db";
 
 const LINKS = [
@@ -74,10 +75,13 @@ export function TopNav({ breaker }: { breaker: BreakerState }) {
         WebkitBackdropFilter: "blur(20px) saturate(1.3)",
       }}
     >
-      <div className="flex items-center gap-[10px]">
+      {/* The homepage links here; this closes the loop. Next turns this into a full
+          page load by itself, because the two sides are separate root layouts —
+          which is exactly what we want, so no stylesheet crosses over. */}
+      <Link href="/" className="flex items-center gap-[10px]">
         <span className="live-dot h-[8px] w-[8px]" aria-hidden="true" />
         <span className="t-heading-sm text-text-primary">Meter</span>
-      </div>
+      </Link>
 
       {/* Hidden below 640px — a hamburger is out of scope, and six cramped links
           are worse than none on a phone. */}
