@@ -14,12 +14,16 @@ dashboard two disagreeing sources for the same number. So this module adds only 
 does not exist yet: the three treasury tables. ``model_efficiency`` belongs to Ammar's
 cross-model analysis and is deliberately not claimed here.
 
-**Concurrency.** This module opens its own connection to the same file, which makes the
-Treasurer the second writer alongside the proxy (``dashboard/src/lib/db.ts`` still reads
-it read-only, and that stays true). WAL supports that: readers never block, and writers
-serialise. ``busy_timeout`` is set so a concurrent writer waits rather than raising
-"database is locked", and every write below is a single short statement — no transaction
-is held open across a network call to Prava.
+**Concurrency.** The Treasurer is the second writer alongside the proxy
+(``dashboard/src/lib/db.ts`` still reads read-only, and that stays true). On Postgres that
+needs no arrangement: both writers borrow their own pooled connection and MVCC keeps
+readers from blocking writers. The ``busy_timeout`` and WAL notes that used to be here
+described SQLite, where one file with one connection made concurrent access something to
+manage — see the note on ``connect()`` below.
+
+What has *not* changed, and still matters: every write below is a single short statement,
+and no transaction is held open across a network call to Prava. Holding one across a
+charge would pin a pooled connection for the duration of a payment round trip.
 
 Owner: Shivam (Payments & Agent).
 """

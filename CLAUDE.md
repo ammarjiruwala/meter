@@ -28,9 +28,9 @@ pip install -r requirements.txt
 cp .env.example .env                            # provider + Prava keys, DATABASE_URL; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
-python tests/test_proxy.py                      # 241 checks, no framework, ~3s
-python tests/test_predictor.py                  # 130 checks, same convention
-python tests/test_treasury.py                   # 159 checks (treasury/)
+python tests/test_proxy.py                      # 249 checks, no framework, ~3s
+python tests/test_predictor.py                  # 131 checks, same convention
+python tests/test_treasury.py                   # 182 checks (treasury/)
 python tests/test_alerts.py                     # 46 checks (alerts/) — needs Python 3.10+
 ```
 
@@ -125,6 +125,11 @@ Consequences worth knowing before you change anything:
   `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without the ALTER, anyone whose
   proxy has not restarted gets a failing INSERT — and since the database is shared now, that is
   everyone at once rather than one machine.
+- **Do not audit the route table with `app.routes`.** This FastAPI version stores each
+  `include_router` call as a single opaque `_IncludedRouter` entry rather than flattening
+  the sub-routes, so `app.routes` shows 11 entries for a 21-route app and the entire
+  treasury surface looks missing. `curl localhost:8080/openapi.json | jq '.paths|keys'` is
+  the source of truth. Cost an hour chasing a bug that did not exist.
 - **Budgets live in `meter.yaml` at the repo root** (see `meter.yaml.example`), not in `.env`. The
   loader *replaces* rather than upserts, because a ceiling deleted from the file must stop being
   enforced. No file means no ceilings and no added latency.

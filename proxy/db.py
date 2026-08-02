@@ -51,6 +51,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import config, pg
 
@@ -220,6 +221,31 @@ CREATE INDEX IF NOT EXISTS idx_breaker_open ON breaker_events(scope) WHERE close
 
 
 _schema_ready = False
+
+
+def ledger_target() -> str:
+    """Where the ledger actually is, safe to log — ``host:port/database`` with a schema.
+
+    The boot line used to print `config.DB_PATH`, which since the Postgres port has been
+    a path to a file that does not exist. "ledger ready at meter.db" on a deployed proxy
+    sends whoever is debugging it looking for a local file, which is the opposite of
+    useful at the moment they most need the truth.
+
+    Credentials are stripped rather than trusted to be absent: `DATABASE_URL` carries the
+    password, and a boot line is exactly the kind of thing that gets pasted into a chat.
+    """
+    raw = config.DATABASE_URL
+    if not raw:
+        return "<no DATABASE_URL>"
+    try:
+        parts = urlsplit(raw)
+        where = parts.hostname or "?"
+        if parts.port:
+            where += f":{parts.port}"
+        where += parts.path or ""
+    except ValueError:
+        return "<unparseable DATABASE_URL>"
+    return f"{where} (schema {config.DB_SCHEMA})"
 
 
 def connect() -> pg._Connection:

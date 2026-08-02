@@ -5,6 +5,13 @@ Here is the finalized, personalized 48-hour battle plan with tasks assigned to S
 > as originally written, marked up so it is obvious what is left. Where the built thing deviates
 > from what this plan asked for, the mark says so rather than pretending the original line shipped.
 >
+> ⚠ **The completed entries below describe the system as it was when each item shipped, and the
+> ledger has since moved from SQLite to Postgres (2026-08-02, Shivam).** So "the same `meter.db`",
+> "WAL makes concurrent reads safe" and "one SQLite connection behind a lock" were accurate when
+> written and are not now. They are left as written rather than back-edited, because this file is
+> the record of what was delivered against the plan — **`CONTEXT.md` §6a is where current reality
+> lives.** Nothing reads a local database file any more; everything goes through `proxy/pg.py`.
+>
 > **Left to do:** cross-model routing + the efficiency data it feeds (Ammar, Phases 2–4) and the
 > dashboard view on top of it (Tanay); demo video and pitch script (Tanay, Phase 4).
 > **Shubh's lane is closed and now empty** — the sustained-load soak landed 2026-08-01, the

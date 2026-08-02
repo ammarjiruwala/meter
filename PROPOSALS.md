@@ -942,3 +942,68 @@ no wallet means, and the floor trigger still fires. `tick()` only ever assesses 
 running app against a fresh database: `/wallets` stays `[]` across an `assess`, and seeding
 $4.00 afterwards now yields $4.00 rather than the $0.00 it silently produced before.
 5 checks in `test_treasury.py`.
+
+---
+
+### M6 — `PRAVA_LIVE_MODE=false` does not stop calls to Prava · OPEN — found 2026-08-02
+
+The flag reads as "simulate instead of transacting", and `CONTEXT.md` §6a relies on it in
+exactly that sense: *"Demo runs on `PRAVA_LIVE_MODE=False` until this clears"*, written
+during the sandbox outage. It does not do that.
+
+Gated by the flag (return a simulated response, no network):
+
+* `charge_mandate`
+* `report_charge`
+* `verify_credentials`
+
+**Not gated — these always call the live sandbox, whatever the flag says:**
+
+* `list_mandates` → `GET /v1/mandates`
+* `create_mandate_session` → **`POST /v1/sessions`**
+
+Observed on a booted proxy with `PRAVA_LIVE_MODE=false` set explicitly: both endpoints
+went out and came back `401 AUTH_1001` against the placeholder key, and `GET /mandates`
+answered **503**.
+
+Two consequences, and the second is the one that matters:
+
+1. **The outage workaround does not work.** With the sandbox down, `/mandates` still fails
+   and the dashboard's mandate panel still breaks, despite the flag being set precisely to
+   avoid that.
+2. **`POST /v1/sessions` is the one endpoint Prava documents a throttle on** — `429
+   TRIES_EXHAUSTED` (C3). So the call that can exhaust the allowance is also the one the
+   flag does not restrain. C3's trip logic catches the exhaustion afterwards; it would be
+   better not to spend the allowance in the first place.
+
+**Recommendation:** make the flag mean what it says — gate all five, returning simulated
+mandate lists and sessions the way `charge_mandate` already returns `simulated: True`.
+⚠ **This is a behaviour change with a real edge:** a simulated `/mandates` would show
+mandates that do not exist, which could mislead someone mid-demo. So the simulated
+response must be *visibly* simulated, exactly as the charge path is. Not applied
+unilaterally for that reason.
+
+Owner: Shivam (`treasury/`).
+
+### M7 — `POST /mandates/create` and `/mandates/sync` are unauthenticated writes · OPEN — found 2026-08-02
+
+B18 shipped "auth on the money moves only", and `/mandates/create` genuinely moves no
+money — it returns an approval URL and authorizes nothing until a human completes a
+passkey. By that reading it is correctly open.
+
+But it is a **write that spends someone else's quota**: it calls `POST /v1/sessions`,
+which is the single endpoint Prava documents a `429 TRIES_EXHAUSTED` throttle on (C3), and
+it inserts a pending row in `mandates`. Verified unauthenticated on a running proxy: both
+return `200` with no key.
+
+So an unauthenticated caller can exhaust the sandbox allowance the Treasurer depends on,
+and fill the mandates table with pending rows. On a public URL that is a denial of the
+money rail, not a leak of it — which B18's "read-only routes stay open" framing did not
+consider, because at the time these routes did not consume a metered third-party resource.
+
+**Recommendation:** put `Depends(_authed_key)` on both. ⚠ **It breaks the self-serve
+onboarding flow** if the dashboard calls `/mandates/create` from the browser without a key
+— `CONTEXT.md` §6a describes it as "the two-call *Connect your card* flow" for Tanay. So
+the fix is one line plus a decision about who calls it. Not applied unilaterally.
+
+Owner: Shubh (B18's author) + Tanay (the flow). Cheap either way; needs the decision first.
