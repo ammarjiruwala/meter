@@ -23,6 +23,13 @@ services:
     region: singapore
     healthCheckPath: /healthz
 
+    # DO NOT SCALE THIS PAST ONE INSTANCE, on any plan. proxy/budget.py serialises
+    # reservations with an in-process asyncio.Lock (PROPOSALS.md A5), so two instances
+    # means two independent locks both seeing the same headroom -- the daily ceiling
+    # silently stops holding, which is the exact concurrency hole authorize/capture
+    # exists to close. Redis would fix it and is not built. The free plan is single
+    # instance anyway; this note is for whoever upgrades the plan later.
+
     envVars:
       # Set these in the Render dashboard, NOT here. `sync: false` means "prompt me,
       # never store it in git".
@@ -51,3 +58,9 @@ services:
         value: "true"
       - key: TREASURER_INTERVAL_S
         value: "30"
+
+      # meter.yaml ships in the image, but the working directory is /app.
+      - key: METER_YAML_PATH
+        value: /app/meter.yaml
+      - key: PRICING_VERSION
+        value: "2026-08-01"

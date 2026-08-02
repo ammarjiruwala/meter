@@ -93,6 +93,25 @@ with psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=15) as c:
 **Expect:** a row count in the thousands. If it hangs or fails to resolve, re-read the
 box above.
 
+### Lock the ledger (once per database)
+
+Supabase exposes every table in `public` through its API, and the `anon` role behind the
+publishable key arrives with **full read AND write access** — including `TRUNCATE` on
+`requests`, `wallets` and `mandates`. That key is meant to be shipped in browsers; it is
+only safe to publish because row-level security is supposed to be the gate.
+
+```bash
+python scripts/secure_ledger.py --check   # report only
+python scripts/secure_ledger.py           # enable RLS, revoke the API-role grants
+```
+
+It costs the application nothing: the proxy and dashboard connect as `postgres`, which
+owns every table and bypasses RLS, so their access is unchanged. It only closes the door
+on the API roles, which we never use.
+
+**Re-run it after any schema change.** `proxy/db.py` runs `CREATE TABLE IF NOT EXISTS`
+at boot, and a new table arrives with RLS *off*.
+
 ---
 
 ## 3. Start the stack

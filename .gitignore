@@ -24,3 +24,7 @@ meter.db-shm
 # of waiting rather than a re-run. Committing also pins the exact train/val/test
 # partition, which is what makes accuracy numbers comparable across sessions.
 # The same applies to data/templated/ — those are 200 calls of real money.
+
+# The dashboard's own DATABASE_URL. Same secret as the root .env, different pooler port.
+dashboard/.env.local
+DEPLOY-SECRETS.local.txt
