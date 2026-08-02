@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
-"""Sustained-load soak — two writers on one SQLite file, under concurrency.
+"""Sustained-load soak — two writers on one ledger, under concurrency.
 
 `tests/bench_overhead.py` measures a single client sending one request at a time with
 no Treasurer running. That is a latency floor, not a concurrency test. This is the other
 half: N concurrent clients driving the full enforced path while the Treasurer loop writes
-`treasury_events` to the *same* `meter.db`, for a sustained period.
+`treasury_events` to the *same* database, for a sustained period.
 
-It exists to test a claim the docs make but nothing measured. CLAUDE.md says WAL plus
-`busy_timeout` covers two writers *because* every treasury write is a single statement
-with no transaction held open across a network call. That is an argument. This script is
-the evidence:
+It exists to test a claim the docs make but nothing measured. Under SQLite the claim was
+that WAL plus `busy_timeout` covers two writers *because* every treasury write is a
+single statement with no transaction held open across a network call. On Postgres the
+lock contention that argument was about is gone — row-level locking and MVCC replace it
+— but the property the harness measures is unchanged and the *new* failure mode it now
+covers is pool exhaustion: `DB_POOL_MAX` connections shared between N request coroutines
+and the Treasurer, where a leaked or long-held connection shows up as `PoolTimeout`
+rather than `database is locked`. Either way:
 
   1. **No dropped ledger rows.** Every 2xx must leave a row in `requests`. A missing row
      understates spend, the one direction of error a budget tool cannot have.
-  2. **No `database is locked`.** `busy_timeout` should make a losing writer wait, not
-     raise. Any occurrence means the timeout is too low or a transaction is held open.
+  2. **No lock or pool errors.** A losing writer should wait, not raise. Any occurrence
+     means the pool is too small or a transaction is held open across an await.
   3. **The Treasurer actually wrote.** A soak where the second writer never ran proves
      nothing, so the run asserts `treasury_events` grew rather than assuming it did.
-  4. **The event loop never stalls.** A blocking SQLite call made from a coroutine holds
-     the only event loop and stalls every in-flight request, and nothing logs when it does.
+  4. **The event loop never stalls.** A blocking database call made from a coroutine
+     holds the only event loop and stalls every in-flight request, and nothing logs when
+     it does.
   5. **Every reservation is released.** A leaked hold spends the ceiling twice.
 
 Usage:
@@ -59,6 +64,7 @@ import statistics
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -87,11 +93,16 @@ def _section(title: str) -> None:
 
 
 class LockErrorCounter(logging.Handler):
-    """Catch `database is locked` anywhere in the app, not just where we look.
+    """Catch contention errors anywhere in the app, not just where we look.
 
     The proxy swallows ledger-write failures on purpose (a failed write must not become a
-    failed request), so a lock error would otherwise be invisible to the client and to
+    failed request), so one of these would otherwise be invisible to the client and to
     row counts alike — it would only show up as a missing row with no explanation.
+
+    `database is locked` was the SQLite symptom. The Postgres equivalents are
+    `PoolTimeout` (every pooled connection busy or leaked) and a deadlock detection, so
+    all three are counted under the same name rather than renaming the check and losing
+    its history.
     """
 
     def __init__(self) -> None:
@@ -108,7 +119,9 @@ class LockErrorCounter(logging.Handler):
         except Exception:
             return
         low = text.lower()
-        if "database is locked" in low or "database table is locked" in low:
+        if ("database is locked" in low or "database table is locked" in low
+                or "pooltimeout" in low or "couldn't get a connection" in low
+                or "deadlock detected" in low):
             self.locked += 1
             self.messages.append(text[:300])
         if "LEDGER WRITE FAILED" in text:
@@ -125,9 +138,12 @@ async def loop_stall_probe(stop: asyncio.Event, samples: list[float]) -> None:
 
     This is the check that actually earns its place. Row counts and lock errors test the
     *storage* layer, but the failure mode this codebase is genuinely exposed to is a
-    blocking SQLite call made from a coroutine: it holds the only event loop, so every
-    in-flight request stalls with it and nothing anywhere logs an error. `busy_timeout` is
-    5000ms, which bounds that stall at five seconds — long enough to look like an outage.
+    blocking database call made from a coroutine: it holds the only event loop, so every
+    in-flight request stalls with it and nothing anywhere logs an error. That got worse
+    with the Postgres port, not better — a psycopg round trip to a hosted database is
+    tens of milliseconds where a local SQLite read was microseconds, so the same
+    unwrapped call now stalls the loop for far longer. Every one is supposed to go
+    through `asyncio.to_thread`; this is what catches the one that does not.
 
     A sleep(0) that comes back late means the loop was blocked for that long by someone
     who did not await.
@@ -337,8 +353,10 @@ async def main() -> int:
               f"reservation TTL {stream_ttl_s}s (stream outlives its own hold)")
 
     tmpdir = tempfile.mkdtemp(prefix="meter-soak-")
-    db_path = Path(tmpdir) / "soak.db"
     yaml_path = Path(tmpdir) / "meter.yaml"
+    # A throwaway schema, dropped at the end. Both writers must land in the same one or
+    # check 1 would be comparing a row count against a table nobody wrote to.
+    schema = "soak_" + uuid.uuid4().hex[:8]
 
     # Ceilings high enough that nothing 429s — we are testing write contention on the
     # enforced path, and a budget refusal would short-circuit the very writes we want to
@@ -370,7 +388,11 @@ async def main() -> int:
         {
             "OPENAI_BASE_URL": f"http://127.0.0.1:{fake_port}/{upstream_prefix}",
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{fake_port}/{upstream_prefix}",
-            "METER_DB_PATH": str(db_path),
+            "DB_SCHEMA": schema,
+            # The pool has to be able to serve every concurrent request plus the
+            # Treasurer, or the harness measures psycopg queueing rather than the
+            # proxy. Sized above --concurrency for exactly that reason.
+            "DB_POOL_MAX": str(max(args.concurrency + 4, 8)),
             "METER_KEYS": "mk_soak:soak-project:test",
             "METER_YAML_PATH": str(yaml_path),
             "OPENAI_API_KEY": "fake",
@@ -498,8 +520,8 @@ async def main() -> int:
     stop = asyncio.Event()
 
     events_before = tdb.connect().execute(
-        "SELECT COUNT(*) FROM treasury_events"
-    ).fetchone()[0]
+        "SELECT COUNT(*) AS n FROM treasury_events"
+    ).fetchone()["n"]
 
     # Watch the hold table while streams are in flight. This is the only direct evidence
     # that the heartbeat does its job: each response outlives its own reservation TTL, so
@@ -566,18 +588,19 @@ async def main() -> int:
     await client.aclose()
 
     conn = ledger.connect()
-    rows = conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
+    rows = conn.execute("SELECT COUNT(*) AS n FROM requests").fetchone()["n"]
     # Scoped to 200s deliberately: the proxy ledgers its own refusals too (a breaker trip
     # and a budget 429 both write a row), so a bare COUNT(*) is not what "no row was
     # dropped for a served request" means.
     ok_rows = conn.execute(
-        "SELECT COUNT(*) FROM requests WHERE status = 200"
-    ).fetchone()[0]
-    by_status = conn.execute(
-        "SELECT status, COUNT(*) FROM requests GROUP BY status ORDER BY 2 DESC"
-    ).fetchall()
+        "SELECT COUNT(*) AS n FROM requests WHERE status = 200"
+    ).fetchone()["n"]
+    by_status = [(r["status"], r["n"]) for r in conn.execute(
+        "SELECT status, COUNT(*) AS n FROM requests GROUP BY status ORDER BY 2 DESC"
+    ).fetchall()]
     tconn = tdb.connect()
-    tevents = tconn.execute("SELECT COUNT(*) FROM treasury_events").fetchone()[0]
+    tevents = tconn.execute(
+        "SELECT COUNT(*) AS n FROM treasury_events").fetchone()["n"]
 
     _section("Throughput")
     print(f"  elapsed:        {elapsed:.1f}s")
@@ -656,11 +679,11 @@ async def main() -> int:
 
     if args.stream:
         streamed_rows = conn.execute(
-            "SELECT COUNT(*) FROM requests WHERE is_stream = 1 AND status = 200"
-        ).fetchone()[0]
+            "SELECT COUNT(*) AS n FROM requests WHERE is_stream = 1 AND status = 200"
+        ).fetchone()["n"]
         byte_estimated = conn.execute(
-            "SELECT COUNT(*) FROM requests WHERE is_stream = 1 AND estimated = 1"
-        ).fetchone()[0]
+            "SELECT COUNT(*) AS n FROM requests WHERE is_stream = 1 AND estimated = 1"
+        ).fetchone()["n"]
         # Skip the first second of samples: the workers are still ramping and no stream
         # has started yet, so a zero there means "not begun", not "hold expired".
         steady = reservation_samples[4:]
@@ -706,11 +729,11 @@ async def main() -> int:
     proxy_server.should_exit = True
     fake_server.should_exit = True
     await asyncio.sleep(0.3)
-    # Both connections are process-wide singletons pointed at this directory; close them
-    # before removing it so the WAL and shm files go with it.
+    # Drop the schema before closing the pool — dropping needs a connection.
     with contextlib.suppress(Exception):
-        conn.close()
-        tconn.close()
+        from proxy import pg
+        pg.drop_schema(schema)
+        pg.close()
     shutil.rmtree(tmpdir, ignore_errors=True)
 
     print()

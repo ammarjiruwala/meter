@@ -23,9 +23,10 @@ Two rules it exists to enforce:
 from __future__ import annotations
 
 import logging
-import sqlite3
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
+
+from proxy import pg
 
 log = logging.getLogger("meter.predictor.refresh")
 
@@ -36,23 +37,26 @@ MIN_ROWS = 20
 LOOKBACK = 5000
 
 
-def _rows(db_path: str) -> List[sqlite3.Row]:
-    """Read-only: this must never be able to disturb the proxy's writer."""
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        return conn.execute(
-            "SELECT project_id, feature, actor, bucket, model, "
-            "       predicted_scope_tokens, output_tokens "
-            "FROM requests "
-            "WHERE output_tokens > 0 AND predicted_scope_tokens > 0 "
-            "ORDER BY ts DESC LIMIT ?", (LOOKBACK,)
-        ).fetchall()
-    finally:
-        conn.close()
+def _rows(db_path: str | None = None) -> List[dict]:
+    """Read-only: this must never be able to disturb the proxy's writer.
+
+    Under SQLite that guarantee came from opening the file with ``mode=ro``. Against
+    Postgres it comes from the statement itself being a SELECT — readers never block
+    writers under MVCC, so the learning loop cannot slow the request path down.
+
+    ``db_path`` is ignored and kept only so existing callers and scripts do not have to
+    change in the same commit as the engine swap.
+    """
+    return pg.fetchall(
+        "SELECT project_id, feature, actor, bucket, model, "
+        "       predicted_scope_tokens, output_tokens "
+        "FROM requests "
+        "WHERE output_tokens > 0 AND predicted_scope_tokens > 0 "
+        "ORDER BY ts DESC LIMIT ?", (LOOKBACK,)
+    )
 
 
-def compute(rows: List[sqlite3.Row]) -> Tuple[Dict[Tuple, Tuple[float, int]],
+def compute(rows: List[dict]) -> Tuple[Dict[Tuple, Tuple[float, int]],
                                               Dict[str, List[Tuple[float, int]]],
                                               Dict[str, List[int]]]:
     """Turn ledger rows into inputs for load_history / load_buffers / load_bounds.

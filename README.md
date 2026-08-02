@@ -126,7 +126,9 @@ cooldown and can always be reset manually.
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Postgres — the ledger. **Not read yet** (the proxy uses SQLite for the demo; the port is a schema swap) |
+| `DATABASE_URL` | Postgres — the ledger. **Required.** The proxy raises at first query without it rather than degrading |
+| `DB_SCHEMA` | Schema to use, default `public`. Test suites and harnesses override it with a throwaway one |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | Pooled connections (default `1` / `10`) |
 | `REDIS_URL` | Redis — wallet reservations, breaker state. **Not read yet** (needed at proxy replica #2 only) |
 | `PRAVA_API_KEY` / `PRAVA_MANDATE_ID` | Payment rail credentials |
 | `TREASURER_DRY_RUN` | Log top-up decisions without transacting. Default `true`. |

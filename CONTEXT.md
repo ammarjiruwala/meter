@@ -24,7 +24,7 @@ You are assisting a team of 4 developers in a 48-hour hackathon (Agentic Commerc
 
 ## 3. MVP Scope (The 48-Hour Build)  
 To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **Circuit Breaker**.   
-*   **MUST BUILD:** FastAPI Proxy, `tiktoken` prediction, Postgres/SQLite Ledger, Prava Sandbox integration, Mock Provider Billing endpoint, Treasurer Agent loop, Circuit Breaker, Next.js Dashboard, Poke iMessage alerts.  
+*   **MUST BUILD:** FastAPI Proxy, `tiktoken` prediction, Postgres Ledger, Prava Sandbox integration, Mock Provider Billing endpoint, Treasurer Agent loop, Circuit Breaker, Next.js Dashboard, Poke iMessage alerts.  
 *   **FAKE / SIMULATE:** We cannot actually top up a real OpenAI account with a Prava test card. Therefore, we will build a **Mock Provider Billing Endpoint** (`/mock-openai/billing`). This simulates OpenAI's billing system, accepting the Prava sandbox card and updating the balance in our DB.  
 *   **REAL LLM CALLS:** We WILL forward requests to real OpenAI/Anthropic APIs using a master company key. We need real token usage data to train our predictive engine and prove it works.
 
@@ -32,7 +32,7 @@ To win, we must ruthlessly prioritize the **Predictive Prava Top-up** and the **
 
 ## 4. Architecture & Tech Stack  
 *   **Backend:** Python + FastAPI (Handles async proxy routing and background agent loops).  
-*   **Database:** Postgres for the ledger — users, wallets, transactions, cross-model efficiency metrics (SQLite in Phase 1; column names already match so the port is a schema swap). **Redis is post-hackathon.** It is not what makes reservations correct — serialization is, and with a single proxy process an in-process lock is an identical guarantee for none of the operational cost. Redis becomes load-bearing at proxy replica #2. See ARCHITECTURE.md §2 and `PROPOSALS.md` A5.  
+*   **Database:** Postgres for the ledger — users, wallets, transactions, cross-model efficiency metrics. Hosted on Supabase (ap-south-1) and shared by the proxy, the treasury, the predictor's learning loop and the dashboard; SQLite in Phase 1, ported 2026-08-02. **Redis is post-hackathon.** It is not what makes reservations correct — serialization is, and with a single proxy process an in-process lock is an identical guarantee for none of the operational cost. Redis becomes load-bearing at proxy replica #2. See ARCHITECTURE.md §2 and `PROPOSALS.md` A5.  
 *   **Frontend:** Next.js + Tailwind CSS (Dashboard for spend, balances, and live agent logs).  
 *   **Token Counting:** `tiktoken` library.  
 *   **Payments:** Prava Sandbox API (Using fake credit card info provided by organizers).  
@@ -233,18 +233,26 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   **Validation rule changed from what `ARCHITECTURE.md` §4 originally specified** (decided 2026-08-01, `PROPOSALS.md` B17, §4 updated). The loader rejects a config where a *single* feature ceiling exceeds its project's, and only **warns** when the siblings *sum* past it. The old sum-rule answered an over-restrictive config by enforcing nothing at all for that project. Over-allocated features are safe because both ceilings are checked independently at authorize time — asserted in the self-check, not assumed.
     *   **Reservations are real** (`proxy/budget.py`), in-process per the A5 decision. Holds are counted alongside settled spend inside one `asyncio.Lock`, so concurrent requests cannot all pass the same ceiling — the self-check fires 40 at a ceiling admitting 4. Released *inside* the capture task so the hold never disappears before the row lands, and **heartbeat-extended during streams**, which ARCHITECTURE.md §2 flags as a silent failure if skipped. `reservation_id` is no longer written NULL.
     *   **`POST /v1/annotate`** (attribution rung 3, was PROPOSALS.md B9 and owned by nobody; ratified 2026-08-01). Returns the trace's total cost, request count and margin, scoped to the calling key's project — a `trace_id` is caller-supplied, so without that scope any key could read another project's spend.
-    *   **Ledger migration:** `proxy/db.py` now ALTERs the four prediction columns onto an existing `requests` table at boot. A teammate with a Phase 1 `meter.db` just needs to pull and restart — no manual step, no dropped database.
+    *   **Ledger migration:** `proxy/db.py` ALTERs missing columns onto an existing `requests` table at boot (`_ADDED_COLUMNS`). Pull and restart — no manual step, no dropped database. The database is shared now, so a column added without an entry there fails for everyone at once rather than on one machine.
     *   **`features.<name>.models` allowlist built 2026-08-01** (was listed as "not yet done"). A request whose model is not on its feature's list is refused with **403 `model_not_allowed`** and an `X-Meter-Allowed-Models` header between ATTRIBUTE and ESTIMATE — before any prediction or reservation — and the rejection is ledgered like the breaker's. Malformed lists are ignored with a warning, same posture as a bad ceiling. Verified in the self-check.
     *   Not yet done, Shubh: Redis-backed reservations (only needed at proxy replica #2).
-    *   **Overhead: p50 +0.26ms minimal / +0.35ms enforced** (`tests/bench_overhead.py`) — **unchanged, and now re-validated against a working upstream.** A bug was found in the harness on 2026-08-01: the fake upstream had been answering **422 to every call** (`from __future__ import annotations` plus a function-local `Request` import made FastAPI treat the handler's `request` argument as a required query parameter), so every benchmarked call skipped usage parsing and pricing. Fixed — and re-measuring three times each reproduced the same numbers (0.26/0.27/0.30 minimal, 0.35/0.36/0.37 enforced). **The honest conclusion is that parsing a small non-streamed usage block and pricing it is nearly free**, not that the old figure was wrong. ⚠ One single run during that work read 0.40ms and did not reproduce — **take any single reading of this number with suspicion; run it three times.**
-    *   **Sustained-load soak: DONE, and it passes** (`tests/load_soak.py`, 2026-08-01 — the Phase 4 "stress test the proxy / fix race conditions in concurrent DB writes" item). N clients drive the enforced path while the Treasurer writes `treasury_events` to the same `meter.db`. Measured at 16 clients / 15s: **~5,000 requests at ~400 req/s, every one ledgered, zero `database is locked`, zero failed ledger writes, worst event-loop stall 44ms.** CLAUDE.md's two-writer claim was an argument until now; this is the evidence for it.
-        *   **Throughput stops scaling past ~16 clients** — at 64 the proxy sustained ~122 req/s against a ~247 req/s no-proxy baseline the harness measures itself, so the ceiling is attributable rather than guessed. About half is the single-process harness saturating its own event loop; the rest is the A5 design (one SQLite connection behind a lock, shared `to_thread` pool). Inherent, not a defect, and it moves at replica #2.
+    *   ⚠ **Overhead is distance-bound since the Postgres port: p50 +52.7ms**, measured from a laptop against Supabase in ap-south-1 (`tests/bench_overhead.py`, 2026-08-02). Essentially all of it is network — a warm round trip to that database measures ~50ms from here, and the request path makes a small number of them. **It should return to single digits with the proxy colocated with the database on Fly.io, but nobody has measured that yet — do not quote a latency number until it comes from the deployed proxy.** Running the pool in autocommit halved it on its own (115ms → 53ms): without it psycopg opened a transaction on the first statement and the pool ended it on the way out, so every one-statement helper paid for a query *and* a COMMIT.
+    *   The pre-Postgres figures below are kept because they are the measurement of the *proxy's own work*, which has not changed — only the storage round trip has.
+    *   **Overhead: p50 +0.26ms minimal / +0.35ms enforced** on the SQLite ledger (`tests/bench_overhead.py`) — **re-validated against a working upstream.** A bug was found in the harness on 2026-08-01: the fake upstream had been answering **422 to every call** (`from __future__ import annotations` plus a function-local `Request` import made FastAPI treat the handler's `request` argument as a required query parameter), so every benchmarked call skipped usage parsing and pricing. Fixed — and re-measuring three times each reproduced the same numbers (0.26/0.27/0.30 minimal, 0.35/0.36/0.37 enforced). **The honest conclusion is that parsing a small non-streamed usage block and pricing it is nearly free**, not that the old figure was wrong. ⚠ One single run during that work read 0.40ms and did not reproduce — **take any single reading of this number with suspicion; run it three times.**
+    *   **Sustained-load soak: DONE, and it passes** (`tests/load_soak.py`, 2026-08-01 — the Phase 4 "stress test the proxy / fix race conditions in concurrent DB writes" item). N clients drive the enforced path while the Treasurer writes `treasury_events` to the same ledger. Measured at 16 clients / 15s **on SQLite**: **~5,000 requests at ~400 req/s, every one ledgered, zero `database is locked`, zero failed ledger writes, worst event-loop stall 44ms.** CLAUDE.md's two-writer claim was an argument until then; this was the evidence for it.
+        *   **Re-run on Postgres (2026-08-02): all 9 checks pass** at 8 clients / 12s — every 2xx ledgered, zero lock or pool errors, event-loop p99 16ms, the Treasurer wrote throughout. Throughput is not comparable to the SQLite figure and should not be quoted against it: the database is now a WAN hop away, so this run is bound by the same ~50ms round trip as the overhead number. The harness counts `PoolTimeout` and `deadlock detected` alongside `database is locked` — the new engine's version of the same failure — and sizes its pool above `--concurrency` so it measures the proxy rather than psycopg queueing.
+        *   **Throughput stopped scaling past ~16 clients on SQLite** — at 64 the proxy sustained ~122 req/s against a ~247 req/s no-proxy baseline the harness measures itself, so the ceiling was attributable rather than guessed. About half was the single-process harness saturating its own event loop; the rest was the A5 design (one SQLite connection behind a lock, shared `to_thread` pool). The one-connection-behind-a-lock half is gone — Postgres serves concurrent writers from a pool — and the shared `to_thread` pool half remains.
         *   **Deliberately not in CI.** Timing-sensitive thresholds on a shared runner is how a load test becomes flaky and then muted.
         *   **Streaming now covered too** (`--stream`, added 2026-08-02). An SSE fake upstream emits deltas for 4s against a **2s reservation TTL**, so every response deliberately outlives its own hold — the condition `budget.extend()` exists for. Asserts usage came off the wire (not a byte estimate, the B15 failure), the stream was readable SSE, the injected usage chunk was stripped, and **live holds never hit zero while streams were in flight**.
         *   ⚠ **The reservation check is verified sensitive, not just passing.** `--break-heartbeat` pushes the heartbeat past the stream duration and the check must fail — it is run that way deliberately. The first version of it *passed* under that control and was therefore worthless: it counted `len(_holds)`, but holds are reaped lazily (only when the next `authorize()` runs `_expire()`), so an expired hold lingers in the dict. It now counts holds whose `expires_at` is still in the future. **Any future edit to that check must be re-validated with `--break-heartbeat`.**
 
-*   **Ledger: WORKING, but SQLite not Postgres.** The proxy writes a priced row per call to a local `meter.db`. Column names match `ARCHITECTURE.md` §4 verbatim so Shivam's Postgres schema is a swap, not a rewrite. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` — carry these into Postgres.
-    *   **Phase 2 additions to carry into the port:** four prediction columns on `requests` (`predicted_output_tokens`, `predicted_cost_usd`, `bucket`, `prediction_method`), plus two new tables — `annotations` (§4's, with a `project_id` added so one project cannot annotate another's traces) and `feature_budgets` (not in §4; §4 has ceilings only at project level, but README.md's own `meter.yaml` example sets them per feature).
+*   **Ledger: WORKING, ON POSTGRES** (Shivam, 2026-08-02 — `PROPOSALS.md` A5's SQLite decision is superseded). The proxy writes a priced row per call to Supabase (ap-south-1). Everything goes through `proxy/pg.py`: one `psycopg_pool` pool, per-statement autocommit, `?` placeholders rewritten to `%s` so the SQL in `proxy/db.py` and `treasury/db.py` is byte-identical to the SQLite version — the diff is a change of execution layer, not fifty rewritten statements. Indexes on `(project_id, ts)`, `(trace_id)`, `(prompt_hash)` carried over.
+    *   **Why hosted, beyond deployment:** the predictor needs ~20 rows for a `(project, feature)` key before its correction beats the raw heuristic. A judge or teammate running against an empty local file got the *worse* number (65% median error against 31%). One shared database means everyone inherits the accumulated history.
+    *   **Isolation is by schema, not by file.** `DB_SCHEMA` (default `public`). Every test suite and scratch harness mints a throwaway schema and drops it in a `finally`, which is what replaced pointing `METER_DB_PATH` at a tempfile — without it a test run would delete rows from the database the demo and the judges are using.
+    *   **Types are ported like for like, deliberately.** `ts` stays TEXT rather than `timestamptz`, money stays `double precision` rather than `numeric(14,6)`. Both upgrades are correct and both are in `ARCHITECTURE.md` §4, but each changes comparison semantics the rolling-window queries and the dashboard's `isoSecondsAgo` cutoff depend on. Doing them in the same commit as the engine swap would mean a failure could be either. **Open follow-ups.**
+    *   **`sort_order` added to `projects` and `feature_budgets`.** Postgres has no `rowid`, and the budget cards read meter.yaml order — which under SQLite came free from insertion order. `replace_budgets` stamps the position explicitly now.
+    *   **Two things the port broke and fixed:** `replace_budgets` ran an explicit `BEGIN` through the connection facade, but each statement borrows a *different* pooled connection, so the rebuild was silently non-atomic against its own docstring — `pg.transaction()` now yields one connection for a whole block. And `pg._args` passes `None` rather than `()` for parameterless statements, because psycopg client-side-binds whenever it is handed a sequence and then rejects any literal `%` in the SQL.
+    *   Not started: Redis-backed reservations (only load-bearing at proxy replica #2).
 
 *   **Circuit Breaker: WORKING** (pulled forward from Phase 3). `proxy/breaker.py`. Rolling-window detection, `throttle` (429, tag-scoped) and `revoke` (403, key-scoped) modes, auto half-open recovery, manual reset at `POST /v1/breaker/reset`. **Poke alerts are wired** — see the Alerts entry below.
 
@@ -301,10 +309,12 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     *   `report_charge()` settles a charge via `POST /v1/mandates/{id}/charges/{txnId}/report`.
         Without it charges sit at `awaiting_result` forever. **Written from the docs, not yet run
         live** — the one piece of this lane that is documented rather than verified.
-    *   `treasury/db.py` adds `wallets`, `mandates`, `treasury_events` to the **same `meter.db`** the
-        proxy writes, column names verbatim from `ARCHITECTURE.md` §4. The Treasurer is now a second
-        writer alongside the proxy; WAL + `busy_timeout` covers it, writes are single statements and
-        no transaction is held open across a Prava call. `treasury_events` is written *before*
+    *   `treasury/db.py` adds `wallets`, `mandates`, `treasury_events` to the **same database** the
+        proxy writes, column names verbatim from `ARCHITECTURE.md` §4. The Treasurer is a second
+        writer alongside the proxy; Postgres makes the lock contention a non-event, and the rule
+        that made it safe still holds in its new form — writes are single statements and no
+        transaction is held open across a Prava call, which would otherwise pin a pooled
+        connection for the length of a network round trip. `treasury_events` is written *before*
         Prava is called and its row id is the `reference`, so a retry after a timeout dedupes
         instead of double-charging (§5).
     *   `POST /mock-openai/billing` accepts minted credentials and credits the wallet
@@ -373,8 +383,20 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         recovered. **Demo runs on `PRAVA_LIVE_MODE=False` until this clears.**
 
 *   **Dashboard: LAYOUT + LIVE LOGS WORKING, RESTYLED.** `dashboard/` — Next.js (App Router) +
-    Tailwind, `npm run dev` from `dashboard/`. Reads `proxy/meter.db` directly and read-only
-    (`dashboard/src/lib/db.ts`), WAL mode makes concurrent reads with the proxy's writer safe.
+    Tailwind, `npm run dev` from `dashboard/`. Reads the ledger directly and read-only via `pg`
+    (`dashboard/src/lib/db.ts`); under MVCC readers never block the proxy's writer, which is the
+    same guarantee WAL used to buy. **Needs its own `DATABASE_URL`** in `dashboard/.env.local`
+    (template at `dashboard/.env.example`) — it needed no configuration at all when it opened a
+    file, and without one every card renders its empty state.
+    *   **Ported to Postgres 2026-08-02 (Shivam).** Every exported function in `lib/db.ts` is now
+        async — node-postgres has no synchronous API — and `page.tsx` awaits its ten reads through
+        one `Promise.all` rather than serially, because each is a network round trip now. Two
+        things needed solving rather than translating: `ORDER BY rowid` (no Postgres equivalent;
+        `replace_budgets` stamps an explicit `sort_order`, read behind a `columnExists` guard), and
+        aggregates arriving as **strings** — Postgres returns `SUM()` as `numeric` and `COUNT()` as
+        `bigint`, and the driver hands both back as strings because neither fits a JS number
+        exactly, so `.toFixed()` throws and `>` compares lexically. Every aggregate goes through
+        `num()` on the way out.
     *   **Visual system (2026-08-01):** a "mission-control darkroom" — pitch-black canvas, a
         five-level surface stack (obsidian → carbon → graphite → iron → steel), elevation by inset
         white hairline rather than shadow, and one accent blue reserved for the active nav
@@ -454,7 +476,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         proportion bar per row — share-of-total is what that table answers and length reads faster
         than a column of figures.
     *   "Provider Balances" card — **now reading the real `wallets` table** (`treasury/db.py`,
-        same `meter.db`). Ordering mirrors `treasury.db.list_wallets()` so the card and
+        same database). Ordering mirrors `treasury.db.list_wallets()` so the card and
         `GET /wallets` cannot disagree. Each row shows how stale the balance is, because
         "$4.00" and "$4.00, three hours ago" call for different reactions. The project name is
         shown only when more than one project has wallets, so it stays out of the way in the
@@ -478,7 +500,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
             order is `ORDER BY rowid`, which is file order because `replace_budgets()` clears
             and re-inserts both tables in file order at every boot.
         *   **Settled spend only.** The proxy authorises against settled + in-flight holds, but
-            holds live in its process memory and never reach SQLite by design, so the card can
+            holds live in its process memory and never reach the database by design, so the card can
             read a shade under what is being enforced during a burst. Footnoted on the card
             rather than hidden.
         *   Both spend queries mirror `db.project_window_spend()` / `db.window_spend()`
@@ -499,8 +521,8 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         2026-08-01 once Shubh's predictor integration landed). It stays blank for Claude
         models, which have no local tokenizer — that is a real state to render, not a missing
         feature, and the table's footnote says so. The query degrades to `NULL` when the column
-        is absent, so a `meter.db` whose proxy has not been restarted since the migration still
-        renders instead of throwing. Verified end-to-end against a seeded SQLite file: a row
+        is absent, so a database whose proxy has not been restarted since the migration still
+        renders instead of throwing. Verified end-to-end against a seeded schema: a row
         inserted mid-session shows up on the next poll with no restart.
     *   **"Treasurer Agent" panel — the autonomous loop, on screen** (2026-08-01, unblocked by
         Shivam's Treasurer landing). A monospace terminal reading `treasury_events` joined to
@@ -562,12 +584,16 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
             annotated twice did not double its cost, `resolved` totalled $0.4000 across 2 traces
             / 4 requests exactly matching `SUM(cost_usd)`, and the orphan annotation was
             excluded and reported.
-    *   **Every query guards on the table existing, not just the file.** `meter.db` can now be
-        created by either side — `treasury/db.py` makes it with only the treasury tables, so
-        running any treasury script before the proxy left a file that existed but had no
-        `requests` table, and the whole page 500'd with `no such table: requests`. Each read
-        checks `sqlite_master` first and degrades to an empty state per card, so a half-built
-        database shows what it has instead of nothing.
+    *   **Every query guards on the table existing, not just the connection.** The schema can be
+        created by either side — `treasury/db.py` makes only the treasury tables, so running any
+        treasury script before the proxy left a database that connected fine but had no
+        `requests` table, and the whole page 500'd. Each read checks `information_schema` first
+        and degrades to an empty state per card, so a half-built database shows what it has
+        instead of nothing.
+        *   **The column guard is the same rule one level down, and it is not theoretical.**
+            Pointing the page at a schema seeded before the `sort_order` migration 500'd it —
+            `ORDER BY` a missing column throws rather than being ignored. The prediction columns
+            and `sort_order` are all read behind `columnExists`.
     *   Not yet done: **Model Efficiency view only** (Phase 3, needs Ammar's cross-model data —
         B11, and that data does not exist: nothing routes one prompt to two providers and there is
         no `model_efficiency` table). The Agent Activity panel that used to sit on this line
@@ -655,7 +681,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     6.  ✅ **Feature-ceiling validation rule corrected — Shubh, 2026-08-01.** `ARCHITECTURE.md` §4 required rejecting a project whose feature ceilings *sum* past its own; that rule was a mis-restatement of the prior art it cited and inverted the failure mode. §4 now carries a per-feature rule plus a warn-only sum check, and a third rule the original omitted: the loader must replace rather than upsert, or a ceiling deleted from `meter.yaml` keeps being enforced. (`PROPOSALS.md` B17)
 
 *   **Open blockers/decisions:**
-    1.  ✅ **`docker compose up` shipped — Shubh, 2026-08-01.** Single-service `Dockerfile` (python:3.12-slim, uvicorn, named volume for `meter.db`) + `compose.yaml` (port 8080, `env_file: .env`, read-only mounts for `meter.yaml` and `pricing/`). The five-service version (postgres/redis/dashboard) remains future work. (`PROPOSALS.md` B10)
+    1.  ✅ **`docker compose up` shipped — Shubh, 2026-08-01.** Single-service `Dockerfile` (python:3.12-slim, uvicorn) + `compose.yaml` (port 8080, `env_file: .env`, read-only mounts for `meter.yaml` and `pricing/`). **The named volume is gone as of the Postgres port (2026-08-02)** — the image holds no state at all now and `DATABASE_URL` comes in from the environment, which is also what makes it deployable to Fly.io, where a container has no durable local disk. The service will not start without it, by design. (`PROPOSALS.md` B10)
     2.  **The Visa VIC track has no architectural surface.** Tanay's Phase 0 confirmed the test-card requirements are covered by `docs/prava/api-reference/test-cards.md`, so the *docs* gap is closed — but nothing in `ARCHITECTURE.md` or the build actually targets VIC. We are still entered in a track no component is designed for. (`PROPOSALS.md` B14)
     3.  ✅ **Both providers are funded and verified live end to end** (moved here from blockers, 2026-08-01). Real completions and real streams through the proxy on OpenAI *and* Anthropic, all rows priced to the published rates exactly, cross-provider routing landing both in one ledger. The REAL LLM CALLS item in §3 is fully unblocked — `predictor/calibrate.py` and the Phase 3 cross-model comparison have both providers to run against. **Rotate all three keys** (2 Anthropic, 1 OpenAI) — they were shared over chat; the live ones exist only in the gitignored `.env`. (`PROPOSALS.md` C4)
     4.  **Cross-model routing is specified two ways** — §5A says the *proxy* sends the same prompt to both providers; PLAN.md Phase 3 has it as an offline script. The script is right: shadow-calling a second provider on live traffic doubles the customer's bill inside a cost-control tool. Left as a proposal pending Ammar. (`PROPOSALS.md` B11)

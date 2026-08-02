@@ -4,6 +4,12 @@ httpx>=0.27
 pyyaml>=6.0
 python-dotenv>=1.0
 
+# Postgres driver, for the migration off SQLite. `[binary]` ships a wheel so nobody needs
+# libpq headers installed; `[pool]` is the connection pool the proxy holds open — a fresh
+# connection per request would cost more than every other millisecond in the request path
+# put together.
+psycopg[binary,pool]>=3.2
+
 # Predictive engine (predictor/)
 tiktoken>=0.5.0
 numpy>=1.24.0

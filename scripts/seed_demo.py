@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Seed the demo ledger with our real API observations, so the loop has history.
 
-    python scripts/seed_demo.py --dry-run      # show what would be written
-    python scripts/seed_demo.py                # write into meter.db
-    python scripts/seed_demo.py --db /tmp/x.db --hours 6
+    python scripts/seed_demo.py --dry-run          # show what would be written
+    python scripts/seed_demo.py                    # write into DATABASE_URL's ledger
+    python scripts/seed_demo.py --schema scratch --hours 6
 
 WHY THIS EXISTS. The per-(project, feature) correction needs 20+ rows for a key before
 it learns anything. A demo where someone types five prompts by hand produces five keys
@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -52,7 +51,9 @@ def load() -> list[dict]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--db", default=str(REPO / "meter.db"))
+    ap.add_argument("--schema", default=None,
+                    help="write into this Postgres schema instead of DB_SCHEMA — the "
+                         "equivalent of the old --db pointing at a throwaway file")
     ap.add_argument("--hours", type=float, default=6.0,
                     help="spread timestamps over this many trailing hours")
     ap.add_argument("--dry-run", action="store_true")
@@ -69,23 +70,22 @@ def main() -> int:
     for project, feature in feats:
         n = sum(1 for r in rows if r["feature"] == feature)
         print(f"              {project}/{feature:<24} {n:>4} rows")
-    print(f"target      {args.db}")
+    import os
+
+    if args.schema:
+        os.environ["DB_SCHEMA"] = args.schema
+    os.environ.setdefault("METER_KEYS", "mk_demo:api-prod:prod")
+
+    from proxy import config as cfg
+    print(f"target      {cfg.DATABASE_URL.split('@')[-1] if cfg.DATABASE_URL else '(unset)'}"
+          f"  schema={cfg.DB_SCHEMA}")
     print(f"timestamps  spread over the trailing {args.hours}h")
     if args.dry_run:
         print("\ndry run — nothing written")
         return 0
 
-    import os
-
-    os.environ["METER_DB_PATH"] = args.db
-    os.environ.setdefault("METER_KEYS", "mk_demo:api-prod:prod")
-    import importlib
-
-    from proxy import config as cfg
-    importlib.reload(cfg)
     from proxy import db as dbmod
-    importlib.reload(dbmod)
-    dbmod.connect()          # creates the schema and runs migrations
+    conn = dbmod.connect()   # creates the schema and runs migrations
 
     from predictor import Predictor
     from proxy.pricing import Usage, price
@@ -96,7 +96,6 @@ def main() -> int:
     pred = Predictor()
     pred._history = {}
 
-    conn = sqlite3.connect(args.db)
     if not args.append:
         conn.execute("DELETE FROM requests WHERE id LIKE 'seed_%'")
 
@@ -135,8 +134,9 @@ def main() -> int:
         written += 1
     conn.commit()
 
-    spend = conn.execute("SELECT SUM(cost_usd) FROM requests WHERE id LIKE 'seed_%'").fetchone()[0]
-    conn.close()
+    spend = conn.execute(
+        "SELECT SUM(cost_usd) AS spend FROM requests WHERE id LIKE 'seed_%'"
+    ).fetchone()["spend"]
 
     print(f"\nwrote {written} rows  (${spend:.4f} of real ledger spend)")
 
@@ -145,7 +145,7 @@ def main() -> int:
     from predictor import engine, refresh
 
     engine._default._history = {}
-    summary = refresh.refresh_now(args.db)
+    summary = refresh.refresh_now()
     print(f"refresh     {summary.get('installed_keys')} factors installed "
           f"from {summary.get('candidate_keys')} candidates")
     for key, verdict in sorted(summary.get("detail", {}).items()):
@@ -156,4 +156,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        # The pool's worker threads are non-daemon; without this the process hangs for
+        # five seconds per worker on the way out and prints "couldn't stop thread".
+        from proxy import pg
+        pg.close()

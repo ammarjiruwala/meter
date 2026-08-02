@@ -20,18 +20,24 @@ from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 PORT = 8095
-DB = Path("/tmp/meter-pipeline-check.db")
 KEY = "pipeline_check_key"
+
+# A throwaway schema, set before anything imports `proxy.config`, and inherited by the
+# uvicorn subprocess through its environment — the child has to write into the same
+# schema this process then reads, or step 3 finds an empty table and blames the proxy.
+SCHEMA = "pipeline_" + uuid.uuid4().hex[:8]
+os.environ["DB_SCHEMA"] = SCHEMA
+os.environ.setdefault("METER_KEYS", f"{KEY}:proj-pipeline:dev")
 
 PASSED = 0
 FAILED: list[str] = []
@@ -56,28 +62,27 @@ def section(name: str) -> None:
 def check_schema() -> None:
     """The ledger must have somewhere to put every field before we send traffic."""
     section("1. LEDGER SCHEMA")
-    os.environ["METER_DB_PATH"] = str(DB)
-    os.environ.setdefault("METER_KEYS", f"{KEY}:proj-pipeline:dev")
-    if DB.exists():
-        DB.unlink()
 
     # Mirror what the app does at boot. The proxy and treasury each own their own
-    # tables in the same file, and both connect() calls run in `lifespan` -- so
+    # tables in the same database, and both connect() calls run in `lifespan` -- so
     # checking only one would report a schema the running system never has.
-    from proxy import db
+    from proxy import db, pg
     from treasury import db as treasury_db
 
     db.connect()
     treasury_db.connect()
-    conn = sqlite3.connect(str(DB))
-    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {r["table_name"] for r in pg.fetchall(
+        "SELECT table_name FROM information_schema.tables"
+        " WHERE table_schema = current_schema()")}
 
     for t in ("requests", "meter_keys", "projects", "breaker_events"):
         check(f"table {t} exists (proxy)", t in tables)
     for t in ("wallets", "mandates", "treasury_events"):
         check(f"table {t} exists (treasury)", t in tables)
 
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    cols = {r["column_name"] for r in pg.fetchall(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = current_schema() AND table_name = 'requests'")}
     # Actuals — what the call really cost.
     for c in ("input_tokens", "output_tokens", "cost_usd", "pricing_version"):
         check(f"requests.{c} (actual)", c in cols)
@@ -87,7 +92,6 @@ def check_schema() -> None:
     # Attribution — the key the history correction learns on.
     for c in ("project_id", "actor", "feature", "trace_id"):
         check(f"requests.{c} (attribution)", c in cols)
-    conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,7 +103,7 @@ def check_traffic(offline: bool) -> subprocess.Popen | None:
 
     import httpx
 
-    env = {**os.environ, "METER_DB_PATH": str(DB),
+    env = {**os.environ, "DB_SCHEMA": SCHEMA,
            "METER_KEYS": f"{KEY}:proj-pipeline:dev"}
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "proxy.app:app", "--port", str(PORT),
@@ -154,9 +158,9 @@ def check_traffic(offline: bool) -> subprocess.Popen | None:
 # ─────────────────────────────────────────────────────────────────────────────
 def check_rows(offline: bool) -> None:
     section("3. WHAT LANDED IN THE LEDGER")
-    conn = sqlite3.connect(str(DB))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute("SELECT * FROM requests ORDER BY ts").fetchall()
+    from proxy import pg
+
+    rows = pg.fetchall("SELECT * FROM requests ORDER BY ts")
 
     if offline:
         print("  (skipped — --offline)")
@@ -187,7 +191,6 @@ def check_rows(offline: bool) -> None:
     check("streamed row present", any(r["is_stream"] for r in rows))
     check("max_tokens clamp recorded",
           any("capped" in (r["prediction_method"] or "") for r in rows))
-    conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -198,12 +201,12 @@ def check_trainable(offline: bool) -> None:
         print("  (skipped — --offline)")
         return
 
-    conn = sqlite3.connect(str(DB))
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
+    from proxy import pg
+
+    rows = pg.fetchall(
         "SELECT bucket, input_tokens, output_tokens, predicted_output_tokens "
         "FROM requests WHERE bucket IS NOT NULL AND output_tokens > 0"
-    ).fetchall()
+    )
     check("rows are queryable by bucket", len(rows) > 0)
 
     from collections import defaultdict
@@ -230,7 +233,6 @@ def check_trainable(offline: bool) -> None:
     check("load_buffers accepts ledger shape",
           isinstance(p.load_buffers({b: [(float(i), o) for i, o in v]
                                      for b, v in by_bucket.items()}), dict))
-    conn.close()
 
 
 def main() -> int:
@@ -252,6 +254,9 @@ def main() -> int:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        from proxy import pg
+        pg.drop_schema(SCHEMA)
+        pg.close()
 
     print("\n" + "=" * 68)
     if FAILED:

@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# The template is the exception — it carries no secret and it is the only place that
+# says the dashboard needs a DATABASE_URL at all.
+!.env.example
 
 # vercel
 .vercel

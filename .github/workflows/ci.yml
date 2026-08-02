@@ -8,6 +8,28 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+
+    # The ledger is Postgres, so CI needs one. A service container rather than the
+    # hosted Supabase instance on purpose: CI must not be able to touch the database
+    # the demo runs on, and it must still pass when that project is paused or its
+    # password is rotated. Each suite isolates itself in a throwaway DB_SCHEMA on top
+    # of this, exactly as it does locally.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
