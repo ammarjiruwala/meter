@@ -18,17 +18,6 @@ const RING_1 = [
   { t: "returns", cls: "hot", cost: "$0.009" },
 ];
 
-const RING_2 = [
-  { t: "Debug" },
-  { t: "trace", cls: "hot", cost: "$0.004" },
-  { t: "SQL", cls: "gold" },
-  { t: "query" },
-  { t: "refactor", cls: "hot", cost: "$0.002" },
-  { t: "hooks", cls: "mint" },
-  { t: "translate" },
-  { t: "please", cls: "hot", cost: "$0.005" },
-];
-
 const SLIDES = [
   {
     accent: "coral",
@@ -224,38 +213,43 @@ export function Home() {
           id="hero-section"
         >
           <div className="orbit-container">
-            {[RING_1, RING_2].map((ring, r) => (
-              <div key={r} className={`orbit-ring ring-${r + 1}`}>
-                {ring.map((tok, i) => (
-                  <div
-                    key={tok.t}
-                    className="t3d"
-                    style={
-                      {
-                        "--a": `${(360 / ring.length) * i}deg`,
-                        // Radius comes from the ring's own class, so the two
-                        // radii live next to the tilts that determine them —
-                        // they are related by a trig identity, not free choices.
-                        "--r": "var(--ring-r)",
-                      } as React.CSSProperties
-                    }
-                  >
-                    <span className={`tk${tok.cls ? ` ${tok.cls}` : ""}`}>
-                      {tok.t}
-                      {tok.cost && <span className="cost">{tok.cost}</span>}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ))}
+            {/* One ring. Tokens are spread evenly around it; the radius comes from
+                the ring's class, so it sits beside the tilt that determines how it
+                projects rather than being a loose number here. */}
+            <div className="orbit-ring ring-1">
+              {RING_1.map((tok, i) => (
+                <div
+                  key={tok.t}
+                  className="t3d"
+                  style={
+                    {
+                      "--a": `${(360 / RING_1.length) * i}deg`,
+                      "--r": "var(--ring-r)",
+                    } as React.CSSProperties
+                  }
+                >
+                  <span className={`tk${tok.cls ? ` ${tok.cls}` : ""}`}>
+                    {tok.t}
+                    {tok.cost && <span className="cost">{tok.cost}</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
 
+          {/* Drifting price tags. Positions keep clear of the middle band, where the
+              wordmark and the orbit ring already are — anything placed there lands
+              on top of the M or behind a rotating token. Delays and durations are
+              all mutually non-round so nothing visibly pulses in unison. */}
           {(
             [
-              ["22%", "14%", "1.8s", "7s", "8px", "-12px", "$0.0012"],
-              ["68%", "78%", "2.4s", "8s", "-10px", "8px", "$0.0034"],
-              ["35%", "82%", "3s", "6s", "6px", "-10px", "$0.0091"],
-              ["72%", "20%", "2.1s", "9s", "-8px", "6px", "$0.0044"],
+              ["20%", "12%", "1.8s", "7s", "8px", "-12px", "$0.0012"],
+              ["15%", "58%", "2.6s", "7.4s", "-7px", "9px", "$0.0007"],
+              ["34%", "86%", "3s", "6s", "6px", "-10px", "$0.0091"],
+              ["47%", "5%", "1.4s", "6.6s", "7px", "10px", "$0.0026"],
+              ["70%", "74%", "2.4s", "8s", "-10px", "8px", "$0.0034"],
+              ["79%", "26%", "2.1s", "9s", "-8px", "6px", "$0.0044"],
+              ["86%", "62%", "3.3s", "8.6s", "9px", "-7px", "$0.0158"],
             ] as const
           ).map(([top, left, delay, dur, x2, y2, label]) => (
             <div

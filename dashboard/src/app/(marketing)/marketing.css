@@ -511,31 +511,16 @@
     pointer-events: none; z-index: 2;
   }
   .orbit-ring {
-    position: absolute; top: calc(50% + var(--orbit-optical-shift)); left: 50%;
+    position: absolute;
+    top: calc(50% + var(--orbit-optical-shift));
+    left: 50%;
     width: 0; height: 0; transform-style: preserve-3d;
   }
-  /* The two rings are given radii that project to the SAME width on screen.
-     They do not project equally, because their tilts differ in kind:
-
-       ring-1  rotateX(-14deg)                — rotateX leaves x untouched, so its
-                                                projected half-width is exactly its
-                                                radius.
-       ring-2  rotateX(58deg) rotateZ(18deg)  — rotateZ mixes x into y, so its
-                                                projected half-width is only
-                                                radius * cos(18deg).
-
-     So matching widths means scaling ring-2 up by 1/cos(18deg) = 1.0515:
-     300px / 0.95106 = 315.4px. (rotateX(58deg) is irrelevant to width — it only
-     flattens the ring vertically, which is what makes it read as the steep one.)
-
-     Perspective barely enters: ring-1's widest points sit at z = 0, and ring-2's
-     two widest points sit at equal and opposite z, so the near-side magnification
-     and far-side reduction cancel to within a pixel across the pair. */
-  .orbit-ring { --ring-r: 300px; }
+  /* One ring, nearly edge-on. rotateX leaves the x-axis alone, so its projected
+     half-width is exactly its radius: 300px in, 600px wide on screen. */
   .ring-1 { --ring-r: 300px; animation: orbit1 60s linear infinite; }
-  .ring-2 { --ring-r: 315.4px; animation: orbit2 45s linear infinite; }
+
   @keyframes orbit1 { 0% { transform: rotateX(-14deg) rotateY(0deg); } 100% { transform: rotateX(-14deg) rotateY(360deg); } }
-  @keyframes orbit2 { 0% { transform: rotateX(58deg) rotateZ(18deg) rotateY(0deg); } 100% { transform: rotateX(58deg) rotateZ(18deg) rotateY(360deg); } }
 
   .t3d { position: absolute; top: 0; left: 0; width: 0; height: 0; transform-style: preserve-3d; transform: rotateY(var(--a)) translateZ(var(--r)); }
 
