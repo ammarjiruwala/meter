@@ -58,6 +58,17 @@ DEFAULT_CEILING_USD_DAY = 0.50
 # this is the difference between a judge exploring and a judge looping our provider key.
 DEFAULT_CALL_CAP = 25
 
+# What a judge's provider wallet starts at, and it is deliberately almost empty.
+#
+# The Treasurer triggers on balance, never on request volume: `TREASURER_MIN_BALANCE_USD`
+# is $10 and a templated call costs ~$0.0002, so draining a real wallet would take ~50,000
+# prompts. The runway trigger is no better at this scale -- measured burn of $0.001/h gives
+# a runway of about 4,300 hours (EXPERIENCE.md §8).
+#
+# So the wallet starts below the floor, and the console says so in as many words rather
+# than letting a judge discover staged state we did not mention (PITCH.md §2.1).
+WALLET_SEED_USD = 0.05
+
 # The feature tags the console offers, each with its own ceiling.
 #
 # They exist so the Team Spend card has something to render — `meter.yaml` names only
@@ -209,6 +220,17 @@ def create(
              breaker_floor_usd, ceiling_usd_day, call_cap),
         )
         conn.commit()
+
+    # The provider wallet, seeded below the Treasurer's floor so Act 4 has something to
+    # act on. Best-effort: a treasury hiccup must not cost the judge their whole session,
+    # and `/judge/treasury` calls `ensure_wallet` again anyway.
+    try:
+        from treasury import config as tconfig
+        from treasury import db as tdb
+
+        tdb.ensure_wallet(project_id, tconfig.TREASURER_PROVIDER, WALLET_SEED_USD)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not seed judge wallet for %s: %s", project_id, exc)
 
     # Bind the ceilings in-process now. `_ceilings` is read once at boot, so without
     # this the judge's very first request is unenforced until something restarts.

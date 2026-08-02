@@ -235,6 +235,63 @@ export const judge = {
 
   outcomes: (token: string) =>
     call<{ rows: OutcomeRow[] }>("/judge/outcomes", { token }),
+
+  treasury: (token: string) => call<TreasuryState>("/judge/treasury", { token }),
+
+  mandate: (token: string, amountUsd: number) =>
+    call<{ ok: boolean; approval_url: string; sandbox_otp: string }>("/judge/mandate", {
+      method: "POST",
+      token,
+      body: { amount_usd: amountUsd },
+    }),
+
+  topup: (token: string) =>
+    call<{
+      assessment: TreasuryAssessment;
+      result: TopupResult;
+      charged_on_own_account: boolean;
+      one_per_cycle: string;
+    }>("/judge/topup", { method: "POST", token, body: {} }),
+};
+
+export type TreasuryAssessment = {
+  balance_usd: number;
+  burn_usd_per_hour: number;
+  runway_hours: number | null;
+  floor_usd: number;
+  trigger: string | null;
+  should_topup: boolean;
+  recommended_topup_usd: number;
+};
+
+export type TopupResult = {
+  ok: boolean;
+  reason?: string;
+  amount_usd?: number;
+  balance_usd?: number;
+  prava_txn_id?: string;
+  receipt_id?: string;
+  settlement_status?: string;
+  simulated?: boolean;
+  event_id?: number;
+  would_have_charged?: number;
+  hint?: string;
+};
+
+export type TreasuryState = {
+  wallet_id: string;
+  assessment: TreasuryAssessment;
+  mandates: { prava_mandate_id: string; approved_amount_usd: number; status: string }[];
+  events: { id: number; status: string; amount_usd: number; created_at: string }[];
+  uses_own_merchant_key: boolean;
+  guidance: {
+    recommended_usd: number;
+    min_usd: number;
+    max_usd: number;
+    sandbox_otp: string;
+    expect_minutes: string;
+    one_per_cycle: string;
+  };
 };
 
 export type OutcomeRow = {

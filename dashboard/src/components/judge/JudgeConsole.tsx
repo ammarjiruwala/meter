@@ -25,6 +25,8 @@ import {
   type LedgerRow,
   type OutcomeRow,
   type RunResult,
+  type TopupResult,
+  type TreasuryState,
 } from "@/lib/judge";
 import { Panel } from "@/components/ui/primitives";
 
@@ -60,6 +62,9 @@ export function JudgeConsole() {
     ReturnType<typeof judge.runaway>
   > | null>(null);
   const [alertNote, setAlertNote] = useState<string | null>(null);
+  const [treasury, setTreasury] = useState<TreasuryState | null>(null);
+  const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
+  const [topup, setTopup] = useState<TopupResult | null>(null);
 
   // The forecast, shown on its own while the call is still in flight. This state existing
   // separately from `entries` is the whole point: it is rendered, visibly, before there is
@@ -222,6 +227,46 @@ export function JudgeConsole() {
     }
   }
 
+  async function loadTreasury() {
+    if (!session) return;
+    setBusy("Reading your wallet…");
+    try {
+      setTreasury(await judge.treasury(session.token));
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function connectCard(amountUsd: number) {
+    if (!session) return;
+    setBusy("Opening a mandate setup session with Prava…");
+    try {
+      const out = await judge.mandate(session.token, amountUsd);
+      setApprovalUrl(out.approval_url);
+      window.open(out.approval_url, "_blank", "noopener");
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function runTreasurer() {
+    if (!session) return;
+    setBusy("Syncing your mandate, then running one Treasurer pass…");
+    try {
+      const out = await judge.topup(session.token);
+      setTopup(out.result);
+      setTreasury(await judge.treasury(session.token));
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function testAlert() {
     if (!session) return;
     setBusy("Sending a test message…");
@@ -306,6 +351,15 @@ export function JudgeConsole() {
             outcomes={outcomes}
             canMark={!!traceId}
             onMark={() => void markResolved()}
+            busy={!!busy}
+          />
+          <TreasuryPanel
+            state={treasury}
+            approvalUrl={approvalUrl}
+            topup={topup}
+            onLoad={() => void loadTreasury()}
+            onConnect={(n) => void connectCard(n)}
+            onRun={() => void runTreasurer()}
             busy={!!busy}
           />
           <BreakerPanel
@@ -625,6 +679,148 @@ function OutcomePanel({
             <Metric label="Margin" value={usd(o.margin_usd)} />
           </div>
         ))}
+      </div>
+    </Panel>
+  );
+}
+
+function TreasuryPanel({
+  state, approvalUrl, topup, onLoad, onConnect, onRun, busy,
+}: {
+  state: TreasuryState | null;
+  approvalUrl: string | null;
+  topup: TopupResult | null;
+  onLoad: () => void;
+  onConnect: (amountUsd: number) => void;
+  onRun: () => void;
+  busy: boolean;
+}) {
+  const [amount, setAmount] = useState(25);
+  const settled = topup?.ok === true;
+
+  return (
+    <Panel title="The agent pays its own bill" tag="Prava mandate">
+      <div className="p-5 flex flex-col gap-4">
+        {!state ? (
+          <>
+            <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+              Your provider wallet starts nearly empty, so the Treasurer has something real
+              to notice. Watch it decide, write its intent down before acting, and settle.
+            </p>
+            <button className="judge-btn" disabled={busy} onClick={onLoad}>
+              Check the runway
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-6">
+              <Metric label="Balance" value={usd(state.assessment.balance_usd)} />
+              <Metric label="Floor" value={usd(state.assessment.floor_usd)} />
+              <Metric label="Trigger" value={state.assessment.trigger ?? "none"} />
+              <Metric label="Would top up"
+                      value={usd(state.assessment.recommended_topup_usd)} />
+            </div>
+
+            <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+              We seeded this wallet at {usd(state.assessment.balance_usd)}. A real one
+              drains over weeks and you do not have weeks — everything else here is live.
+            </p>
+
+            {!state.uses_own_merchant_key && (
+              <Notice tone="info">
+                You did not supply a Prava merchant key, so this will stop at{" "}
+                <code>dry_run</code> rather than charging anything. You will see the
+                decision and the audit row it wrote. To settle a real charge on{" "}
+                <strong>your own</strong> account, start again and paste your sandbox
+                merchant key.
+              </Notice>
+            )}
+
+            {state.mandates.length === 0 && (
+              <div className="flex flex-col gap-3 rounded-lg p-4"
+                   style={{ background: "var(--color-surface-3)" }}>
+                <div className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+                  Connect a card. Takes {state.guidance.expect_minutes}. The sandbox
+                  device-binding code is <code>{state.guidance.sandbox_otp}</code>.
+                </div>
+                <label className="flex items-center gap-3 text-sm">
+                  <span style={{ color: "var(--color-text-tertiary)" }}>Amount</span>
+                  <input
+                    className="judge-input w-28"
+                    type="number"
+                    min={state.guidance.min_usd}
+                    max={state.guidance.max_usd}
+                    value={amount}
+                    onChange={(e) => setAmount(Number(e.target.value))}
+                  />
+                  <span className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+                    ${state.guidance.min_usd}–${state.guidance.max_usd}. Above $
+                    {state.guidance.max_usd} this sandbox cannot mint credentials.
+                  </span>
+                </label>
+                <button className="judge-btn" disabled={busy}
+                        onClick={() => onConnect(amount)}>
+                  Connect a card
+                </button>
+                {approvalUrl && (
+                  <Notice tone="info">
+                    A Prava approval page opened in a new tab. Approve it there, then come
+                    back and run the Treasurer.{" "}
+                    <a href={approvalUrl} target="_blank" rel="noopener noreferrer"
+                       className="underline">Reopen the page</a>
+                  </Notice>
+                )}
+              </div>
+            )}
+
+            <button className="judge-btn" disabled={busy} onClick={onRun}>
+              Run the Treasurer
+            </button>
+
+            {topup && (
+              <div className="flex flex-col gap-2 rounded-lg p-4"
+                   style={{ background: "var(--color-surface-3)" }}>
+                {settled ? (
+                  <>
+                    <div className="text-sm" style={{ color: "var(--color-status-good)" }}>
+                      Charged {usd(topup.amount_usd)} · settlement{" "}
+                      {topup.settlement_status} · balance now {usd(topup.balance_usd)}
+                    </div>
+                    <div className="text-xs font-mono"
+                         style={{ color: "var(--color-text-tertiary)" }}>
+                      txn {topup.prava_txn_id} · audit row tev_{topup.event_id}
+                    </div>
+                    <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
+                      That audit row was written <strong>before</strong> Prava was called,
+                      and its id is the idempotency key — which is what makes a retry safe.
+                      Prava echoes it back as the charge reference, so you can see the same
+                      mechanism from their side, in your own dashboard.
+                    </p>
+                    <Notice tone="info">{state.guidance.one_per_cycle}</Notice>
+                  </>
+                ) : (
+                  <div className="text-sm" style={{ color: "var(--color-status-warn)" }}>
+                    Stopped at <code>{topup.reason}</code>
+                    {topup.would_have_charged !== undefined &&
+                      ` — would have charged ${usd(topup.would_have_charged)}`}
+                    . {topup.hint ?? ""}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {state.events.length > 0 && (
+              <div className="flex flex-col gap-1 text-xs font-mono"
+                   style={{ color: "var(--color-text-tertiary)" }}>
+                {state.events.slice(0, 5).map((e) => (
+                  <div key={e.id}>
+                    tev_{e.id} · {e.status} · {usd(e.amount_usd)}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </div>
     </Panel>
   );

@@ -16,10 +16,13 @@ Owner: Ammar.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Header, HTTPException, Request
+
+from treasury import config as tconfig
 
 from . import ledger, prompts, run, sessions
 
@@ -359,3 +362,147 @@ async def judge_annotate(
         float(body["value_usd"]) if body.get("value_usd") is not None else None,
     )
     return {"ok": True, "outcomes": ledger.outcomes(session.project_id)}
+
+
+# ── Act 4: the mandate, and the top-up ───────────────────────────────────────
+#
+# Both routes run inside `prava.use_api_key(...)` with the judge's own merchant key. That
+# is the whole point of the act: with their key they *are* the merchant, so the mandate and
+# the charge appear in their own Prava dashboard with their own revoke button. Charging on
+# ours would make them a customer on our account and leave the transaction invisible to
+# them — for a product pitched as "trust an agent with your card", the worst gap available
+# (EXPERIENCE.md #44).
+
+#: Sized against what the sandbox actually accepts. Above $50 cannot mint credentials
+#: ("Fetching cryptogram failed"); below $5 is under TREASURER_MIN_TOPUP_USD, so the
+#: Treasurer would decide to act and then refuse itself.
+MANDATE_DEFAULT_USD = 25.0
+MANDATE_MIN_USD = 5.0
+MANDATE_MAX_USD = 50.0
+
+
+def _prava_key(session: sessions.Session) -> str | None:
+    return sessions.secrets_for(session.token).get("prava_api_key")
+
+
+@router.get("/treasury")
+async def judge_treasury(x_judge_session: str | None = Header(default=None)):
+    """The session's wallet, its mandates, and what the Treasurer would decide."""
+    session = _require(x_judge_session)
+    from treasury import db as tdb
+    from treasury import treasurer
+
+    wallet_id = await asyncio.to_thread(
+        tdb.ensure_wallet, session.project_id, tconfig.TREASURER_PROVIDER,
+        sessions.WALLET_SEED_USD,
+    )
+    assessment = await asyncio.to_thread(treasurer.assess, session.project_id)
+    mandates = await asyncio.to_thread(tdb.list_stored_mandates, session.project_id)
+    events = await asyncio.to_thread(tdb.recent_events, wallet_id, 20)
+
+    return {
+        "wallet_id": wallet_id,
+        "assessment": assessment,
+        "mandates": mandates,
+        "events": events,
+        "uses_own_merchant_key": bool(_prava_key(session)),
+        "guidance": {
+            "recommended_usd": MANDATE_DEFAULT_USD,
+            "min_usd": MANDATE_MIN_USD,
+            "max_usd": MANDATE_MAX_USD,
+            "sandbox_otp": "456789",
+            "expect_minutes": "2-3 the first time, under a minute on a repeat",
+            "one_per_cycle": (
+                "Each mandate allows one purchase per monthly cycle — Prava's rule, "
+                "enforced by Visa. To top up again, create another mandate."
+            ),
+        },
+    }
+
+
+@router.post("/mandate")
+async def judge_mandate(
+    body: dict[str, Any] = Body(default_factory=dict),
+    x_judge_session: str | None = Header(default=None),
+):
+    """Start mandate approval on the judge's own Prava account.
+
+    Returns the URL they approve in the browser. This authorizes nothing on its own — the
+    mandate does not exist until they enter a card, clear the device-binding OTP and
+    register a passkey.
+    """
+    session = _require(x_judge_session)
+    from treasury import prava
+    from treasury.routes import create_mandate
+
+    amount = float(body.get("amount_usd") or MANDATE_DEFAULT_USD)
+    if not MANDATE_MIN_USD <= amount <= MANDATE_MAX_USD:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Choose between ${MANDATE_MIN_USD:.0f} and ${MANDATE_MAX_USD:.0f}. "
+                   f"Above ${MANDATE_MAX_USD:.0f} this sandbox cannot mint credentials; "
+                   f"below ${MANDATE_MIN_USD:.0f} is under the Treasurer's minimum top-up.",
+        )
+
+    with prava.use_api_key(_prava_key(session)):
+        result = await create_mandate(
+            project_id=session.project_id,
+            amount_usd=amount,
+            user_email=session.email or "judge@example.com",
+        )
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Prava would not open a setup session ({result.get('error') or result.get('reason')}). "
+                   "If you supplied your own merchant key, check it is the sandbox secret key.",
+        )
+    result["sandbox_otp"] = "456789"
+    return result
+
+
+@router.post("/topup")
+async def judge_topup(
+    body: dict[str, Any] = Body(default_factory=dict),
+    x_judge_session: str | None = Header(default=None),
+):
+    """Sync the judge's mandates, then run one top-up on their own account.
+
+    The sync is not optional and is the step most likely to be skipped: a mandate approved
+    at Prava is invisible to the Treasurer until it is claimed locally, and without it the
+    agent refuses with `no_chargeable_mandate` — which reads as a broken integration
+    rather than a missing step.
+
+    **Real money moves only when the judge supplied their own merchant key.** Without one
+    this stays a dry run against our account, and says so, rather than charging a card
+    nobody agreed to expose.
+    """
+    session = _require(x_judge_session)
+    from treasury import prava, topup
+    from treasury import treasurer
+    from treasury.routes import sync_mandates
+
+    key = _prava_key(session)
+    with prava.use_api_key(key):
+        await sync_mandates(project_id=session.project_id)
+        assessment = await asyncio.to_thread(treasurer.assess, session.project_id)
+        amount = float(
+            body.get("amount_usd") or assessment.get("recommended_topup_usd") or 5.0
+        )
+        result = await topup.execute_topup(
+            project_id=session.project_id,
+            amount_usd=amount,
+            decision_inputs=assessment,
+            # Their key, their account, their button press. Without a key we fall back to
+            # the global, which is on and stays on.
+            dry_run=None if key is None else False,
+        )
+
+    return {
+        "assessment": assessment,
+        "result": result,
+        "charged_on_own_account": bool(key) and bool(result.get("ok")),
+        "one_per_cycle": (
+            "Each mandate allows one purchase per monthly cycle. To top up again, "
+            "create another mandate."
+        ),
+    }

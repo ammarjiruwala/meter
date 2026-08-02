@@ -816,6 +816,79 @@ def test_the_treasurer_loop_never_touches_a_judge_wallet() -> None:
           sessions.PROJECT_PREFIX == treasurer.JUDGE_PROJECT_PREFIX)
 
 
+
+# ── Act 4: the mandate and the top-up ────────────────────────────────────────
+
+def test_treasury_act_is_scoped_and_defaults_dry() -> None:
+    print("\nAct 4 runs on the judge's own account, or not at all")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+    from treasury import config as tconfig
+    from treasury import topup as tup
+
+    check("the global dry-run switch is ON and must stay on",
+          tconfig.TREASURER_DRY_RUN is True or os.environ.get("TREASURER_DRY_RUN") == "false")
+
+    with TestClient(app) as client:
+        made = client.post("/judge/session", json={"name": "Payer",
+                                                   "email": "payer@example.com"}).json()
+        auth = {"X-Judge-Session": made["token"]}
+
+        state = client.get("/judge/treasury", headers=auth)
+        check("GET /judge/treasury succeeds", state.status_code == 200, state.text[:200])
+        body = state.json()
+        check("the wallet is seeded below the Treasurer's floor",
+              body["assessment"]["balance_usd"] == sessions.WALLET_SEED_USD)
+        check("so the agent has a real reason to act",
+              body["assessment"]["should_topup"] is True)
+        check("and the trigger is the floor, not runway",
+              body["assessment"]["trigger"] == "floor")
+        check("no merchant key means it says so",
+              body["uses_own_merchant_key"] is False)
+        check("the sandbox OTP is stated up front",
+              body["guidance"]["sandbox_otp"] == "456789")
+        check("as is the one-purchase-per-cycle rule",
+              "one purchase per monthly cycle" in body["guidance"]["one_per_cycle"])
+
+        # The amounts the sandbox actually accepts, refused at both ends with a reason.
+        too_big = client.post("/judge/mandate", headers=auth, json={"amount_usd": 500})
+        check("a $500 mandate is refused", too_big.status_code == 400)
+        check("and says why it cannot work", "cryptogram" in too_big.text
+              or "mint credentials" in too_big.text, too_big.text[:160])
+        too_small = client.post("/judge/mandate", headers=auth, json={"amount_usd": 1})
+        check("a $1 mandate is refused", too_small.status_code == 400)
+
+    # The load-bearing default: without the judge's own key, nothing charges. `dry_run`
+    # left as None falls through to the global, which is on.
+    import inspect
+    sig = inspect.signature(tup.execute_topup)
+    check("execute_topup takes a per-call dry_run", "dry_run" in sig.parameters)
+    check("and it defaults to None, meaning 'use the global'",
+          sig.parameters["dry_run"].default is None)
+
+
+def test_our_mandate_cannot_be_charged_by_a_judge() -> None:
+    """The failure that would end the pitch: a judge's click spending our money."""
+    print("\na judge cannot reach the team's mandate")
+    from treasury import db as tdb
+
+    judge_session = sessions.create()
+    tdb.ensure_wallet(judge_session.project_id, "openai", sessions.WALLET_SEED_USD)
+    tdb.ensure_wallet("demo-project", "openai", 5.0)
+
+    # Mandate selection is scoped by project, so a judge's top-up can only ever find a
+    # mandate their own approval created.
+    theirs = tdb.chargeable_mandate(judge_session.project_id, "openai")
+    check("a fresh judge has no chargeable mandate at all", theirs is None)
+
+    stored = tdb.list_stored_mandates(judge_session.project_id)
+    check("and no stored mandates", stored == [])
+    check("while the team's project is a separate scope entirely",
+          tdb.wallet_id_for(judge_session.project_id, "openai")
+          != tdb.wallet_id_for("demo-project", "openai"))
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -843,6 +916,8 @@ def main() -> int:
             test_breaker_reset_is_scoped_to_the_judge,
             test_annotate_is_scoped_and_returns_the_outcome,
             test_the_treasurer_loop_never_touches_a_judge_wallet,
+            test_treasury_act_is_scoped_and_defaults_dry,
+            test_our_mandate_cannot_be_charged_by_a_judge,
         ):
             suite()
     finally:
