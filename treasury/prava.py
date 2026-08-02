@@ -7,6 +7,8 @@ the treasury routes folded into the proxy app.
 import asyncio
 import logging
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import httpx
 
@@ -19,12 +21,54 @@ from . import config
 # it leniently, so `PRAVA_LIVE_MODE=true` put the two halves of the treasury into
 # different modes. One source now, parsed one way. (Shubh, repo audit 2026-08-01.)
 
-HEADERS = {
-    "Authorization": f"Bearer {config.PRAVA_API_KEY}",
-    "Content-Type": "application/json",
-}
-
 log = logging.getLogger("meter.treasury.prava")
+
+# The merchant key in force for the current async task.
+#
+# It used to be a module-level HEADERS dict built at import, which meant one key per
+# *process*, fixed at boot. That is wrong for the judge flow (PITCH.md §2.4): every judge
+# brings their own Prava merchant key, and using ours makes them a customer on our
+# merchant account — so they approve a mandate, we charge their card, and the transaction
+# is nowhere in their own Prava dashboard. For a product whose pitch is "trust an agent
+# with your card", "we charged you and you cannot see it" is close to the worst possible
+# gap (EXPERIENCE.md #44). With their own key they *are* the merchant: the charge lands in
+# their console, with their own revoke button.
+#
+# A ContextVar rather than a parameter threaded through all six public functions. Both
+# were considered; this one is safer, which is the deciding factor when the failure mode
+# is "charged the wrong merchant". Threading means every call site must remember to pass
+# it, and a site that forgets falls back to our key *silently*. Here there is exactly one
+# reader, and `contextvars` gives per-task isolation for free — two judges' requests
+# running concurrently on the same instance cannot see each other's key, which a module
+# global could not promise.
+_api_key: ContextVar[str | None] = ContextVar("prava_api_key", default=None)
+
+
+@contextmanager
+def use_api_key(api_key: str | None):
+    """Run a block against a specific merchant key. Falls back to config when None.
+
+    The token is reset in a `finally`, so an exception inside the block cannot leave a
+    judge's key installed for whatever the task does next.
+    """
+    token = _api_key.set(api_key or None)
+    try:
+        yield
+    finally:
+        _api_key.reset(token)
+
+
+def current_api_key() -> str:
+    """The merchant key this call should use: the task's own, else the configured one."""
+    return _api_key.get() or config.PRAVA_API_KEY
+
+
+def _headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {current_api_key()}",
+        "Content-Type": "application/json",
+    }
+
 
 # Connect fast, read patiently. A payment rail that is unreachable should say so in
 # seconds; one that is merely slow should be given a chance to answer, because the
@@ -110,7 +154,7 @@ async def _request(method: str, path: str, json_body: dict | None = None,
     while True:
         try:
             async with httpx.AsyncClient(timeout=timeout or _TIMEOUT) as client:
-                r = await client.request(method, url, headers=HEADERS, json=json_body)
+                r = await client.request(method, url, headers=_headers(), json=json_body)
         except httpx.TimeoutException as exc:
             log.warning("prava timeout on %s %s: %s", method, path, exc)
             return {"_ok": False, "_transport": True, "_error": "timeout",

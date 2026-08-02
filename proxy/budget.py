@@ -227,6 +227,23 @@ def _positive(value: Any, where: str) -> float | None:
     return number
 
 
+def register_ceilings(ceilings: dict[tuple[str, str | None], float]) -> None:
+    """Add ceilings for a tenant created after boot, without re-reading meter.yaml.
+
+    `_ceilings` is loaded once at startup because ceilings only change when someone edits
+    the file and restarts, so re-reading per request would buy nothing and put a query in
+    front of every call. A judge session breaks that assumption: it mints a project at
+    runtime and its very next request must already be enforced against the ceilings it
+    was given.
+
+    This only ever *adds*. It cannot clear a ceiling meter.yaml declared, so a runtime
+    caller cannot widen or disable a limit that was reviewed in a pull request.
+    """
+    for key, ceiling in ceilings.items():
+        if ceiling and ceiling > 0:
+            _ceilings[key] = float(ceiling)
+
+
 def active_ceilings() -> dict[str, float]:
     """Configured ceilings, for /healthz. Keys are the same scope strings a 429 reports."""
     return {_scope(p, f): usd for (p, f), usd in _ceilings.items()}

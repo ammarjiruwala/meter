@@ -35,6 +35,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from treasury import db as treasury_db
@@ -287,8 +288,33 @@ app = FastAPI(
 #
 # Kept off the `/v1` prefix on purpose: `/v1` is the surface a caller's provider SDK
 # targets, and control-plane routes do not belong in it.
+# The judge console is a browser app on the dashboard's origin calling this API
+# directly, which a browser refuses without the API saying so. Explicit origins rather
+# than `*`: the console carries a session token in a header, and a wildcard would let any
+# page on the internet drive somebody's live session.
+#
+# It does not widen anything for the API's normal callers -- a provider SDK is not a
+# browser and never sends an Origin header, so CORS is inert on that path.
+_ORIGINS = [o.strip() for o in config.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app" if "*" not in _ORIGINS else None,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    max_age=600,
+)
+
 app.include_router(treasury_routes.router)
 app.include_router(mock_provider.router)
+
+# The judge console's own surface (`/judge/*`), mounted for the same reason and kept off
+# `/v1` for the same reason. Imported here rather than at module top so the dependency
+# stays one-directional: `judge/` reads `proxy/`, never the reverse, and this mount is
+# the single seam — the same exception `treasury` gets above.
+from judge import routes as judge_routes  # noqa: E402
+
+app.include_router(judge_routes.router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -416,6 +442,19 @@ async def root(request: Request):
     )
 
 
+def _breaker_overrides() -> int | None:
+    """Per-project floor count for `/healthz`, or None if the ledger cannot answer.
+
+    Swallows its own errors on purpose: `/healthz` is what a load balancer and UptimeRobot
+    poll, and a liveness probe that 500s because one diagnostic field could not be read
+    turns a degraded ledger into a dead service.
+    """
+    try:
+        return db.count_breaker_overrides()
+    except Exception:  # noqa: BLE001 — diagnostics must never fail liveness
+        return None
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     """Liveness plus enough config echo to diagnose a misconfigured demo box fast."""
@@ -427,7 +466,12 @@ async def healthz() -> dict[str, Any]:
             "enabled": config.BREAKER_ENABLED,
             "mode": config.BREAKER_MODE,
             "window_s": config.BREAKER_WINDOW_S,
+            # The *default* floor. Per-project overrides live in
+            # `projects.breaker_floor_usd`, so this number may apply to nobody — hence the
+            # count beside it (db.count_breaker_overrides explains why it is there).
             "threshold_usd": config.BREAKER_WINDOW_USD,
+            "threshold_usd_scope": "default; per-project overrides may apply",
+            "project_floor_overrides": _breaker_overrides(),
             "baseline_window_s": config.BREAKER_BASELINE_WINDOW_S,
             "burst_ratio": config.BREAKER_BURST_RATIO,
             # Surfaced so a misconfiguration is visible from a health check rather than
@@ -799,7 +843,10 @@ async def _proxy(request: Request, shape: str) -> Response:
     # a leaked hold counts against the ceiling until its TTL reaps it.
     try:
         provider_name = providers.route(model, shape, request.headers.get("x-meter-provider"))
-        provider = providers.providers()[provider_name]
+        provider = providers.with_key(
+            providers.providers()[provider_name],
+            request.headers.get("x-meter-provider-key"),
+        )
         if not provider.api_key:
             await budget.release(reservation_id)
             return _error(

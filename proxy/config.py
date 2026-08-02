@@ -175,3 +175,17 @@ BREAKER_BURST_RATIO = _float("BREAKER_BURST_RATIO", 3.0)
 
 BREAKER_MODE = _str("BREAKER_MODE", "throttle").strip().lower()
 BREAKER_COOLDOWN_S = _int("BREAKER_COOLDOWN_S", 120)
+
+# ── Browser origins ──────────────────────────────────────────────────────────
+# The judge console runs on the dashboard's origin and calls this API directly from the
+# browser, so the API has to say that origin is allowed. Comma-separated; `*` permits any.
+#
+# Not wildcarded by default. The console sends a session token in `X-Judge-Session`, and
+# a token is worth exactly as much as the origins allowed to send it -- a wildcard would
+# let any page on the internet drive somebody's live session. The default names the
+# deployed dashboard and local development, and DEPLOY.md says to update it when the
+# dashboard URL changes.
+CORS_ALLOW_ORIGINS = _str(
+    "CORS_ALLOW_ORIGINS",
+    "https://meter-three-beta.vercel.app,http://localhost:3000,http://127.0.0.1:3000",
+)

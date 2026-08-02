@@ -773,3 +773,43 @@ body {
   background: var(--color-surface-4);
   border-radius: 4px;
 }
+
+/* ── Judge console ──────────────────────────────────────────────────────────
+   The console is the only page a stranger drives themselves, so its controls are
+   deliberately larger and higher-contrast than the dashboard's: someone reading this
+   has no context, no guide beside them, and no reason to hunt for the next step. */
+
+.judge-btn {
+  background: var(--color-accent);
+  color: var(--color-obsidian);
+  font-weight: 600;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  transition: filter 0.15s ease;
+}
+.judge-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.judge-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.judge-btn-quiet {
+  background: var(--color-surface-3);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.8125rem;
+}
+.judge-btn-quiet:hover:not(:disabled) { border-color: var(--color-border-hover); }
+.judge-btn-quiet:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.judge-input {
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  color: var(--color-text-primary);
+  font-size: 0.875rem;
+}
+.judge-input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}

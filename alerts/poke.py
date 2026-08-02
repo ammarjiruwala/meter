@@ -24,7 +24,6 @@ Owner: Tanay (Frontend & DX).
 from __future__ import annotations
 
 import logging
-import math
 import threading
 import time
 from typing import Any
@@ -74,16 +73,15 @@ def _money(value: float) -> str:
 
     So: keep two decimals once there are dollars to show, and widen below that until the
     figure is actually visible.
+
+    The implementation lives in ``proxy.pricing`` because the breaker's own log line
+    renders the same two numbers and had the same bug. Two copies of a function whose
+    entire purpose is "do not print a misleading zero" is how one of them goes back to
+    ``:.2f`` — so this delegates rather than duplicating.
     """
-    if value >= 1 or value == 0:
-        return f"${value:,.2f}"
-    # Enough places to show two significant figures, capped so it stays readable, then
-    # trimmed of trailing zeros so $0.0001 does not print as $0.00010.
-    places = min(max(2, -int(math.floor(math.log10(abs(value)))) + 1), 6)
-    text = f"{value:,.{places}f}".rstrip("0")
-    if len(text.split(".")[1]) < 2:          # never fewer than two decimals
-        text = f"{value:,.2f}"
-    return f"${text}"
+    from proxy.pricing import money
+
+    return money(value)
 
 
 def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:
@@ -126,19 +124,26 @@ def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _post(body: str) -> None:
-    """Blocking send. Only ever called on the dispatch thread."""
+def _post(body: str, api_key: str | None = None,
+          recipient: str | None = None) -> None:
+    """Blocking send. Only ever called on the dispatch thread.
+
+    The credentials are passed in rather than read from `config` here, and rather than
+    carried in a ContextVar: this runs on a `threading.Thread`, and a thread does not
+    inherit the spawning task's context. Capturing them at dispatch is the only way a
+    judge's own Linq key and phone number survive the hand-off.
+    """
     url = f"{config.POKE_API_BASE}/messages"
     try:
         response = httpx.post(
             url,
             timeout=config.POKE_TIMEOUT_S,
             headers={
-                "Authorization": f"Bearer {config.POKE_API_KEY}",
+                "Authorization": f"Bearer {api_key or config.POKE_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={
-                "to": [config.POKE_CTO_PHONE],
+                "to": [recipient or config.POKE_CTO_PHONE],
                 "message": {"parts": [{"type": "text", "value": body}]},
             },
         )
@@ -159,13 +164,35 @@ def _post(body: str) -> None:
         )
 
 
-def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any]) -> bool:
+def dispatch(body: str, api_key: str | None = None,
+             recipient: str | None = None, name: str = "poke-message") -> None:
+    """Send an arbitrary message on the same fire-and-forget path as an alert.
+
+    Exists for the judge console's "send a test message" step, which has to prove the
+    channel works *before* the breaker act depends on it — Linq's sandbox drops messages
+    to a recipient who has not texted the sending line first, silently, with error 2008.
+    Finding that out at the moment the breaker trips reads as the product being broken.
+
+    Same guarantees as everything else here: daemon thread, never blocks, never raises.
+    """
+    threading.Thread(
+        target=_post, args=(body, api_key, recipient), name=name, daemon=True
+    ).start()
+
+
+def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any],
+                       api_key: str | None = None,
+                       recipient: str | None = None) -> bool:
     """Fire-and-forget an iMessage about a tripped breaker.
 
     Returns whether a send was *dispatched* — not whether it arrived, which is
     not knowable synchronously and which no caller should be waiting on.
+
+    `api_key` and `recipient` let one tripped breaker alert the person who caused it
+    rather than this deployment's fixed on-call number. A judge running the console
+    supplies their own Linq key and phone; everything else keeps the configured pair.
     """
-    configured, reason = config.is_configured()
+    configured, reason = config.is_configured(api_key, recipient)
     if not configured:
         log.info("poke alert skipped: %s", reason)
         return False
@@ -183,7 +210,8 @@ def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any]) -> bool:
     # no event loop on this thread — breaker.check() runs under asyncio.to_thread
     # — so a thread is the right primitive rather than a task.
     threading.Thread(
-        target=_post, args=(body,), name=f"poke-alert-{scope}", daemon=True
+        target=_post, args=(body, api_key, recipient),
+        name=f"poke-alert-{scope}", daemon=True,
     ).start()
     return True
 

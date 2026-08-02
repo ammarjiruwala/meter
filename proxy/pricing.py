@@ -10,6 +10,7 @@ Owner: Shubh (Proxy & Infra).
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -131,3 +132,31 @@ def estimate_from_bytes(prompt_chars: int, completion_bytes: int) -> Usage:
         output_tokens=max(0, completion_bytes // 4),
         estimated=True,
     )
+
+
+def money(value: float) -> str:
+    """Format a dollar amount so it is never misleadingly zero.
+
+    Two decimals is right for production money and wrong for this product's demo scale.
+    A breaker floor of $0.0002 -- which is what a judge session runs, because a real call
+    costs $0.00004 and the production $20 floor is unreachable by hand -- renders as
+    ``$0.00`` under ``:.2f``. That produced an alert on a real phone reading
+
+        $0.00 in 5 min against a $0.00 floor
+
+    where both numbers were real and both rounded away, leaving the message's only two
+    quantitative claims as "nothing happened, against a threshold of nothing"
+    (EXPERIENCE.md #35).
+
+    So: keep two decimals once there are dollars to show, and widen below that until the
+    figure is actually visible. Lives here rather than in ``alerts`` because the breaker
+    log line, the alert body and the judge console all render the same numbers, and a
+    second copy of this is how one of them quietly goes back to ``:.2f``.
+    """
+    if value >= 1 or value == 0:
+        return f"${value:,.2f}"
+    places = min(max(2, -int(math.floor(math.log10(abs(value)))) + 1), 6)
+    text = f"{value:,.{places}f}".rstrip("0")
+    if len(text.split(".")[1]) < 2:          # never fewer than two decimals
+        text = f"{value:,.2f}"
+    return f"${text}"

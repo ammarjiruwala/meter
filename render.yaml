@@ -53,9 +53,14 @@ services:
         value: "true"
       - key: PRAVA_LIVE_MODE
         value: "false"
-      # The loop still runs while the service is awake; the tick endpoint covers the rest.
+      # OFF. The tick endpoint (`POST /treasury/tick`) drives the Treasurer on demand,
+      # which is the better demo anyway and is what WALKTHROUGH.md uses -- so the loop
+      # buys nothing here and costs something real: judges bring their own cards, and an
+      # unattended background charge on a stranger's card is the one failure this project
+      # cannot have. `treasurer.tick` also skips judge wallets outright, so this value and
+      # that check have to both be wrong before anything can happen.
       - key: TREASURER_ENABLED
-        value: "true"
+        value: "false"
       - key: TREASURER_INTERVAL_S
         value: "30"
 

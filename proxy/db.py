@@ -107,6 +107,37 @@ CREATE TABLE IF NOT EXISTS meter_keys (
     revoked_at  TEXT
 );
 
+-- One row per "Try it yourself" judge session (PITCH.md §2). A judge gets their own
+-- `projects` row and their own `meter_keys` row, exactly like any other tenant, so
+-- `resolve_key` authenticates them through the unchanged path. This table holds only
+-- what a judge session needs *beyond* being a tenant: how long it lives, how much it may
+-- spend, and the demo-scale breaker floor that lets them actually trip it.
+--
+-- Deliberately a separate table rather than columns on `meter_keys`, for three reasons
+-- (PITCH.md §5): `meter_keys` stores a hash precisely so a leaked ledger yields no
+-- working credentials, it sits on the authentication hot path where a judge-console bug
+-- must not reach, and judge rows are ephemeral where key rows are permanent. Drop this
+-- table and the rest of the product is byte-identical.
+--
+-- NO SECRETS HERE. A judge's Prava merchant key, Linq key and phone live in an
+-- in-process TTL vault (`judge/sessions.py`), never in Postgres — which is what the
+-- console promises them, and what keeps encryption-at-rest and key rotation out of
+-- scope. Safe because the backend is pinned to one instance anyway by budget.py's
+-- in-process reservation lock.
+CREATE TABLE IF NOT EXISTS judge_sessions (
+    token              TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL REFERENCES projects(id),
+    key_id             TEXT NOT NULL,
+    display_name       TEXT,
+    email              TEXT,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    breaker_floor_usd  double precision,
+    ceiling_usd_day    double precision,
+    call_cap           INTEGER NOT NULL DEFAULT 25,
+    calls_used         INTEGER NOT NULL DEFAULT 0
+);
+
 -- Per-feature daily ceilings, the `features:` block of meter.yaml. Not in
 -- ARCHITECTURE.md §4, which gives ceilings only at project level — but README.md's own
 -- meter.yaml example sets them per feature, and a project-only ceiling cannot express
@@ -293,6 +324,15 @@ _ADDED_COLUMNS = (
     # is watching them.
     ("projects", "sort_order", "INTEGER"),
     ("feature_budgets", "sort_order", "INTEGER"),
+    # Per-project circuit-breaker floor, overriding config.BREAKER_WINDOW_USD. NULL means
+    # "use the configured default", which is every project that predates this column.
+    #
+    # It is on `projects` rather than in `judge_sessions` on purpose: breaker sensitivity
+    # per tenant is a general product feature, it belongs beside `fail_mode` which is
+    # already per-project config, and `replace_budgets` does not clear it -- that function
+    # nulls `ceiling_usd_day` and `sort_order` at every boot, so a judge's floor stored
+    # there would silently vanish on the next Render cold start (PROPOSALS.md M8).
+    ("projects", "breaker_floor_usd", "double precision"),
 )
 
 
@@ -369,12 +409,54 @@ def resolve_key(raw_key: str) -> dict[str, Any] | None:
     conn = connect()
     with _lock:
         row = conn.execute(
-            """SELECT k.id AS key_id, k.project_id, k.revoked_at, p.environment, p.fail_mode
+            # `breaker_floor_usd` rides along on a join the request path already makes.
+            # It is per-project config exactly like `fail_mode` beside it, and reading it
+            # here rather than in `breaker.check` is what keeps the floor free: another
+            # query would be another sequential round trip, and overhead is round trips
+            # times RTT (proxy/README.md).
+            """SELECT k.id AS key_id, k.project_id, k.revoked_at, p.environment,
+                      p.fail_mode, p.breaker_floor_usd
                FROM meter_keys k JOIN projects p ON p.id = k.project_id
                WHERE k.hash = ?""",
             (hash_key(raw_key),),
         ).fetchone()
     return dict(row) if row else None
+
+
+def set_breaker_floor(project_id: str, floor_usd: float | None) -> None:
+    """Override the circuit-breaker floor for one project. ``None`` restores the default.
+
+    The deployed floor is the production ``$20`` and a templated call costs ``$0.00004``,
+    so a tenant who needs to *see* the breaker fire -- a judge session, a demo -- cannot
+    get there by hand. Before this, the only lever was ``BREAKER_WINDOW_USD`` in the
+    environment, which is process-global: lowering it for one judge lowered it for
+    production traffic at the same time.
+    """
+    conn = connect()
+    with _lock:
+        conn.execute(
+            "UPDATE projects SET breaker_floor_usd = ? WHERE id = ?",
+            (floor_usd, project_id),
+        )
+        conn.commit()
+
+
+def count_breaker_overrides() -> int:
+    """How many projects run a floor other than the configured default.
+
+    Surfaced by ``/healthz``. EXPERIENCE.md #32 is the reason: a restart that silently
+    failed left the *old* process serving, ``/healthz`` answered ``"status": "ok"`` from
+    it, and the only tell was that ``threshold_usd`` still read the production value. The
+    lesson recorded there was that a health check should echo the settings that were
+    overridden, not just prove something answers. Now that the floor is per project, the
+    single number at ``/healthz`` is a default that may apply to nobody.
+    """
+    conn = connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM projects WHERE breaker_floor_usd IS NOT NULL"
+        ).fetchone()
+    return int(dict(row)["n"]) if row else 0
 
 
 def revoke_key(key_id: str) -> None:
@@ -582,8 +664,26 @@ def replace_budgets(budgets: dict[str, tuple[float | None, dict[str, float | Non
     # and commit on its own. Silently non-atomic, which is the failure this docstring
     # exists to rule out.
     with _lock, pg.transaction() as tx:
-        tx.execute("DELETE FROM feature_budgets")
-        tx.execute("UPDATE projects SET ceiling_usd_day = NULL, sort_order = NULL")
+        # Runtime-owned projects are exempt from the wipe. meter.yaml is the source of
+        # truth for ceilings *it declares*, and it cannot declare a ceiling for a tenant
+        # that did not exist when the file was written — a judge session mints its project
+        # at runtime, from someone who cannot open a pull request (PROPOSALS.md M8).
+        #
+        # Without this, a judge's ceilings survive exactly until the next boot, and on
+        # Render's free tier a spin-down guarantees one within fifteen idle minutes: they
+        # come back to an empty Team Spend card and unenforced limits, with nothing
+        # anywhere reporting a problem.
+        #
+        # Keyed on `environment` rather than an id prefix, so the rule is a property of
+        # the project rather than a naming convention someone can break by renaming.
+        tx.execute(
+            "DELETE FROM feature_budgets WHERE project_id NOT IN "
+            "(SELECT id FROM projects WHERE environment = 'judge')"
+        )
+        tx.execute(
+            "UPDATE projects SET ceiling_usd_day = NULL, sort_order = NULL "
+            "WHERE environment IS DISTINCT FROM 'judge'"
+        )
         for order, (project_id, (ceiling, features)) in enumerate(budgets.items()):
             tx.execute(
                 "INSERT INTO projects (id, name, ceiling_usd_day, sort_order) "

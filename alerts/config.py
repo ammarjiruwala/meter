@@ -94,19 +94,33 @@ def phone_problem(number: str) -> str:
     return ""
 
 
-def is_configured() -> tuple[bool, str]:
+def is_configured(
+    api_key: str | None = None, recipient: str | None = None
+) -> tuple[bool, str]:
     """Whether an alert can actually be sent, and why not if it cannot.
 
     Returns the reason rather than just a boolean so startup can say which half
     is missing instead of failing silently at 3am.
+
+    `api_key` and `recipient` override the configured pair, which is what a judge
+    session passes: the alert has to reach *their* phone from *their* Linq account,
+    not the one wired into this deployment's environment (PITCH.md Act 1). They are
+    validated exactly as the configured values are — a judge who mistypes their number
+    should be told at the setup step, not discover it by never receiving anything.
     """
     if not POKE_ENABLED:
         return False, "POKE_ENABLED is false"
-    if not POKE_API_KEY:
-        return False, "POKE_API_KEY is unset"
-    if not POKE_CTO_PHONE:
-        return False, "POKE_CTO_PHONE is unset"
-    problem = phone_problem(POKE_CTO_PHONE)
+
+    key = api_key or POKE_API_KEY
+    phone = recipient or POKE_CTO_PHONE
+    key_name = "the supplied Linq key" if api_key else "POKE_API_KEY"
+    phone_name = "the supplied phone number" if recipient else "POKE_CTO_PHONE"
+
+    if not key:
+        return False, f"{key_name} is unset"
+    if not phone:
+        return False, f"{phone_name} is unset"
+    problem = phone_problem(phone)
     if problem:
-        return False, f"POKE_CTO_PHONE {problem}"
+        return False, f"{phone_name} {problem}"
     return True, "ok"

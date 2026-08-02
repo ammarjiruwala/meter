@@ -99,6 +99,30 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
+*   **Judge experience: BUILT, NOT YET DEPLOYED** — [PITCH.md](PITCH.md) (Ammar, 2026-08-03) is
+    the agreed design for asynchronous judging: a public dashboard anyone can read, plus an
+    opt-in **"Try it yourself"** session scoped to `judge-<nonce>` with the judge's own
+    Prava merchant key, Linq key and phone. Prompts are **templated and not editable** —
+    accuracy is keyed on `(project, feature)`, so free text falls to the raw heuristic
+    (~65–80% error against ~10%) and would make a working product look broken.
+    **Two organizer confirmations it rests on (2026-08-03): every judge has their own Prava
+    *merchant* key** — which closes the gap where a judge could not see their own charge in
+    their own wallet (EXPERIENCE #44), because they become the merchant — **and a judge's
+    Linq key can message their own phone.**
+    All four backend blockers are now built (`judge/`, 165 checks): per-project breaker
+    floor on `projects.breaker_floor_usd`, session tenants in `judge_sessions`,
+    per-project ceilings exempt from the `replace_budgets` wipe via
+    `environment = 'judge'`, and per-call Prava auth on a `ContextVar`. Plus the console
+    itself at **`/try`**, `X-Meter-Provider-Key` for bring-your-own-key, CORS for the
+    dashboard origin, and per-call Linq recipients.
+    **Two deployment changes are still required and neither has been made.**
+    `TREASURER_ENABLED` is `true` on Render and must become **`false`** — a background
+    loop was caught charging a shared wallet every 30s (EXPERIENCE #43), and judges bring
+    real cards. And Act 4 only settles a real charge if `TREASURER_DRY_RUN` is flipped,
+    which is a deliberate, irreversible decision: Prava allows **one purchase per mandate
+    per monthly cycle**. Vercel also needs `NEXT_PUBLIC_METER_PROXY_URL`, and the proxy
+    needs `CORS_ALLOW_ORIGINS` to name the dashboard if its URL changes.
+
 *   **Deployment: LIVE** (Ammar, 2026-08-02). Backend **https://meter-proxy.onrender.com**
     (Render free, Singapore, Docker), dashboard **https://meter-three-beta.vercel.app**,
     ledger on **Supabase** ap-south-1. **Render, not Fly.io** — Fly now requires a card and
