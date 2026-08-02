@@ -1,0 +1,269 @@
+{
+  "corpus": {
+    "tags": [],
+    "skipped": true
+  },
+  "tune": {
+    "per_feature": {
+      "book-chapter-summary": {
+        "0": 11.472589035614247,
+        "1": 11.40971540131204,
+        "2": 11.350540216086436,
+        "5": 11.192206612374681,
+        "10": 10.97858190895406,
+        "15": 12.145791213375686,
+        "20": 13.249670848529782,
+        "30": 14.92329481150534
+      },
+      "dataset-profile": {
+        "0": 5.933830633935443,
+        "1": 6.6778273809523805,
+        "2": 7.696216808960601,
+        "5": 8.537385545703605,
+        "10": 16.692079467263078,
+        "15": 24.364523509586906,
+        "20": 30.561497543771555,
+        "30": 39.956909789148256
+      },
+      "entity-tag": {
+        "0": 0.0,
+        "1": 0.8741258741258716,
+        "2": 1.6968325791855212,
+        "5": 3.8981288981288933,
+        "10": 6.868131868131878,
+        "15": 9.206219312602283,
+        "20": 11.094674556213025,
+        "30": 13.957816377171214
+      },
+      "full-spec-draft": {
+        "0": 6.852796178020242,
+        "1": 3.895041039059895,
+        "2": 5.322484289559529,
+        "5": 7.342670949591058,
+        "10": 17.28430409774388,
+        "15": 25.110696150545014,
+        "20": 31.432012808576715,
+        "30": 41.015944515915095
+      },
+      "json-extract": {
+        "0": 0.0,
+        "1": 1.8675123326286154,
+        "2": 3.6251709986320018,
+        "5": 8.32809553739786,
+        "10": 14.673311184939095,
+        "15": 19.66848095002474,
+        "20": 23.70304114490161,
+        "30": 29.819954988747188
+      },
+      "legal-contract-review": {
+        "0": 4.017642760204614,
+        "1": 3.031521557486631,
+        "2": 3.317856699275972,
+        "5": 6.896718895808782,
+        "10": 10.649146118092965,
+        "15": 15.423793424801818,
+        "20": 19.280239326374357,
+        "30": 25.1271089190811
+      },
+      "log-anomaly-summary": {
+        "0": 4.994949494949495,
+        "1": 6.228182137273047,
+        "2": 8.609625668449196,
+        "5": 15.503685503685514,
+        "10": 23.751062022090064,
+        "15": 31.176178166633523,
+        "20": 37.17338736030326,
+        "30": 46.26593033135089
+      },
+      "migration-guide": {
+        "0": 6.130503965590115,
+        "1": 5.962398656513672,
+        "2": 6.559469174598152,
+        "5": 12.412011144405511,
+        "10": 21.709344385400716,
+        "15": 29.028521617673547,
+        "20": 34.940164766816984,
+        "30": 43.90297857358284
+      },
+      "multi-log-correlate": {
+        "0": 17.69097927671678,
+        "1": 15.787303320042966,
+        "2": 14.384236453201952,
+        "5": 13.023946326488813,
+        "10": 19.788594727857,
+        "15": 27.450027431685655,
+        "20": 33.63810769247034,
+        "30": 43.02003582978907
+      },
+      "perf-analysis": {
+        "0": 7.705754610040982,
+        "1": 10.302906154803534,
+        "2": 11.75184298314867,
+        "5": 16.878160278131233,
+        "10": 25.96588861654935,
+        "15": 33.120057734027434,
+        "20": 38.89842509814435,
+        "30": 47.659175617934515
+      },
+      "readme-section": {
+        "0": 4.897973826196762,
+        "1": 4.675606053524625,
+        "2": 4.240426001545083,
+        "5": 9.348204755330695,
+        "10": 18.744296991261002,
+        "15": 26.141220666355082,
+        "20": 32.115659019315686,
+        "30": 41.17367845767531
+      },
+      "release-notes-bulk": {
+        "0": 12.985224689631053,
+        "1": 12.639950828445318,
+        "2": 13.228793343206979,
+        "5": 19.35525762164241,
+        "10": 27.62112212429337,
+        "15": 30.707486617698223,
+        "20": 36.23621793734944,
+        "30": 44.61848800262706
+      },
+      "repo-wide-audit": {
+        "0": 10.520539013257988,
+        "1": 9.26757365954952,
+        "2": 7.3669425305130405,
+        "5": 8.015591797775876,
+        "10": 15.89768072664685,
+        "15": 23.47042340783318,
+        "20": 29.586869419560625,
+        "30": 38.860190792179615
+      },
+      "rfc-draft": {
+        "0": 5.439368370298939,
+        "1": 5.29324910438986,
+        "2": 7.0897116091973595,
+        "5": 13.908612272777093,
+        "10": 23.108716342686257,
+        "15": 30.351351461550923,
+        "20": 36.201172134480075,
+        "30": 45.070255090211376
+      },
+      "schema-map": {
+        "0": 11.426277242467686,
+        "1": 10.731805031408081,
+        "2": 9.424931232063239,
+        "5": 7.483410383955882,
+        "10": 14.30799198003005,
+        "15": 21.656430635325886,
+        "20": 27.591708010757156,
+        "30": 36.590354354152936
+      },
+      "security-audit": {
+        "0": 7.333715839464032,
+        "1": 8.422002328573917,
+        "2": 11.090185642873191,
+        "5": 17.016863793284507,
+        "10": 26.791937890084995,
+        "15": 34.487208987566206,
+        "20": 40.70262025860873,
+        "30": 50.12598573406032
+      },
+      "severity-triage": {
+        "0": 68.29179646936656,
+        "1": 68.88070738538028,
+        "2": 69.43497648280497,
+        "5": 70.91802082456289,
+        "10": 72.91895366661721,
+        "15": 71.64879872450382,
+        "20": 73.0630093420791,
+        "30": 75.20713511711261
+      },
+      "tradeoff-analysis": {
+        "0": 5.4708222811671074,
+        "1": 5.675150640168155,
+        "2": 6.841869143329113,
+        "5": 10.425646561225465,
+        "10": 16.646564251854006,
+        "15": 21.226501652766366,
+        "20": 25.19802928028212,
+        "30": 31.219377618773763
+      },
+      "unit-test-gen": {
+        "0": 10.436624997566057,
+        "1": 11.344791125577949,
+        "2": 11.483421392892105,
+        "5": 13.631064440418909,
+        "10": 23.036292094882207,
+        "15": 30.44040748243842,
+        "20": 36.42065452623382,
+        "30": 45.48748068940749
+      }
+    },
+    "overall": {
+      "0": 6.852796178020242,
+      "1": 6.6778273809523805,
+      "2": 7.696216808960601,
+      "5": 11.192206612374681,
+      "10": 18.744296991261002,
+      "15": 26.141220666355082,
+      "20": 32.115659019315686,
+      "30": 41.17367845767531
+    },
+    "best_k": 1,
+    "ks": [
+      0,
+      1,
+      2,
+      5,
+      10,
+      15,
+      20,
+      30
+    ]
+  },
+  "coldstart": {
+    "split": {
+      "rc": 0,
+      "out": "1224 rows, 32 features -> /Users/ammar/Desktop/meter-project/meter/data/corpus-split\n  train        991 rows  26 features: api-doc-paragraph, book-chapter-summary, changelog-entry, commit-message, entity-tag, full-spec-draft, incident-runbook, json-extract, legal-contract-review, log-anomaly-summary, migration-guide, multi-log-correlate, perf-analysis, postmortem-timeline, pr-description, readme-section, repo-wide-audit, rfc-draft, schema-map, security-audit, severity-triage, sql-from-question, test-plan, ticket-classify, tradeoff-analysis, unit-test-gen\n  validation   113 rows  3 features: dataset-profile, regex-explain, release-notes-bulk\n  test         120 rows  3 features: code-review-note, error-explainer, ticket-summary\n\nheld out by FEATURE: test features never appear in train, so scoring them measures cold start rather than memorisation.\n"
+    },
+    "optimize": {
+      "rc": 0,
+      "out": "train 991 rows   validation 113 rows\n\nBASELINE (shipped constants, no fitted factors)\n  median  54.3%  mape   50.2%  under 83.2%  within-50% 38.9%\n\nSTAGE 1 \u2014 fit per-bucket factors on train\n  code          x 1.83\n  default       x 1.33\n  explanation   x 0.73\n  json          x 0.80\n  list          x 1.40\n  summary       x 1.99\n  -> median  29.0%  mape   63.4%  under 48.7%  within-50% 66.4%\n\nSTAGE 2 \u2014 coordinate search on validation (3 rounds max)\n  start        median  29.0%  mape   63.4%  under 48.7%  within-50% 66.4%\n  base_scope           -> 40     median  27.4%  mape   61.0%  under 50.4%\n  base_scope           -> 60     median  26.6%  mape   62.5%  under 49.6%\n  task_code            -> 100    median  14.0%  mape   45.0%  under 54.9%\n  -- round 1 done --\n  -- round 2 done --\n\nRESULT on validation\n                           median     mape   under  within-50%\n  baseline                  54.3%    50.2%   83.2%       38.9%\n  + fitted factors          29.0%    63.4%   48.7%       66.4%\n  + search                  14.0%    45.0%   54.9%       69.9%\n  TARGET                     <30%     <40%       \u2014\n\n  constants changed: {'base_scope': 60.0, 'task_code': 100.0}\n"
+    },
+    "discover": {
+      "rc": 0,
+      "out": "train 991   validation 113   (log_scope uses tuned config)\n\nGREEDY FORWARD SELECTION (each feature kept only if validation improves)\n  buckets + scope only        median  20.9%  within-2x  87.6%\n  + log_words                median  17.9%  within-2x  83.2%  (-3.0)\n  + asks_detail              median  14.9%  within-2x  71.7%  (-3.0)\n  + is_very_long             median  14.1%  within-2x  71.7%  (-0.9)\n  + asks_brief               median  12.6%  within-2x  71.7%  (-1.5)\n  + asks_code                median  11.6%  within-2x  73.5%  (-1.0)\n\n  selected 5: ['log_words', 'asks_detail', 'is_very_long', 'asks_brief', 'asks_code']\n\n                             median     mape   under  within-50%  within-2x\n  log-linear model            11.6%    24.2%   77.0%       72.6%      73.5%\n\n  coefficients (e^beta = multiplier on expected output):\n    log_words                +0.509   x 1.66\n    asks_detail              +1.471   x 4.35\n    is_very_long             -1.719   x 0.18\n    asks_brief               -1.752   x 0.17\n    asks_code                +0.137   x 1.15\n"
+    }
+  },
+  "cross": {
+    "rc": 0,
+    "out": "model      claude-haiku-4-5\ntasks      192 across 16 features\ninput      97,782 tokens (already measured on the GPT side)\nWORST CASE $1.60  (cap $2.00)\n\n0 matched pairs in 129s, 192 errors\n  api-doc-paragraph: TypeError: \"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set. Or for one of t\n  api-doc-paragraph: TypeError: \"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set. Or for one of t\n  api-doc-paragraph: TypeError: \"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set. Or for one of t\n"
+  },
+  "prequential": {
+    "rc": 0,
+    "out": "200 rows, batch size 40\n\n   batch   seen   median APE   within-2x  hist keys  gate\n  -------------------------------------------------------------\n       1     40        52.8%       42.5%          0  too few r\n       2     80        40.0%       50.0%          2  installed\n       3    120        56.4%       50.0%          3  installed\n       4    160        20.0%       55.0%          4  installed\n       5    200       159.9%       40.0%          4  installed\n\n  first third  median 46.4%\n  last third   median 90.0%\n  change       -43.6 points  ->  HARMFUL \u2014 the loop is making predictions worse\n"
+  },
+  "seed": {
+    "returncode": 0,
+    "stdout": "    kept 81%->66%\n              api-prod/sql-from-question                   kept 52%->22%\n              api-prod/ticket-classify                     kept 300%->128%\n              api-prod/ticket-summary                      kept 46%->17%\n              batch-jobs/api-doc-paragraph                 kept 40%->19%\n              batch-jobs/book-chapter-summary              kept 21%->20%\n              batch-jobs/dataset-profile                   kept 89%->31%\n              batch-jobs/incident-runbook                  kept 64%->27%\n              batch-jobs/log-anomaly-summary               kept 91%->11%\n              batch-jobs/multi-log-correlate               kept 93%->42%\n              batch-jobs/perf-analysis                     kept 93%->35%\n              batch-jobs/postmortem-timeline               kept 74%->31%\n              batch-jobs/schema-map                        kept 85%->38%\n              internal-tools/code-review-note              kept 58%->25%\n              internal-tools/error-explainer               kept 94%->38%\n              internal-tools/full-spec-draft               kept 91%->43%\n              internal-tools/legal-contract-review         kept 54%->15%\n              internal-tools/migration-guide               kept 91%->37%\n              internal-tools/pr-description                kept 73%->36%\n              internal-tools/readme-section                kept 87%->27%\n              internal-tools/regex-explain                 kept 81%->38%\n              internal-tools/repo-wide-audit               kept 87%->30%\n              internal-tools/rfc-draft                     kept 91%->31%\n              internal-tools/security-audit                kept 99%->81%\n              internal-tools/test-plan                     kept 97%->49%\n              internal-tools/tradeoff-analysis             kept 61%->22%\n              internal-tools/unit-test-gen                 kept 92%->39%\n\nStart the proxy against this ledger and /healthz will report learned_factors: 32\n"
+  },
+  "verify": {
+    "test_predictor": {
+      "rc": 0,
+      "out": " fits with enough rows\n  ok  thin key is skipped, not shrunk\n  ok  shrinkage still applies above the threshold\n  ok  absurd factor is clamped\n  ok  a large but real factor survives the clamp\n  ok  shrink_history matches what load_history installs\n  ok  set_history installs verbatim, no second shrink\n  ok  absurdly small factor is clamped\n  ok  a small but real factor survives the floor\n  ok  most specific rung wins\n  ok  (project,) outranks (bucket, model)\n  ok  unknown project falls to (bucket, model)\n  ok  bound defaults to the model maximum\n  ok  learned bound is tighter than the model maximum\n  ok  too few rows keeps the model maximum\n  ok  scope is unchanged by the history factor\n  ok  but the prediction did move\n  ok  scope is unchanged by the clamp\n\nbias direction\n  ok  forecast carries no safety buffer\n  ok  the bound is what guarantees safety\n  ok  a set max_tokens makes the bound exact\n\npricing\n  ok  cost is positive\n  ok  input tokens are monotonic\n  ok  longer input can predict shorter output\n  ok  pricing version is recorded\n  ok  cheaper model prices cheaper\n\nlearner\n  ok  fit is produced from sufficient data\n  ok  recovers known slope\n  ok  recovers known intercept\n  ok  in-sample error is near zero\n  ok  declines insufficient data\n  ok  fit is reproducible\n  ok  method names the rule that fired\n  ok  fit_all still available for per-bucket regression\n\naccuracy report\n  ok  overall count\n  ok  per-bucket count\n  ok  mape is computed\n  ok  under-prediction is tracked\n\npriors\n  ok  no bucket predicts zero tokens\n  ok  no negative coefficients\n  ok  default bucket exists\n  ok  translation  priors yield a positive estimate\n  ok  reasoning    priors yield a positive estimate\n  ok  explanation  priors yield a positive estimate\n  ok  code         priors yield a positive estimate\n  ok  default      priors yield a positive estimate\n  ok  list         priors yield a positive estimate\n  ok  json         priors yield a positive estimate\n  ok  summary      priors yield a positive estimate\n\nproxy integration\n  ok  predicts from an OpenAI messages body\n  ok  claude yields None rather than raising\n  ok  no model -> None\n  ok  empty messages -> None\n  ok  malformed body -> None\n  ok  unknown model -> None\n  ok  max_tokens is honoured through the seam\n  ok  ledger column predicted_output_tokens exists\n  ok  ledger column predicted_cost_usd exists\n  ok  ledger column bucket exists\n  ok  ledger column prediction_method exists\n\nledger migration\n  ok  migration added predicted_output_tokens\n  ok  migration added predicted_cost_usd\n  ok  migration added bucket\n  ok  migration added prediction_method\n  ok  historical rows survive\n  ok  bucket index created after the column\n\nrefresh gate\n  ok  gate installs a factor for the learnable key\n  ok  the good key is what got installed\n  ok  the unlearnable key is dropped, not installed\n  ok  installed factor moves toward the truth\n\n130 checks passed\n2026-08-02 06:01:36,139 INFO    meter.db | ledger migrated: added requests.predicted_output_tokens\n2026-08-02 06:01:36,139 INFO    meter.db | ledger migrated: added requests.predicted_cost_usd\n2026-08-02 06:01:36,139 INFO    meter.db | ledger migrated: added requests.bucket\n2026-08-02 06:01:36,139 INFO    meter.db | ledger migrated: added requests.prediction_method\n2026-08-02 06:01:36,139 INFO    meter.db | ledger migrated: added requests.predicted_scope_tokens\n2026-08-02 06:01:36,140 INFO    meter.db | ledger migrated: added requests.bound_output_tokens\n2026-08-02 06:01:36,140 INFO    meter.db | ledger migrated: added requests.bound_cost_usd\n2026-08-02 06:01:36,140 INFO    meter.db | ledger migrated: added requests.history_factor\n2026-08-02 06:01:36,142 INFO    meter.predictor.refresh | predictor refresh: {'rows': 160, 'holdout': 40, 'candidate_keys': 7, 'installed_keys': 1, 'gated': True, 'median_before': 300.0, 'median_after': 75.0, 'verdict': 'installed', 'detail': {'proj/good/actor': 'kept 300%->75%', 'proj/noisy/actor': 'dropped 475%->493%'}}\n"
+    },
+    "test_proxy": {
+      "rc": 0,
+      "out": "sktop/meter-project/meter/.venv/lib/python3.14/site-packages/yaml/composer.py\", line 55, in compose_document\n    node = self.compose_node(None, None)\n  File \"/Users/ammar/Desktop/meter-project/meter/.venv/lib/python3.14/site-packages/yaml/composer.py\", line 84, in compose_node\n    node = self.compose_mapping_node(anchor)\n  File \"/Users/ammar/Desktop/meter-project/meter/.venv/lib/python3.14/site-packages/yaml/composer.py\", line 133, in compose_mapping_node\n    item_value = self.compose_node(node, item_key)\n  File \"/Users/ammar/Desktop/meter-project/meter/.venv/lib/python3.14/site-packages/yaml/composer.py\", line 82, in compose_node\n    node = self.compose_sequence_node(anchor)\n  File \"/Users/ammar/Desktop/meter-project/meter/.venv/lib/python3.14/site-packages/yaml/composer.py\", line 110, in compose_sequence_node\n    while not self.check_event(SequenceEndEvent):\n              ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^\n  File \"/Users/ammar/Desktop/meter-project/meter/.venv/lib/python3.14/site-packages/yaml/parser.py\", line 98, in check_event\n    self.current_event = self.state()\n                         ~~~~~~~~~~^^\n  File \"/Users/ammar/Desktop/meter-project/meter/.venv/lib/python3.14/site-packages/yaml/parser.py\", line 483, in parse_flow_sequence_entry\n    raise ParserError(\"while parsing a flow sequence\", self.marks[-1],\n            \"expected ',' or ']', but got %r\" % token.id, token.start_mark)\nyaml.parser.ParserError: while parsing a flow sequence\n  in \"/var/folders/56/7z25gl5s1cxbrnlk24hyvdth0000gp/T/meter-selfcheck-i8ac9p_g/meter.yaml\", line 1, column 11\nexpected ',' or ']', but got '<stream end>'\n  in \"/var/folders/56/7z25gl5s1cxbrnlk24hyvdth0000gp/T/meter-selfcheck-i8ac9p_g/meter.yaml\", line 2, column 1\n2026-08-02 06:01:37,525 INFO    meter.budget | no meter.yaml at /var/folders/56/7z25gl5s1cxbrnlk24hyvdth0000gp/T/meter-selfcheck-i8ac9p_g/absent.yaml \u2014 no daily ceilings configured\n2026-08-02 06:01:37,526 INFO    meter.budget | meter.yaml loaded: 1 project(s), 2 ceiling(s) active\n2026-08-02 06:01:37,531 WARNING meter.budget | expired 1 reservation(s) that were never released\n2026-08-02 06:01:37,532 WARNING meter.budget | meter.yaml: project 'proj-over' allocates $16.00 across its features, more than its own $10.00 ceiling. Enforcing both anyway \u2014 the project ceiling still binds, so the features cannot all run to their limits at once. Intentional if the per-feature numbers are independent caps.\n2026-08-02 06:01:37,533 INFO    meter.budget | meter.yaml loaded: 1 project(s), 3 ceiling(s) active\n2026-08-02 06:01:37,535 INFO    meter.budget | no meter.yaml at /var/folders/56/7z25gl5s1cxbrnlk24hyvdth0000gp/T/meter-selfcheck-i8ac9p_g/absent.yaml \u2014 no daily ceilings configured\n2026-08-02 06:01:37,537 INFO    httpx | HTTP Request: POST http://meter/v1/annotate \"HTTP/1.1 200 OK\"\n2026-08-02 06:01:37,538 INFO    httpx | HTTP Request: POST http://meter/v1/annotate \"HTTP/1.1 401 Unauthorized\"\n2026-08-02 06:01:37,538 INFO    httpx | HTTP Request: POST http://meter/v1/annotate \"HTTP/1.1 401 Unauthorized\"\n2026-08-02 06:01:37,538 INFO    httpx | HTTP Request: POST http://meter/v1/annotate \"HTTP/1.1 400 Bad Request\"\n2026-08-02 06:01:37,539 INFO    httpx | HTTP Request: POST http://meter/v1/annotate \"HTTP/1.1 400 Bad Request\"\n2026-08-02 06:01:37,539 INFO    httpx | HTTP Request: POST http://meter/v1/annotate \"HTTP/1.1 200 OK\"\n2026-08-02 06:01:37,548 INFO    httpx | HTTP Request: POST http://127.0.0.1:50721/v1/chat/completions \"HTTP/1.0 200 OK\"\n2026-08-02 06:01:37,548 INFO    httpx | HTTP Request: POST http://meter/v1/chat/completions \"HTTP/1.1 200 OK\"\n2026-08-02 06:01:37,952 INFO    meter.budget | meter.yaml loaded: 1 project(s), 1 ceiling(s) active\n2026-08-02 06:01:37,954 INFO    httpx | HTTP Request: POST http://meter/v1/chat/completions \"HTTP/1.1 429 Too Many Requests\"\n2026-08-02 06:01:38,553 INFO    meter.budget | no meter.yaml at /var/folders/56/7z25gl5s1cxbrnlk24hyvdth0000gp/T/meter-selfcheck-i8ac9p_g/absent.yaml \u2014 no daily ceilings configured\n"
+    },
+    "test_treasury": {
+      "rc": 0,
+      "out": "K\"\n2026-08-02 06:02:04,439 INFO    httpx | HTTP Request: GET http://testserver/treasury/assess?project_id=demo-project \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:04,440 INFO    httpx | HTTP Request: GET http://testserver/wallets \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:04,441 INFO    meter.treasury | runway 0.5 h on demo-project/openai (trigger: runway) \u2014 topping up $117.50\n2026-08-02 06:02:06,045 INFO    meter.treasury | topped up demo-project openai by $117.50 -> $120.00\n2026-08-02 06:02:06,046 INFO    meter.treasury | TREASURER ALERT | {'event': 'topup', 'project': 'demo-project', 'amount_usd': 117.5, 'balance_usd': 120.0, 'trigger': 'runway'}\n2026-08-02 06:02:06,046 INFO    meter.treasury | runway None h on dual/anthropic (trigger: floor) \u2014 topping up $25.00\n2026-08-02 06:02:07,651 INFO    meter.treasury | topped up dual anthropic by $25.00 -> $34.00\n2026-08-02 06:02:07,652 INFO    meter.treasury | TREASURER ALERT | {'event': 'topup', 'project': 'dual', 'amount_usd': 25.0, 'balance_usd': 34.0, 'trigger': 'floor'}\n2026-08-02 06:02:07,652 INFO    meter.treasury | runway None h on idle/openai (trigger: floor) \u2014 topping up $25.00\n2026-08-02 06:02:07,652 WARNING meter.treasury | top-up refused: no_chargeable_mandate {'project_id': 'idle', 'hint': 'POST /mandates/create to set one up, or POST /mandates/sync to claim an existing one; one_time mandates are excluded on purpose'}\n2026-08-02 06:02:07,652 INFO    meter.treasury | no top-up for idle: no_chargeable_mandate\n2026-08-02 06:02:07,653 INFO    meter.treasury | runway None h on none-such/openai (trigger: floor) \u2014 topping up $25.00\n2026-08-02 06:02:07,653 WARNING meter.treasury | top-up refused: no_chargeable_mandate {'project_id': 'none-such', 'hint': 'POST /mandates/create to set one up, or POST /mandates/sync to claim an existing one; one_time mandates are excluded on purpose'}\n2026-08-02 06:02:07,653 INFO    meter.treasury | no top-up for none-such: no_chargeable_mandate\n2026-08-02 06:02:07,653 INFO    meter.treasury | runway None h on unonboarded/openai (trigger: floor) \u2014 topping up $25.00\n2026-08-02 06:02:07,654 WARNING meter.treasury | top-up refused: no_chargeable_mandate {'project_id': 'unonboarded', 'hint': 'POST /mandates/create to set one up, or POST /mandates/sync to claim an existing one; one_time mandates are excluded on purpose'}\n2026-08-02 06:02:07,654 INFO    meter.treasury | no top-up for unonboarded: no_chargeable_mandate\n2026-08-02 06:02:07,654 INFO    meter.treasury | runway None h on w/openai (trigger: floor) \u2014 topping up $25.00\n2026-08-02 06:02:07,654 WARNING meter.treasury | top-up refused: no_chargeable_mandate {'project_id': 'w', 'hint': 'POST /mandates/create to set one up, or POST /mandates/sync to claim an existing one; one_time mandates are excluded on purpose'}\n2026-08-02 06:02:07,654 INFO    meter.treasury | no top-up for w: no_chargeable_mandate\n2026-08-02 06:02:07,654 INFO    meter.treasury | runway None h on zeta/openai (trigger: floor) \u2014 topping up $25.00\n2026-08-02 06:02:07,654 WARNING meter.treasury | top-up refused: no_chargeable_mandate {'project_id': 'zeta', 'hint': 'POST /mandates/create to set one up, or POST /mandates/sync to claim an existing one; one_time mandates are excluded on purpose'}\n2026-08-02 06:02:07,654 INFO    meter.treasury | no top-up for zeta: no_chargeable_mandate\n2026-08-02 06:02:07,655 INFO    httpx | HTTP Request: POST http://testserver/treasury/tick \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:07,657 INFO    httpx | HTTP Request: GET http://testserver/wallets \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:07,658 INFO    httpx | HTTP Request: GET http://testserver/wallets \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:07,660 INFO    httpx | HTTP Request: GET http://testserver/treasury/assess?project_id=demo-project \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:08,158 INFO    httpx | HTTP Request: GET http://testserver/openapi.json \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:08,159 INFO    httpx | HTTP Request: POST http://testserver/v1/chat/completions \"HTTP/1.1 401 Unauthorized\"\n"
+    },
+    "test_alerts": {
+      "rc": 0,
+      "out": "\nconfiguration gate\n  ok  no send without an API key\n  ok  and no HTTP call was made\n  ok  no send without a destination number\n  ok  POKE_ENABLED=false suppresses a fully configured install\n\nE.164 validation\n  ok  accepts E.164\n  ok  rejects missing +\n  ok  rejects dashes\n  ok  rejects leading zero country code\n  ok  rejects empty\n  ok  rejects a +1 number one digit short\n  ok  accepts the corrected +1 number\n  ok  rejects a +1 number one digit long\n  ok  accepts a UK number\n  ok  malformed number blocks the send\n  ok  and the reason names the problem\n  ok  short +1 number blocks the send\n  ok  and the reason says how many digits it wanted\n\npayload\n  ok  dispatch reported\n  ok  exactly one HTTP call\n  ok  hits the v3 messages endpoint\n  ok  bearer token in the header\n  ok  recipient is a list\n  ok  single text part\n  ok  timeout is set\n\nmessage content\n  ok  names the scope\n  ok  carries the observed spend\n  ok  carries the threshold it broke\n  ok  states the window in minutes\n  ok  carries the burst ratio\n  ok  says throttle is tag-scoped\n  ok  tells you how to reset\n  ok  revoke reads differently from throttle\n  ok  handles an empty baseline\n  ok  composes from an empty metric\n\ncooldown\n  ok  first trip sends\n  ok  immediate re-trip is suppressed\n  ok  still only one HTTP call\n  ok  a different scope still alerts\n  ok  zero cooldown allows consecutive sends\n\nfailure isolation\n  ok  a raising transport does not propagate\n  ok  the call was attempted\n  ok  an auth rejection does not propagate\n\nnon-blocking dispatch\n  ok  caller returns immediately despite a 1.5s send\n  ok  the send is genuinely in flight\n\nbreaker integration\n  ok  notify() survives an unconfigured alerter\n  ok  notify() survives a failing transport\n\n46 checks passed\npoke alert failed to send: RuntimeError: connection reset\npoke alert rejected (HTTP 401): {}\nALERT circuit breaker tripped scope=api-prod:batch-eval mode=throttle spend=$24.1337 threshold=$20.00\nALERT circuit breaker tripped scope=api-prod:chat mode=revoke spend=$24.1337 threshold=$20.00\npoke alert failed to send: RuntimeError: boom\n"
+    },
+    "journey": {
+      "rc": 0,
+      "out": "INFO    meter.treasury | treasurer loop disabled (TREASURER_ENABLED=false)\n2026-08-02 06:02:32,075 INFO    meter.proxy | predictor refresh loop started (every 2s)\n2026-08-02 06:02:32,078 INFO    httpx | HTTP Request: GET http://meter/healthz \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:32,086 INFO    meter.predictor.refresh | predictor refresh: {'rows': 1224, 'holdout': 306, 'candidate_keys': 47, 'installed_keys': 32, 'gated': True, 'median_before': 85.0, 'median_after': 31.5, 'verdict': 'installed', 'detail': {'batch-jobs/log-anomaly-summary': 'kept 91%->11%', 'internal-tools/legal-contract-review': 'kept 54%->15%', 'internal-tools/error-explainer': 'kept 94%->38%', 'internal-tools/rfc-draft': 'kept 91%->31%', 'batch-jobs/schema-map': 'kept 85%->38%', 'api-prod/release-notes-bulk': 'kept 89%->43%', 'internal-tools/migration-guide': 'kept 91%->37%', 'api-prod/entity-tag': 'kept 29%->12%', 'internal-tools/readme-section': 'kept 87%->27%', 'api-prod/json-extract': 'kept 62%->26%', 'internal-tools/unit-test-gen': 'kept 92%->39%', 'batch-jobs/postmortem-timeline': 'kept 74%->31%', 'api-prod/changelog-entry': 'kept 33%->11%', 'batch-jobs/book-chapter-summary': 'kept 21%->20%', 'batch-jobs/incident-runbook': 'kept 64%->27%', 'internal-tools/security-audit': 'kept 99%->81%', 'internal-tools/pr-description': 'kept 73%->36%', 'api-prod/ticket-classify': 'kept 300%->128%', 'internal-tools/code-review-note': 'kept 58%->25%', 'internal-tools/full-spec-draft': 'kept 91%->43%', 'internal-tools/tradeoff-analysis': 'kept 61%->22%', 'batch-jobs/multi-log-correlate': 'kept 93%->42%', 'batch-jobs/api-doc-paragraph': 'kept 40%->19%', 'api-prod/severity-triage': 'kept 81%->66%', 'batch-jobs/perf-analysis': 'kept 93%->35%', 'api-prod/ticket-summary': 'kept 46%->17%', 'internal-tools/regex-explain': 'kept 81%->38%', 'internal-tools/repo-wide-audit': 'kept 87%->30%', 'batch-jobs/dataset-profile': 'kept 89%->31%', 'api-prod/sql-from-question': 'kept 52%->22%', 'api-prod/commit-message': 'kept 260%->100%', 'internal-tools/test-plan': 'kept 97%->49%'}}\n2026-08-02 06:02:32,332 INFO    httpx | HTTP Request: GET http://meter/healthz \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:32,333 INFO    httpx | HTTP Request: GET http://meter/healthz \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:32,334 INFO    httpx | HTTP Request: POST http://meter/v1/chat/completions \"HTTP/1.1 401 Unauthorized\"\n2026-08-02 06:02:32,335 INFO    httpx | HTTP Request: POST http://meter/v1/chat/completions \"HTTP/1.1 401 Unauthorized\"\n2026-08-02 06:02:32,839 INFO    httpx | HTTP Request: POST http://meter/v1/annotate \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:32,841 WARNING meter.breaker | breaker TRIPPED scope=api-prod:runaway-loop mode=throttle tripped spend=$60.0000/300s floor=$20.00 burst=12.00x (need 3.00x, ceiling 12x)\n2026-08-02 06:02:32,841 WARNING meter.breaker | ALERT circuit breaker tripped scope=api-prod:runaway-loop mode=throttle spend=$60.0000 threshold=$20.00\n2026-08-02 06:02:32,844 INFO    meter.alerts.poke | poke alert skipped: POKE_API_KEY is unset\n2026-08-02 06:02:32,844 INFO    meter.breaker | breaker api-prod:runaway-loop reset by manual (1 event(s) closed)\n2026-08-02 06:02:32,845 INFO    httpx | HTTP Request: POST http://meter/v1/breaker/reset \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:32,849 INFO    httpx | HTTP Request: GET http://meter/wallets \"HTTP/1.1 200 OK\"\n2026-08-02 06:02:33,605 INFO    httpx | HTTP Request: GET https://sandbox.api.prava.space/v1/mandates \"HTTP/1.1 401 Unauthorized\"\n2026-08-02 06:02:33,606 WARNING meter.treasury.prava | prava GET /v1/mandates -> HTTP 401 AUTH_1001 (response-id 22f2f679-c0b1-41c7-a698-679acdb00bbe)\n2026-08-02 06:02:33,606 WARNING meter.treasury.routes | Prava returned no mandates list: {'error': {'code': 'AUTH_1001', 'message': 'Invalid API key'}, '_http_status': 401, '_response_id': '22f2f679-c0b1-41c7-a698-679acdb00bbe', '_ok': False, '_error': 'AUTH_1001'}\n2026-08-02 06:02:33,607 INFO    httpx | HTTP Request: GET http://meter/mandates \"HTTP/1.1 503 Service Unavailable\"\n"
+    }
+  }
+}

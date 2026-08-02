@@ -36,7 +36,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-SOURCES = ("gpt-4o-mini.jsonl", "gpt-4o-mini-v2.jsonl")
+SOURCES = ("gpt-4o-mini.jsonl", "gpt-4o-mini-v2.jsonl", "corpus.jsonl")
 
 
 def load() -> list[dict]:
@@ -59,11 +59,29 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--append", action="store_true",
                     help="keep existing seed rows instead of replacing them")
+    ap.add_argument("--project", default=None,
+                    help="project to seed under; defaults to the configured key's project")
     args = ap.parse_args()
 
     rows = load()
     if not rows:
         sys.exit("no probe data — run scripts/templated_probe.py first")
+
+    # The proxy derives project_id from the METER KEY, not from anything in the request.
+    # The probe files carry cosmetic project labels (api-prod, internal-tools,
+    # batch-jobs) that no real request will ever present, so seeding under them put the
+    # entire learned history on ladder rungs the proxy cannot reach: every lookup missed
+    # (demo-project, feature) and fell through to the bucket rungs, which are measured to
+    # be worse than no correction at all. Live median error was 72% with a ledger that
+    # scored 6% offline. Attribution has to match how the proxy attributes.
+
+    project = args.project
+    if project is None:
+        from proxy import config as _cfg
+        first = _cfg.METER_KEYS.split(",")[0].strip().split(":")
+        project = first[1] if len(first) > 1 else "demo-project"
+    for r in rows:
+        r["project"] = project
 
     feats = sorted({(r["project"], r["feature"]) for r in rows})
     print(f"source      {len(rows)} real calls, {len(feats)} (project, feature) pairs")
