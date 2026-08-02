@@ -494,12 +494,31 @@ def chargeable_mandate(project_id: str, provider: str,
     sql = ("SELECT * FROM mandates"
            " WHERE project_id = ? AND provider = ? AND active = 1"
            "   AND (recurring_frequency IS NULL OR recurring_frequency != 'one_time')"
-           # Spent for this cycle. Confirmed live: a second charge in the same cycle is
-           # declined by Visa with "Purchase already made in the current payment cycle",
-           # even though the mandate stays `active` with headroom left. `remaining` below
-           # `approvedAmount` is the observable signal that the cycle's one purchase is
-           # gone — `lastCharge` is not, since it reports the most recent *attempt* and
-           # may read `declined` while an earlier charge already consumed the cycle.
+           # Spent for this cycle. This is a documented PRAVA constraint, not a
+           # limitation of ours — `docs/prava/concepts/mandates.md` and
+           # `concepts/guardrails.md` both state it: recurring frequencies allow "one
+           # charge per cycle, single-merchant". Prava's roadmap note is explicit that
+           # scheduled auto-charging is "coming next; for now the agent still initiates
+           # each charge within the cycle".
+           #
+           # Verified directly on 2026-08-02 rather than inferred. A second $1 charge
+           # against a mandate with $12 of headroom and one completed charge came back
+           # HTTP 200 with status `failed`:
+           #
+           #   Visa did not return COMPLETED (status DECLINED): Purchase already made
+           #   in the current payment cycle for transaction: tli_01KZ1NZAA731…
+           #
+           # `remaining` below `approvedAmount` is the observable signal that the cycle's
+           # one purchase is gone. `lastCharge` is NOT — it reports the most recent
+           # *attempt* and may read `declined` while an earlier charge consumed the cycle.
+           #
+           # **What consumes a cycle is a REPORTED charge, not a minted credential.**
+           # Mandates on this account carry three `$2.00` charges each sitting at
+           # `awaiting_result`, which never locked their cycle — they were charged and
+           # never settled. That is why the docs can look contradictory: minting is
+           # repeatable, completing is not. Skipping the report is not a workaround,
+           # since an unsettled charge is exactly what Prava's go-live checklist calls an
+           # unverified integration.
            "   AND (remaining_usd IS NULL OR approved_amount_usd IS NULL"
            "        OR remaining_usd >= approved_amount_usd)")
     params: list[Any] = [project_id, provider]
