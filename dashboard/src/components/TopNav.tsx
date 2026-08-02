@@ -99,8 +99,17 @@ export function TopNav({ breaker }: { breaker: BreakerState }) {
           ))}
         </div>
 
+        {/* The console entry point, and the only nav item that is an action rather
+            than a jump. Deliberately always visible, including on the narrow layout
+            where the section links are hidden: a judge arriving with no context needs
+            exactly one obvious next step, and this is it (PITCH.md Act 0). */}
+        <Link href="/try" className="glass-pill ml-auto lg:ml-[6px]"
+              style={{ color: "var(--color-accent)", borderColor: "rgba(240,104,92,0.35)" }}>
+          Try it yourself
+        </Link>
+
         <div
-          className="glass-pill ml-auto cursor-default lg:ml-[6px]"
+          className="glass-pill cursor-default lg:ml-[6px]"
           style={{ color: pill.color, borderColor: pill.border }}
           title={
             breaker.open && breaker.scope ? `Scope: ${breaker.scope}` : undefined

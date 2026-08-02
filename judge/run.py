@@ -24,7 +24,11 @@ import time
 import uuid
 from typing import Any
 
+import asyncio
+
 import httpx
+
+from proxy import db
 
 from . import prompts, sessions
 
@@ -34,6 +38,20 @@ log = logging.getLogger("meter.judge.run")
 #: short enough that a wedged provider becomes an error message rather than a spinner
 #: nobody can explain.
 _TIMEOUT = httpx.Timeout(90.0, connect=10.0)
+
+# How long to wait for the ledger row after the response comes back.
+#
+# The proxy answers the caller *before* writing the row -- capture runs in a background
+# task precisely so it never blocks anyone, which is right. It does mean the row is not
+# there the instant the response is, and the console asking for its statistics at that
+# moment gets "0 calls" straight after a successful call, then a jump. That reads as the
+# ledger not working, on the one screen whose entire job is showing that it does.
+#
+# So the run waits, briefly, for its own row. Bounded and best-effort: a judge sees the
+# answer either way, and the row arrives in the table on the next refresh even if this
+# gives up.
+_ROW_WAIT_S = 3.0
+_ROW_POLL_S = 0.05
 
 
 class CapReached(Exception):
@@ -97,7 +115,46 @@ async def one(
         response = await client.post("/v1/chat/completions", headers=headers, json=body)
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-    return _render(prompt, response, elapsed_ms, trace_id)
+    rendered = _render(prompt, response, elapsed_ms, trace_id)
+    request_id = response.headers.get("x-meter-request-id")
+    if request_id and not rendered["blocked"]:
+        rendered["row"] = await _await_row(request_id)
+    return rendered
+
+
+async def _await_row(request_id: str) -> dict[str, Any] | None:
+    """Wait for this call's ledger row, so the console can show forecast beside outcome.
+
+    Returns None rather than raising if it does not arrive. A missing row here is a
+    display delay, not a lost row -- `record_request` is what guarantees the write, and
+    it is deliberately never skipped.
+    """
+    deadline = time.monotonic() + _ROW_WAIT_S
+    while time.monotonic() < deadline:
+        row = await asyncio.to_thread(_read_row, request_id)
+        if row is not None:
+            return row
+        await asyncio.sleep(_ROW_POLL_S)
+    return None
+
+
+def _read_row(request_id: str) -> dict[str, Any] | None:
+    conn = db.connect()
+    row = conn.execute(
+        """SELECT predicted_output_tokens, output_tokens, predicted_cost_usd, cost_usd,
+                  bound_cost_usd, history_factor, prediction_method, input_tokens
+             FROM requests WHERE id = ?""",
+        (request_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    r = dict(row)
+    predicted, actual = r.get("predicted_output_tokens"), r.get("output_tokens")
+    r["output_token_error_pct"] = (
+        round(abs(actual - predicted) / actual * 100, 1)
+        if predicted and actual else None
+    )
+    return r
 
 
 def _render(prompt: prompts.Prompt, response: httpx.Response,

@@ -35,6 +35,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 from treasury import db as treasury_db
@@ -287,6 +288,23 @@ app = FastAPI(
 #
 # Kept off the `/v1` prefix on purpose: `/v1` is the surface a caller's provider SDK
 # targets, and control-plane routes do not belong in it.
+# The judge console is a browser app on the dashboard's origin calling this API
+# directly, which a browser refuses without the API saying so. Explicit origins rather
+# than `*`: the console carries a session token in a header, and a wildcard would let any
+# page on the internet drive somebody's live session.
+#
+# It does not widen anything for the API's normal callers -- a provider SDK is not a
+# browser and never sends an Origin header, so CORS is inert on that path.
+_ORIGINS = [o.strip() for o in config.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app" if "*" not in _ORIGINS else None,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    max_age=600,
+)
+
 app.include_router(treasury_routes.router)
 app.include_router(mock_provider.router)
 
