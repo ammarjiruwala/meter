@@ -61,7 +61,21 @@ export function JudgeConsole({ session }: { session: ServerSession }) {
   const [stage, setStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [traceId, setTraceId] = useState<string | null>(null);
+
+  /**
+   * The trace every prompt in this session shares.
+   *
+   * Derived from the project id rather than held in state, for two reasons. It survives a
+   * reload — it used to live in `useState`, so a judge who refreshed lost the only handle
+   * on their own trace and could never annotate anything, which left Cost per Outcome
+   * permanently empty with no way to tell why.
+   *
+   * And it is the *same* id for all three prompts, which is the point of the panel: one
+   * resolved ticket is several calls, so the join has to have several calls to find.
+   * Tagging only the first made the row read `1 request` and quietly contradicted the
+   * claim printed above it.
+   */
+  const traceId = `ticket-${session.projectId.slice(-8)}`;
 
   const [treasury, setTreasury] = useState<TreasuryState | null>(null);
   const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
@@ -102,15 +116,13 @@ export function JudgeConsole({ session }: { session: ServerSession }) {
     setError(err instanceof JudgeError ? err.message : String(err));
   }
 
-  async function run(prompt: JudgePrompt, withTrace = false) {
+  async function run(prompt: JudgePrompt) {
     setError(null);
-    const trace = withTrace ? traceId ?? `judge-${Date.now().toString(36)}` : undefined;
-    if (trace) setTraceId(trace);
 
     setStage("Predicting the cost, before the call runs…");
     const tick = setTimeout(() => setStage("Calling gpt-4o-mini…"), 700);
     try {
-      const out = await judge.run(token, prompt.id, trace);
+      const out = await judge.run(token, prompt.id, traceId);
       setResult({ prompt, run: out.result });
       setStats(out.stats);
       setLive(out.session);
@@ -140,7 +152,6 @@ export function JudgeConsole({ session }: { session: ServerSession }) {
   }
 
   const next = prompts?.sequence[step] ?? null;
-  const finishedPrompts = prompts !== null && step >= prompts.sequence.length;
   const callsLeft = live?.calls_remaining ?? session.callCap - session.callsUsed;
 
   return (
@@ -174,7 +185,7 @@ export function JudgeConsole({ session }: { session: ServerSession }) {
                 <button
                   className="judge-btn"
                   disabled={!!stage || !!busy}
-                  onClick={() => void run(next, step === 0)}
+                  onClick={() => void run(next)}
                 >
                   {stage
                     ? "Running…"
@@ -188,18 +199,28 @@ export function JudgeConsole({ session }: { session: ServerSession }) {
               </div>
             )}
 
-            {finishedPrompts && traceId && (
-              <button
-                className="judge-btn-quiet"
-                disabled={!!busy}
-                onClick={() =>
-                  void act("Recording the outcome…", () =>
-                    judge.annotate(token, traceId, OUTCOME_VALUE_USD),
-                  )
-                }
-              >
-                Mark that ticket resolved — worth {usd(OUTCOME_VALUE_USD)}
-              </button>
+            {(stats?.calls ?? 0) > 0 && (
+              <div className="flex flex-col gap-[8px]">
+                <button
+                  className="judge-btn-quiet"
+                  disabled={!!busy || !!stage}
+                  onClick={() =>
+                    void act("Recording the outcome…", () =>
+                      judge.annotate(token, traceId, OUTCOME_VALUE_USD),
+                    )
+                  }
+                >
+                  Mark this ticket resolved — worth {usd(OUTCOME_VALUE_USD)}
+                </button>
+                <p
+                  className="text-[12px]"
+                  style={{ color: "var(--color-text-tertiary)" }}
+                >
+                  Attributes all {stats?.calls} of your calls to one outcome, and fills in
+                  Cost per Outcome at the bottom of the page — spend per resolved thing
+                  rather than per request.
+                </p>
+              </div>
             )}
 
             {prompts && (
