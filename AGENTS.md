@@ -63,9 +63,9 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                              # add provider keys + DATABASE_URL
 uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
-python tests/test_proxy.py                        # 241 checks, no framework, ~3s
-python tests/test_predictor.py                    # 130 checks, same convention
-python tests/test_treasury.py                     # 159 checks (treasury/)
+python tests/test_proxy.py                        # 249 checks, no framework, ~3s
+python tests/test_predictor.py                    # 131 checks, same convention
+python tests/test_treasury.py                     # 182 checks (treasury/)
 python tests/test_alerts.py                       # 46 checks (alerts/), needs Python 3.10+
 ruff check .                                      # CI runs this; keep it clean
 

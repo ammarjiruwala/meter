@@ -199,7 +199,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         five seconds by `busy_timeout` under write contention. Soak-measured worst-case
         event-loop stall fell from 44ms to **19ms**, and is now structurally bounded rather
         than merely observed to be small.
-    *   `test_treasury.py` is now **183 checks** (was 159).
+    *   `test_treasury.py` is now **182 checks** (was 159).
 
 *   Prior entry — **Shubh's lane closed out completely (`shubh/final`).** The
     streaming soak landed (see the soak entry below), and the three remaining Shubh-owned
@@ -212,7 +212,7 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     just the modules: the warning fires at exactly 80% and the eventual 429 names the same
     scope string. Refusals now also carry `X-Meter-Request-Id` — found because the live check
     caught a 429 with no id on it, and a breaker trip and a budget refusal both write ledger
-    rows the id is supposed to point at. `test_proxy.py` is now **241 checks**.
+    rows the id is supposed to point at. `test_proxy.py` is now **249 checks**.
 
 *   Prior entry — **Sustained-load soak built and passing; overhead numbers corrected (Shubh).** `tests/load_soak.py` closes the last open item in the proxy lane. It
     found three real bugs in the test harnesses. The benchmark's fake upstream had been
