@@ -43,7 +43,7 @@ def main() -> int:
     for name in SOURCES:
         path = REPO / "data" / "templated" / name
         if path.exists():
-            rows += [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+            rows += [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     if not rows:
         sys.exit("no corpus data found")
 
