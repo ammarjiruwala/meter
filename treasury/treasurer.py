@@ -33,6 +33,12 @@ log = logging.getLogger("meter.treasury")
 _task: asyncio.Task | None = None
 
 
+#: Wallets the autonomous loop must never touch. Duplicated from `judge.sessions` rather
+#: than imported: `treasury/` does not depend on `judge/`, and a money-safety check should
+#: not be able to break because of an import cycle someone introduces later.
+JUDGE_PROJECT_PREFIX = "judge-"
+
+
 def assess(project_id: str, provider: str | None = None) -> dict[str, Any]:
     """Would we top up right now, and why? Reads only — never spends.
 
@@ -148,6 +154,24 @@ async def tick() -> list[dict[str, Any]]:
     # request behind a background top-up decision. `busy_timeout` is 5s, which bounds that
     # stall at five seconds of total unresponsiveness under write contention.
     for wallet in await asyncio.to_thread(db.list_wallets):
+        # The background loop never acts on a judge session's wallet, and this is a
+        # safety property rather than a preference -- so it is enforced here rather than
+        # left to TREASURER_ENABLED, which anyone can flip back and which render.yaml
+        # ships as "true".
+        #
+        # Three things line up badly otherwise. A judge's wallet is seeded at $0.05,
+        # which is below the $10 floor, so every session becomes a live top-up target
+        # retried every 30 seconds. The judge's card is real. And this loop runs outside
+        # any request, so the per-session Prava ContextVar is unset and the charge would
+        # go out under *our* merchant key rather than theirs -- an unattended charge on a
+        # stranger's card, attributed to the wrong merchant.
+        #
+        # Judges top up on demand from the console, where the session is in scope and a
+        # human just pressed the button. EXPERIENCE.md #43 is the same failure at smaller
+        # stakes: a teammate's loop acting on a shared wallet nobody was watching.
+        if str(wallet["project_id"]).startswith(JUDGE_PROJECT_PREFIX):
+            continue
+
         decision = await asyncio.to_thread(assess, wallet["project_id"], wallet["provider"])
         if not decision["should_topup"]:
             results.append({"decision": decision, "acted": False})

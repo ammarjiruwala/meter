@@ -785,6 +785,37 @@ def test_annotate_is_scoped_and_returns_the_outcome() -> None:
               rows[0]["margin_usd"] is not None and rows[0]["request_count"] == 1)
 
 
+
+def test_the_treasurer_loop_never_touches_a_judge_wallet() -> None:
+    """A safety property, so it is enforced in code rather than by an env var."""
+    print("\nthe autonomous loop skips judge wallets")
+    import asyncio
+
+    from treasury import db as tdb
+    from treasury import treasurer
+
+    judge_session = sessions.create()
+    # Seeded exactly as the console seeds one: below the $10 floor, so the loop would
+    # certainly want to act on it.
+    tdb.ensure_wallet(judge_session.project_id, "openai", 0.05)
+    tdb.ensure_wallet("team-project", "openai", 0.05)
+
+    assessed = treasurer.assess(judge_session.project_id, "openai")
+    check("the wallet really is below the floor, so this is not a vacuous pass",
+          assessed["should_topup"] is True, str(assessed))
+
+    results = asyncio.run(treasurer.tick())
+    touched = {
+        r["decision"]["project_id"] for r in results
+        if isinstance(r, dict) and "decision" in r
+    }
+    check("the judge's wallet is not assessed at all",
+          judge_session.project_id not in touched, str(touched))
+    check("while an ordinary project still is", "team-project" in touched, str(touched))
+    check("and the prefix is the one judge sessions actually mint",
+          sessions.PROJECT_PREFIX == treasurer.JUDGE_PROJECT_PREFIX)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -811,6 +842,7 @@ def main() -> int:
             test_run_enforces_the_cap_and_never_leaks_the_key,
             test_breaker_reset_is_scoped_to_the_judge,
             test_annotate_is_scoped_and_returns_the_outcome,
+            test_the_treasurer_loop_never_touches_a_judge_wallet,
         ):
             suite()
     finally:
