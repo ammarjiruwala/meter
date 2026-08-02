@@ -1387,6 +1387,36 @@ happens on stage or at a booth, and they cannot be guessed.
 
 ---
 
+## Fixed on demo eve — 2026-08-02
+
+Everything actionable from the run above was fixed the same night. Test totals went
+**601 → 646** checks.
+
+| # | What | Where |
+| --- | --- | --- |
+| 38 | JSON body on a money route returned 200 and did nothing | `treasury/routes.py` — now 415 |
+| 39 | Selection preferred the mandates that cannot mint credentials | `treasury/db.py`, `treasury/config.py` |
+| 40 | One stuck row permanently disabled every top-up | `treasury/db.py` |
+| 41 | Cooldown renewed itself — a livelock in the payment path | `treasury/db.py` |
+| 28 | A learned factor could silently vanish for ten minutes | `predictor/refresh.py` |
+| 14 | A new project inherited no learned history at all | `predictor/engine.py`, `refresh.py` |
+| 35 | Breaker alert rendered demo-scale money as `$0.00` | `alerts/poke.py` |
+| 23 | Boot log named a SQLite file that does not exist | `proxy/app.py` |
+| 8, 12, 18, 19, 20, 21, 26, 31, 33 | Guide defects — free-tier claim, missing shell prerequisite, `curl` alias, BOM on piped output, wrong dashboard URL, renamed cards, silent `try.sh`, PowerShell env syntax, pacing contradiction | `WALKTHROUGH.md` |
+
+**Still open, deliberately** — these are decisions rather than defects:
+
+* **#43** — another machine's Treasurer is acting on `demo-project`'s wallet. Not fixable
+  in our code; it needs one designated Treasurer host. **Team decision before the demo.**
+* **#44** — a judge cannot see their own charge in their own Prava wallet, because we
+  built the merchant integration rather than the agent-linking flow. Either say so on
+  stage, or build linking after the hackathon.
+* **#36** — the seeded history is timestamped over a trailing 6h window, and the budget
+  card measures a trailing 24h. **Re-run `python scripts/seed_demo.py` on demo morning**
+  or the Team Spend card will read near zero as the seed ages out.
+* **#29, #37** — per-feature error ranges are narrower than run-to-run variance; the
+  `meter.yaml` mapping trap is documented but untested.
+
 ## What this says about judge onboarding
 
 _To be written once the run is complete. The questions it needs to answer:_
