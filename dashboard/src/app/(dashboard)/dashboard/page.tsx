@@ -15,7 +15,7 @@ import {
   getOutcomeCoverage,
   getLiveLogs,
   getProviderBalances,
-  getSpendSummary,
+  getHeadlineMetrics,
   isLedgerAvailable,
 } from "@/lib/db";
 
@@ -31,7 +31,6 @@ export default async function Home() {
   // of them depends on another.
   const [
     ledgerAvailable,
-    summary,
     spend,
     wallets,
     budgets,
@@ -40,9 +39,9 @@ export default async function Home() {
     liveLogs,
     outcomes,
     outcomeCoverage,
+    headline,
   ] = await Promise.all([
     isLedgerAvailable(),
-    getSpendSummary(),
     getTeamSpend(),
     getProviderBalances(),
     getBudgets(),
@@ -51,6 +50,7 @@ export default async function Home() {
     getLiveLogs(),
     getOutcomeCosts(),
     getOutcomeCoverage(),
+    getHeadlineMetrics(),
   ]);
 
   return (
@@ -88,7 +88,7 @@ export default async function Home() {
             expands on, and boxing it beside something else would make it look
             like one of several equal concerns. */}
         <div className="mb-[24px]">
-          <SpendHero summary={summary} />
+          <SpendHero metrics={headline} wallets={wallets} />
         </div>
 
         {/* Budgets are next, as a carousel: the constraint the numbers above are
