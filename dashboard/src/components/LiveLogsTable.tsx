@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { usePoll } from "@/lib/usePoll";
 import type { LiveLogRow } from "@/lib/db";
 import {
   usdColumnFormatter,
@@ -15,29 +15,15 @@ import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
 const POLL_INTERVAL_MS = 3000;
 
 export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
-  const [rows, setRows] = useState(initialRows);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function poll() {
-      try {
-        const res = await fetch("/api/live-logs", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as { logs: LiveLogRow[] };
-        if (!cancelled) setRows(data.logs);
-      } catch {
-        // Transient fetch failure — keep the last good rows and retry next tick
-        // rather than clearing the table.
-      }
-    }
-
-    const id = setInterval(poll, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
+  // Polls only while the tab is visible, backs off when nothing new arrives, and stops
+  // once idle. See `usePoll` — the unconditional setInterval this replaced kept fetching
+  // in a background window forever, which is metered on a serverless host.
+  const { data } = usePoll<{ logs: LiveLogRow[] }>(
+    "/api/live-logs",
+    { logs: initialRows },
+    { intervalMs: POLL_INTERVAL_MS },
+  );
+  const rows = data.logs;
 
   // Counted across every fetched row, not the visible ones. The table collapses by
   // default, and a footnote that changed when you expanded it would look unreliable
