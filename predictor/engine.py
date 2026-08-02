@@ -71,12 +71,34 @@ DEFAULT_BUFFER = 1.0
 # error) into a loss, so the gate correctly rejected every candidate and the loop
 # silently did nothing.
 #
+# Widened twice, both times because it was clamping real signal rather than noise.
+# First from [0.5, 3.0], when measured features wanted 0.27 to 18.2. Then from
+# [0.05, 20.0], after lowering `task_code` for cold start shrank code-bucket scopes:
+# `security-audit` then needed a factor of 51.7, was held to 20, and its held-out error
+# went from 8% to 63%. The two constants interact -- a smaller base scope demands a
+# larger correction -- so the ceiling has to clear the range the heuristic actually
+# creates, not the range we expected it to.
+#
 # Widening is safe because the clamp was never the thing guarding against noise --
 # MIN_ROWS_FOR_KEY (a key needs 20+ observations) and shrinkage toward 1.0 are. The clamp
 # only has to stop the absurd, so it is set well outside the observed range rather than
 # tightly around it.
-FACTOR_MIN = 0.05
-FACTOR_MAX = 20.0
+FACTOR_MIN = 0.02
+FACTOR_MAX = 100.0
+
+# How hard a fitted factor is pulled back toward 1.0, via (n*raw + k) / (n + k).
+# Was 20, set once and never revisited. Measured on 1,224 held-out slot fillings across
+# 19 features, k=20 cost 25 points of median error: 32.1% against 6.7% at k=1, and it
+# was worse for EVERY feature tested. It also holds at small fit sets -- subsampling
+# down to 10 fit rows still favours k=1 (9.5% vs 58.6%), which was the obvious
+# objection since MIN_ROWS_FOR_KEY admits a factor at 20 rows.
+#
+# The reason it was wrong: shrinkage guards against noisy estimates, but output length
+# inside one prompt template varies by only 1.0-1.4x (p90/p10). There is almost no
+# noise to suppress, so the blend contributed bias and nothing else -- visible as every
+# held-out row being under-predicted. It is kept non-zero because the guard is still
+# the right shape for a genuinely noisy feature; see scripts/shrinkage_sweep.py.
+SHRINK_K = 1
 TARGET_UNDER_PREDICTION = 0.15   # what a fitted buffer aims for
 
 # Step 1.
@@ -361,7 +383,7 @@ class Predictor:
     MIN_ROWS_FOR_KEY = 20
 
     def shrink_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
-                       shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
+                       shrink_k: int = SHRINK_K) -> Dict[Tuple[str, ...], float]:
         """The exact transformation `load_history` applies, without installing anything.
 
         Exists so `refresh.py`'s held-out gate can score the factors that would ACTUALLY
@@ -396,7 +418,7 @@ class Predictor:
             self._cache.clear()
 
     def load_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
-                     shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
+                     shrink_k: int = SHRINK_K) -> Dict[Tuple[str, ...], float]:
         """Install per-key correction factors with shrinkage toward 1.0.
 
         `factors` is {key_tuple: (median_actual_over_predicted, n)}. Shrinkage is not
@@ -444,9 +466,9 @@ def predict(payload: Payload, model: str, max_tokens: Optional[int] = None,
 def load_fits(rows_by_bucket): return _default.load_fits(rows_by_bucket)
 def load_buffers(observations): return _default.load_buffers(observations)
 def load_bounds(observations, quantile: float = 0.95): return _default.load_bounds(observations, quantile)
-def load_history(factors, shrink_k: int = 20): return _default.load_history(factors, shrink_k)
+def load_history(factors, shrink_k: int = SHRINK_K): return _default.load_history(factors, shrink_k)
 def set_history(factors): return _default.set_history(factors)
-def shrink_history(factors, shrink_k: int = 20): return _default.shrink_history(factors, shrink_k)
+def shrink_history(factors, shrink_k: int = SHRINK_K): return _default.shrink_history(factors, shrink_k)
 def current_fits(): return _default.fits
 def current_history(): return dict(_default._history)
 def current_buffers(): return _default.buffers
