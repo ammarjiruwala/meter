@@ -58,7 +58,14 @@ PRAVA_LIVE_MODE = _bool("PRAVA_LIVE_MODE", False)
 # network enforces on the mandate itself. Two independent limits beat one
 # (ARCHITECTURE.md §5).
 TREASURER_DRY_RUN = _bool("TREASURER_DRY_RUN", True)
-TREASURER_MAX_TOPUP_USD = _float("TREASURER_MAX_TOPUP_USD", 200.0)
+
+# $50, matching `MANDATE_MINTABLE_MAX_USD` below — a cap above the largest chargeable
+# mandate is not a rail, it is decoration. Mandates above $50 cannot mint credentials on
+# this sandbox, and Visa allows one purchase per cycle, so the most a single charge can
+# ever move is the mandate's own amount. At the old $200 the Treasurer would size a
+# top-up it could never complete and refuse itself with `insufficient_mandate_headroom`
+# after doing all the work.
+TREASURER_MAX_TOPUP_USD = _float("TREASURER_MAX_TOPUP_USD", 50.0)
 TREASURER_MAX_DAILY_USD = _float("TREASURER_MAX_DAILY_USD", 500.0)
 TREASURER_INTERVAL_S = _int("TREASURER_INTERVAL_S", 30)
 TREASURER_COOLDOWN_S = _int("TREASURER_COOLDOWN_S", 300)
@@ -89,7 +96,17 @@ TREASURER_MIN_BALANCE_USD = _float("TREASURER_MIN_BALANCE_USD", 10.0)
 
 # How much runway a top-up aims to restore, and the bounds on any single one.
 TREASURER_TARGET_HOURS = _float("TREASURER_TARGET_HOURS", 24.0)
-TREASURER_MIN_TOPUP_USD = _float("TREASURER_MIN_TOPUP_USD", 25.0)
+
+# $5, not $25. The floor exists so a trivial top-up does not burn the cycle's single
+# purchase on two cents of credit — but $25 was set when mandates were assumed large, and
+# it locks out anyone whose mandate is smaller than that. Someone onboarding with a $10 or
+# $15 mandate would watch the Treasurer decide to act, size the charge at $25, and then
+# refuse itself with `insufficient_mandate_headroom` — a correct refusal that reads
+# exactly like a broken agent.
+#
+# That is the self-serve case: a judge picks their own mandate amount, and the whole
+# point is that a small one still works end to end.
+TREASURER_MIN_TOPUP_USD = _float("TREASURER_MIN_TOPUP_USD", 5.0)
 
 # ── Mandate setup ────────────────────────────────────────────────────────────
 # The merchant a mandate is pinned to. This is the *destination* — the party being paid
