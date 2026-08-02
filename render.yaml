@@ -1,0 +1,61 @@
+# Render blueprint for the Meter backend.
+#
+#   Render dashboard -> New -> Blueprint -> point at this repo.
+#
+# WHY RENDER AND NOT FLY. Fly is now pay-as-you-go after a short trial, and the goal is a
+# link that stays up without a subscription. Render's free web-service tier is genuinely
+# free and runs a Docker image, which is all this needs.
+#
+# WHAT THE FREE TIER COSTS YOU, stated plainly rather than discovered later:
+#
+#   * It SPINS DOWN after ~15 minutes with no inbound request, and the next request pays
+#     a cold start of roughly a minute. For a judge or a recruiter clicking a link that
+#     is a bad first impression, so keep it warm — see `keep-warm` below.
+#   * While it is asleep the Treasurer loop is not running. That is survivable rather
+#     than fatal: no traffic means no burn, and no burn means nothing to top up. It does
+#     mean the "3am save" only holds while something is actually spending, which is worth
+#     being honest about rather than claiming an always-watching agent.
+#   * One instance only, which this build REQUIRES anyway: proxy/budget.py serialises
+#     reservations with an in-process asyncio.Lock, so a second instance would mean two
+#     locks both seeing the same headroom and a daily ceiling that silently stops holding
+#     (PROPOSALS.md A5). Do not add autoscaling here even if the plan later allows it.
+#
+# The dashboard is NOT here. It goes on Vercel: it is a Next.js app whose only heavy
+# route is static, and it never talks to this service — both read the same Supabase.
+
+services:
+  - type: web
+    name: meter-proxy
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore # closest Render offers to Supabase's ap-south-1 (Mumbai)
+    numInstances: 1 # see the asyncio.Lock note above — never raise this
+    healthCheckPath: /healthz
+    envVars:
+      # Set in the Render dashboard, not here. Committing them would put working
+      # credentials to a live OpenAI account in a public repository.
+      - key: DATABASE_URL # Supabase SESSION pooler (port 5432)
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: METER_KEYS # e.g. mk_<random>:demo-project:prod — NEVER the repo default
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PRAVA_API_KEY
+        sync: false
+      - key: POKE_API_KEY
+        sync: false
+      - key: POKE_CTO_PHONE
+        sync: false
+      # Safe defaults, committed on purpose so a fresh deploy cannot spend real money
+      # or serve without a ceiling.
+      - key: TREASURER_DRY_RUN
+        value: "true"
+      - key: PRAVA_LIVE_MODE
+        value: "false"
+      - key: METER_YAML_PATH
+        value: /app/meter.yaml
+      - key: PRICING_VERSION
+        value: "2026-08-01"

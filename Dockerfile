@@ -21,4 +21,11 @@ COPY . .
 
 EXPOSE 8080
 
-CMD ["uvicorn", "proxy.app:app", "--host", "0.0.0.0", "--port", "8080"]
+# Shell form on purpose, so `$PORT` expands at runtime.
+#
+# Fly reads the port from fly.toml and leaves PORT unset, so the 8080 default applies
+# and nothing changes there. Render, Railway and Cloud Run all inject PORT and health-
+# check *that* port — with the exec form's hardcoded 8080 the container starts happily,
+# never answers on the port being probed, and is killed as unhealthy. The failure looks
+# like a broken app rather than a port mismatch.
+CMD uvicorn proxy.app:app --host 0.0.0.0 --port ${PORT:-8080}
