@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
+
+import { usePoll } from "@/lib/usePoll";
 import type { TreasuryEvent } from "@/lib/db";
 import { Panel, PanelTitle } from "@/components/ui/primitives";
 
@@ -131,29 +133,16 @@ function linesFor(e: TreasuryEvent): Line[] {
 }
 
 export function AgentLog({ initialEvents }: { initialEvents: TreasuryEvent[] }) {
-  const [events, setEvents] = useState(initialEvents);
+  // Polls only while the tab is visible, backs off when the feed stops changing, and
+  // stops entirely once idle. See `usePoll` — an unconditional setInterval here was
+  // 1,200 requests an hour from a tab nobody was looking at.
+  const { data } = usePoll<{ events: TreasuryEvent[] }>(
+    "/api/treasury-events",
+    { events: initialEvents },
+    { intervalMs: POLL_INTERVAL_MS },
+  );
+  const events = data.events;
   const scroller = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function poll() {
-      try {
-        const res = await fetch("/api/treasury-events", { cache: "no-store" });
-        if (!res.ok) return;
-        const data = (await res.json()) as { events: TreasuryEvent[] };
-        if (!cancelled) setEvents(data.events);
-      } catch {
-        // Keep the last good feed and retry on the next tick.
-      }
-    }
-
-    const id = setInterval(poll, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, []);
 
   // Query returns newest-first (id DESC); a terminal reads oldest-first with the
   // newest arrival at the bottom, so it is reversed here rather than in SQL — the
