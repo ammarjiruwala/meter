@@ -21,4 +21,10 @@ COPY . .
 
 EXPOSE 8080
 
-CMD ["uvicorn", "proxy.app:app", "--host", "0.0.0.0", "--port", "8080"]
+# Shell form, and `${PORT:-8080}`, both deliberately. Render (and Cloud Run, and most
+# free container hosts) assign a port at runtime through `$PORT` and route to it — an app
+# hardcoded to 8080 there is reachable by nothing, and the failure looks like a health
+# check timing out rather than a port mismatch. Exec form would pass the literal string
+# `${PORT:-8080}` to uvicorn, so the shell has to expand it.
+# Locally and in compose, nothing sets PORT and it stays 8080.
+CMD ["sh", "-c", "uvicorn proxy.app:app --host 0.0.0.0 --port ${PORT:-8080}"]

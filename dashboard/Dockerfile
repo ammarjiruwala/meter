@@ -21,15 +21,17 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # Next collects telemetry on build by default; a CI/image build is not a useful signal
 # and it costs a network call in a sandbox that may not have one.
-ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    DOCKER_BUILD=1
 RUN npm run build
 
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
-    PORT=3000 \
     HOSTNAME=0.0.0.0
+# PORT is deliberately NOT pinned: server.js reads it, and hosts that assign one at
+# runtime (Render, Cloud Run) need to win. Defaults to 3000 when nothing sets it.
 
 # Non-root. The dashboard only ever reads the ledger, so there is no reason for its
 # process to be able to write anything in the image either.

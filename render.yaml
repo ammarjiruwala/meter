@@ -1,0 +1,53 @@
+# Render blueprint — the Meter backend on the free tier.
+#
+# Render's free web service is the free-tier host that actually fits this app: no credit
+# card, commercial use permitted, and it builds the Dockerfile that is already here.
+#
+# The one limitation that matters: a free service **spins down after ~15 minutes of
+# inactivity**, and the next request pays a 30–60s cold start. That is survivable here,
+# and specifically survivable for the demo, because the Treasurer does not depend on its
+# timer — `POST /treasury/tick` runs one pass on demand, which is why that endpoint
+# exists. Wake the service before demoing and the loop runs like normal.
+#
+# Deploy: Render dashboard → New → Blueprint → point at this repo.
+
+services:
+  - type: web
+    name: meter-proxy
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    # Frankfurt/Singapore/Oregon/Ohio are the options; pick the one nearest your Supabase
+    # region. Ours is ap-south-1 (Mumbai), so Singapore is the closest available — every
+    # request pays this round trip, and it is what dominates the overhead number.
+    region: singapore
+    healthCheckPath: /healthz
+
+    envVars:
+      # Set these in the Render dashboard, NOT here. `sync: false` means "prompt me,
+      # never store it in git".
+      - key: DATABASE_URL          # Supabase SESSION pooler
+        sync: false
+      - key: METER_KEYS            # MUST override: the default is public in this repo
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: PRAVA_API_KEY
+        sync: false
+      - key: POKE_API_KEY
+        sync: false
+      - key: POKE_CTO_PHONE
+        sync: false
+
+      # Safe defaults, committed on purpose so a fresh deploy cannot move money.
+      - key: TREASURER_DRY_RUN
+        value: "true"
+      - key: PRAVA_LIVE_MODE
+        value: "false"
+      # The loop still runs while the service is awake; the tick endpoint covers the rest.
+      - key: TREASURER_ENABLED
+        value: "true"
+      - key: TREASURER_INTERVAL_S
+        value: "30"
