@@ -313,9 +313,15 @@ export function Home() {
                   budgets per feature, and autonomously tops up provider credits
                   — so you don&apos;t have to worry about running out at 3am.
                 </p>
+                {/* No figure here on purpose. This badge carried $847.31, which
+                    came from the design mockup rather than from anything we have
+                    ever metered — real spend is around $2 — and it sat behind a
+                    pulsing "live" dot on a page that elsewhere promises "no mocks,
+                    no illustrations". The claim is now about what the proxy does
+                    to every call, which is true and needs no number to stand up. */}
                 <div className="live-badge reveal d3">
                   <span className="live-dot" />
-                  Live · <b>$847.31</b> metered today
+                  Live · <b>every call</b> priced and attributed
                 </div>
               </div>
 
