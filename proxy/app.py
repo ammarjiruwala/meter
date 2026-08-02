@@ -416,6 +416,19 @@ async def root(request: Request):
     )
 
 
+def _breaker_overrides() -> int | None:
+    """Per-project floor count for `/healthz`, or None if the ledger cannot answer.
+
+    Swallows its own errors on purpose: `/healthz` is what a load balancer and UptimeRobot
+    poll, and a liveness probe that 500s because one diagnostic field could not be read
+    turns a degraded ledger into a dead service.
+    """
+    try:
+        return db.count_breaker_overrides()
+    except Exception:  # noqa: BLE001 — diagnostics must never fail liveness
+        return None
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     """Liveness plus enough config echo to diagnose a misconfigured demo box fast."""
@@ -427,7 +440,12 @@ async def healthz() -> dict[str, Any]:
             "enabled": config.BREAKER_ENABLED,
             "mode": config.BREAKER_MODE,
             "window_s": config.BREAKER_WINDOW_S,
+            # The *default* floor. Per-project overrides live in
+            # `projects.breaker_floor_usd`, so this number may apply to nobody — hence the
+            # count beside it (db.count_breaker_overrides explains why it is there).
             "threshold_usd": config.BREAKER_WINDOW_USD,
+            "threshold_usd_scope": "default; per-project overrides may apply",
+            "project_floor_overrides": _breaker_overrides(),
             "baseline_window_s": config.BREAKER_BASELINE_WINDOW_S,
             "burst_ratio": config.BREAKER_BURST_RATIO,
             # Surfaced so a misconfiguration is visible from a health check rather than

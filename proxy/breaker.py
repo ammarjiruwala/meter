@@ -13,7 +13,12 @@ conflict between CONTEXT.md §5C's flat "> $20 in 5 minutes" and ARCHITECTURE.md
 against a 7-day baseline.)
 
 1. **Floor** — trailing 5-minute spend clears an absolute dollar threshold. Fast, and it
-   is the number both CONTEXT.md §5C and PLAN.md §3 specify.
+   is the number both CONTEXT.md §5C and PLAN.md §3 specify. **Per project**, overridable
+   via ``projects.breaker_floor_usd`` and defaulting to ``BREAKER_WINDOW_USD``: the
+   production floor is ``$20`` while a templated call costs ``$0.00004``, so a tenant who
+   needs to *watch* the breaker fire cannot reach it by hand. The only lever before this
+   was the environment variable, which is process-global — lowering it for one demo
+   lowered it for production traffic at the same moment.
 2. **Burst** — that 5-minute window's spend *rate* exceeds the trailing 1-hour average
    rate by a multiple. This is the anomaly test: it asks "is this tag spending unusually
    fast *for itself*", which is the question the 7-day-baseline ratio was reaching for.
@@ -54,11 +59,29 @@ from datetime import datetime
 from typing import Any
 
 from . import config, db
+from .pricing import money
 
 log = logging.getLogger("meter.breaker")
 
 THROTTLE = "throttle"
 REVOKE = "revoke"
+
+
+def floor_for(key: dict[str, Any] | None) -> float:
+    """The spend floor this request's project must clear before the breaker can trip.
+
+    Per-project when `projects.breaker_floor_usd` is set, otherwise the configured
+    default. The value arrives on the key row that `db.resolve_key` already fetched, so
+    honouring it costs no extra query on the hot path.
+
+    A floor of `0` is meaningful and distinct from unset -- it means "the burst check
+    alone decides" -- so this tests for None rather than falsiness.
+    """
+    if key is not None:
+        override = key.get("breaker_floor_usd")
+        if override is not None:
+            return float(override)
+    return config.BREAKER_WINDOW_USD
 
 
 @dataclass(slots=True)
@@ -112,6 +135,7 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
         return Decision(blocked=False)
 
     scope = scope_for(project_id, feature)
+    floor = floor_for(key)
     open_row = db.active_breaker(scope)
 
     if open_row is not None:
@@ -123,7 +147,7 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
         # verdict. The rolling window has been decaying the whole time, so a burst that
         # has genuinely stopped will now read under the threshold and the breaker closes
         # itself. Without this the demo trips the breaker once and never recovers.
-        tripped, metric = _evaluate(project_id, feature)
+        tripped, metric = _evaluate(project_id, feature, floor)
         if not tripped:
             db.close_breaker(scope, reset_by="auto-half-open")
             log.info(
@@ -135,7 +159,7 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
         log.warning("breaker %s re-opened; %s", scope, _describe(metric))
         return _blocked(open_row["mode"], scope, config.BREAKER_COOLDOWN_S, metric)
 
-    tripped, metric = _evaluate(project_id, feature)
+    tripped, metric = _evaluate(project_id, feature, floor)
     if not tripped:
         return Decision(blocked=False)
 
@@ -148,7 +172,9 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
     return _blocked(mode, scope, config.BREAKER_COOLDOWN_S, metric)
 
 
-def _evaluate(project_id: str, feature: str | None) -> tuple[bool, dict[str, Any]]:
+def _evaluate(
+    project_id: str, feature: str | None, floor_usd: float | None = None
+) -> tuple[bool, dict[str, Any]]:
     """Run both detection conditions for one attribution tag.
 
     Returns ``(tripped, metric)``. The metric is returned either way so a decision *not*
@@ -158,6 +184,7 @@ def _evaluate(project_id: str, feature: str | None) -> tuple[bool, dict[str, Any
     Two indexed reads on the hot path. The floor is evaluated first and short-circuits,
     so the common case (a quiet tag) costs one query, not two.
     """
+    floor = config.BREAKER_WINDOW_USD if floor_usd is None else floor_usd
     short_spend = db.window_spend(project_id, feature, config.BREAKER_WINDOW_S)
 
     metric: dict[str, Any] = {
@@ -165,12 +192,12 @@ def _evaluate(project_id: str, feature: str | None) -> tuple[bool, dict[str, Any
         "feature": feature,
         "window_s": config.BREAKER_WINDOW_S,
         "window_spend_usd": round(short_spend, 6),
-        "threshold_usd": config.BREAKER_WINDOW_USD,
+        "threshold_usd": floor,
     }
 
     # Condition 1 — floor. Below this, nothing else matters: a low-traffic tag whose
     # spend doubled is still spending almost nothing, and paging on it is noise.
-    if short_spend < config.BREAKER_WINDOW_USD:
+    if short_spend < floor:
         metric["result"] = "below_floor"
         return False, metric
 
@@ -218,8 +245,8 @@ def _describe(metric: dict[str, Any]) -> str:
     """One-line human summary of an evaluation, for logs and alerts."""
     parts = [
         f"{metric['result']}",
-        f"spend=${metric['window_spend_usd']:.4f}/{metric['window_s']}s",
-        f"floor=${metric['threshold_usd']:.2f}",
+        f"spend={money(metric['window_spend_usd'])}/{metric['window_s']}s",
+        f"floor={money(metric['threshold_usd'])}",
     ]
     if "burst_ratio" in metric:
         ratio = metric["burst_ratio"]
@@ -281,11 +308,11 @@ def notify(scope: str, mode: str, metric: dict[str, Any]) -> None:
     own exceptions, so alerting cannot escalate into a request failure.
     """
     log.warning(
-        "ALERT circuit breaker tripped scope=%s mode=%s spend=$%.4f threshold=$%.2f",
+        "ALERT circuit breaker tripped scope=%s mode=%s spend=%s threshold=%s",
         scope,
         mode,
-        metric.get("window_spend_usd", 0.0),
-        metric.get("threshold_usd", 0.0),
+        money(metric.get("window_spend_usd", 0.0)),
+        money(metric.get("threshold_usd", 0.0)),
     )
 
     try:

@@ -24,7 +24,6 @@ Owner: Tanay (Frontend & DX).
 from __future__ import annotations
 
 import logging
-import math
 import threading
 import time
 from typing import Any
@@ -74,16 +73,15 @@ def _money(value: float) -> str:
 
     So: keep two decimals once there are dollars to show, and widen below that until the
     figure is actually visible.
+
+    The implementation lives in ``proxy.pricing`` because the breaker's own log line
+    renders the same two numbers and had the same bug. Two copies of a function whose
+    entire purpose is "do not print a misleading zero" is how one of them goes back to
+    ``:.2f`` — so this delegates rather than duplicating.
     """
-    if value >= 1 or value == 0:
-        return f"${value:,.2f}"
-    # Enough places to show two significant figures, capped so it stays readable, then
-    # trimmed of trailing zeros so $0.0001 does not print as $0.00010.
-    places = min(max(2, -int(math.floor(math.log10(abs(value)))) + 1), 6)
-    text = f"{value:,.{places}f}".rstrip("0")
-    if len(text.split(".")[1]) < 2:          # never fewer than two decimals
-        text = f"{value:,.2f}"
-    return f"${text}"
+    from proxy.pricing import money
+
+    return money(value)
 
 
 def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:

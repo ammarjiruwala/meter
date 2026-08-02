@@ -252,6 +252,86 @@ def test_call_cap_counts_down() -> None:
           sessions.resolve(sessions.create().token).calls_used == 0)
 
 
+# ── The per-project breaker floor ────────────────────────────────────────────
+
+def test_breaker_floor_is_per_project() -> None:
+    print("\nthe breaker floor is per project, not per process")
+    from proxy import breaker, config as proxy_config
+
+    s = sessions.create(breaker_floor_usd=0.0002)
+
+    key = db.resolve_key(s.meter_key)
+    check("the floor rides along on resolve_key",
+          key.get("breaker_floor_usd") is not None)
+    check("floor_for reads the judge's override",
+          breaker.floor_for(key) == 0.0002)
+
+    db.seed_keys("mk_floor_default:ordinary-project:dev")
+    ordinary = db.resolve_key("mk_floor_default")
+    check("a project with no override gets the configured default",
+          breaker.floor_for(ordinary) == proxy_config.BREAKER_WINDOW_USD)
+    check("the default is unchanged by a judge existing",
+          proxy_config.BREAKER_WINDOW_USD == 20.0 or ordinary["breaker_floor_usd"] is None)
+    check("floor_for tolerates no key at all",
+          breaker.floor_for(None) == proxy_config.BREAKER_WINDOW_USD)
+
+    # A floor of exactly 0 means "the burst check alone decides" and must not be
+    # mistaken for "unset" — the difference between a breaker that can fire on any
+    # spend and one that needs $20 first.
+    zero = sessions.create(breaker_floor_usd=0.0)
+    check("a zero floor is honoured, not treated as unset",
+          breaker.floor_for(db.resolve_key(zero.meter_key)) == 0.0)
+
+    check("db.set_breaker_floor clears back to the default",
+          (db.set_breaker_floor(s.project_id, None),
+           breaker.floor_for(db.resolve_key(s.meter_key)))[1]
+          == proxy_config.BREAKER_WINDOW_USD)
+    check("and sets a new one",
+          (db.set_breaker_floor(s.project_id, 0.5),
+           breaker.floor_for(db.resolve_key(s.meter_key)))[1] == 0.5)
+
+    check("overrides are countable for /healthz", db.count_breaker_overrides() >= 1)
+
+
+def test_floor_actually_decides_the_trip() -> None:
+    """The point of the floor is what `_evaluate` does with it, not what it stores."""
+    print("\na demo-scale floor makes the breaker reachable")
+    from proxy import breaker
+
+    s = sessions.create(breaker_floor_usd=0.0002)
+    for _n in range(4):
+        db.record_request({
+            "id": f"req_{uuid.uuid4().hex}", "ts": db.now_iso(),
+            "project_id": s.project_id, "feature": "ticket-summary",
+            "provider": "openai", "model": "gpt-4o-mini",
+            "endpoint": "/v1/chat/completions",
+            "input_tokens": 100, "output_tokens": 200, "cost_usd": 0.0001,
+        })
+
+    tripped_low, metric_low = breaker._evaluate(s.project_id, "ticket-summary", 0.0002)
+    check("clears a demo-scale floor", tripped_low, str(metric_low))
+    check("the metric reports the effective floor, not the default",
+          metric_low["threshold_usd"] == 0.0002)
+
+    tripped_high, metric_high = breaker._evaluate(s.project_id, "ticket-summary", 20.0)
+    check("the same spend is nowhere near the production floor", not tripped_high)
+    check("and says why", metric_high["result"] == "below_floor")
+
+    # EXPERIENCE.md #35: the alert on a real phone read "$0.00 in 5 min against a
+    # $0.00 floor" because both real numbers rounded away at two decimals.
+    from proxy.pricing import money
+
+    check("money() widens below a cent instead of rounding to zero",
+          money(0.0002) == "$0.0002", money(0.0002))
+    check("and keeps two decimals once there are dollars",
+          money(24.5) == "$24.50" and money(0.0) == "$0.00")
+
+    described = breaker._describe(metric_low)
+    check("the floor is rendered legibly, not as $0.00",
+          "floor=$0.0002" in described, described)
+    check("so is the spend", "spend=$0.0004/" in described, described)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -266,6 +346,8 @@ def main() -> int:
             test_vault_lifecycle,
             test_expired_sessions_are_distinguishable,
             test_call_cap_counts_down,
+            test_breaker_floor_is_per_project,
+            test_floor_actually_decides_the_trip,
         ):
             suite()
     finally:

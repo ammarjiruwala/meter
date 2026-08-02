@@ -132,6 +132,11 @@ def create(
 
     The returned `meter_key` is the only time the raw key exists outside the caller: the
     ledger stores its SHA-256, exactly as it does for a teammate's key.
+
+    `breaker_floor_usd` is written onto the `projects` row rather than kept here, because
+    that is where `db.resolve_key` already reads per-project config from — so the request
+    path honours a judge's floor without a single extra query. The copy in
+    `judge_sessions` is what the console reports back; `projects` is what enforces it.
     """
     conn = db.connect()
 
@@ -146,9 +151,9 @@ def create(
 
     with _lock:
         conn.execute(
-            "INSERT INTO projects (id, name, environment) VALUES (?, ?, ?)"
-            " ON CONFLICT DO NOTHING",
-            (project_id, display_name or project_id, "judge"),
+            "INSERT INTO projects (id, name, environment, breaker_floor_usd)"
+            " VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            (project_id, display_name or project_id, "judge", breaker_floor_usd),
         )
         conn.execute(
             "INSERT INTO meter_keys (id, project_id, hash) VALUES (?, ?, ?)"

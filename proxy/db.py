@@ -324,6 +324,15 @@ _ADDED_COLUMNS = (
     # is watching them.
     ("projects", "sort_order", "INTEGER"),
     ("feature_budgets", "sort_order", "INTEGER"),
+    # Per-project circuit-breaker floor, overriding config.BREAKER_WINDOW_USD. NULL means
+    # "use the configured default", which is every project that predates this column.
+    #
+    # It is on `projects` rather than in `judge_sessions` on purpose: breaker sensitivity
+    # per tenant is a general product feature, it belongs beside `fail_mode` which is
+    # already per-project config, and `replace_budgets` does not clear it -- that function
+    # nulls `ceiling_usd_day` and `sort_order` at every boot, so a judge's floor stored
+    # there would silently vanish on the next Render cold start (PROPOSALS.md M8).
+    ("projects", "breaker_floor_usd", "double precision"),
 )
 
 
@@ -400,12 +409,54 @@ def resolve_key(raw_key: str) -> dict[str, Any] | None:
     conn = connect()
     with _lock:
         row = conn.execute(
-            """SELECT k.id AS key_id, k.project_id, k.revoked_at, p.environment, p.fail_mode
+            # `breaker_floor_usd` rides along on a join the request path already makes.
+            # It is per-project config exactly like `fail_mode` beside it, and reading it
+            # here rather than in `breaker.check` is what keeps the floor free: another
+            # query would be another sequential round trip, and overhead is round trips
+            # times RTT (proxy/README.md).
+            """SELECT k.id AS key_id, k.project_id, k.revoked_at, p.environment,
+                      p.fail_mode, p.breaker_floor_usd
                FROM meter_keys k JOIN projects p ON p.id = k.project_id
                WHERE k.hash = ?""",
             (hash_key(raw_key),),
         ).fetchone()
     return dict(row) if row else None
+
+
+def set_breaker_floor(project_id: str, floor_usd: float | None) -> None:
+    """Override the circuit-breaker floor for one project. ``None`` restores the default.
+
+    The deployed floor is the production ``$20`` and a templated call costs ``$0.00004``,
+    so a tenant who needs to *see* the breaker fire -- a judge session, a demo -- cannot
+    get there by hand. Before this, the only lever was ``BREAKER_WINDOW_USD`` in the
+    environment, which is process-global: lowering it for one judge lowered it for
+    production traffic at the same time.
+    """
+    conn = connect()
+    with _lock:
+        conn.execute(
+            "UPDATE projects SET breaker_floor_usd = ? WHERE id = ?",
+            (floor_usd, project_id),
+        )
+        conn.commit()
+
+
+def count_breaker_overrides() -> int:
+    """How many projects run a floor other than the configured default.
+
+    Surfaced by ``/healthz``. EXPERIENCE.md #32 is the reason: a restart that silently
+    failed left the *old* process serving, ``/healthz`` answered ``"status": "ok"`` from
+    it, and the only tell was that ``threshold_usd`` still read the production value. The
+    lesson recorded there was that a health check should echo the settings that were
+    overridden, not just prove something answers. Now that the floor is per project, the
+    single number at ``/healthz`` is a default that may apply to nobody.
+    """
+    conn = connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM projects WHERE breaker_floor_usd IS NOT NULL"
+        ).fetchone()
+    return int(dict(row)["n"]) if row else 0
 
 
 def revoke_key(key_id: str) -> None:
