@@ -6,6 +6,7 @@ import { ProviderBalancesCard } from "@/components/ProviderBalancesCard";
 import { LiveLogsTable } from "@/components/LiveLogsTable";
 import { CostPerOutcomeTable } from "@/components/CostPerOutcomeTable";
 import { AgentLog } from "@/components/AgentLog";
+import { TryItYourself } from "@/components/judge/SessionControls";
 import {
   getTeamSpend,
   getBudgets,
@@ -72,6 +73,10 @@ export default async function Home() {
               Live system status · metered through the proxy
             </div>
           </div>
+          {/* Right-aligned with the title, not buried in the nav. This is the only
+              action on the page and the one thing a visitor with no context needs
+              to find. */}
+          <TryItYourself />
         </div>
 
         {!ledgerAvailable && (

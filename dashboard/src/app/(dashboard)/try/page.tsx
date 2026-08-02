@@ -9,6 +9,7 @@ import { CostPerOutcomeTable } from "@/components/CostPerOutcomeTable";
 import { AgentLog } from "@/components/AgentLog";
 import { JudgeConsole } from "@/components/judge/JudgeConsole";
 import { JudgeStart } from "@/components/judge/JudgeStart";
+import { EndSession } from "@/components/judge/SessionControls";
 import { judgeContext } from "@/lib/session";
 import {
   getBreakerState,
@@ -134,6 +135,12 @@ export default async function TryPage() {
           <div className="animate-in delay-6">
             <CostPerOutcomeTable rows={outcomes} coverage={outcomeCoverage} />
           </div>
+        </div>
+
+        {/* The way out, at the end rather than the top: a judge should reach this by
+            finishing, not by looking for an escape. */}
+        <div className="mt-[32px]">
+          <EndSession token={judge.token} />
         </div>
       </main>
     </>

@@ -813,3 +813,30 @@ body {
   outline: none;
   border-color: var(--color-accent);
 }
+
+/* The console entry point. Loud on purpose: it is the only action on the dashboard,
+   and a visitor with no context has to find it without being told. */
+.judge-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--color-accent);
+  color: var(--color-obsidian);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  border-radius: 0.5rem;
+  padding: 0.7rem 1.25rem;
+  box-shadow: 0 0 0 1px rgba(240, 104, 92, 0.4), 0 8px 24px rgba(240, 104, 92, 0.18);
+  transition: filter 0.15s ease, transform 0.15s ease;
+}
+.judge-cta:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+.judge-cta-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-obsidian);
+  opacity: 0.55;
+}
