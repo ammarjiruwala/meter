@@ -1,586 +1,328 @@
-# Meter — set it up and prove every part works
+# Meter — see it working
 
-This is the hands-on guide. It takes you from a fresh clone to having personally
-verified every claim the product makes: interception, cost prediction, the ledger,
-budget ceilings, the circuit breaker, the iMessage alert, the Treasurer, and the
-dashboard.
+Meter is a drop-in LLM proxy. Point any OpenAI SDK at it and every call is metered,
+attributed to a feature and a person, **cost-predicted before it runs**, and written to a
+shared ledger. A runaway feature gets throttled and an engineer gets an iMessage. When the
+provider balance runs short, an agent holding a Prava mandate tops it up.
 
-**Who this is for, in order:** Shivam (who owns the Prava leg and is the only one who
-can complete §8), then Tanay and Shubh, then anyone we hand the repo to — including
-judges. Every command is copy-pasteable and every step says what you should see, so a
-failure is unambiguous rather than a shrug.
+It is deployed and running. **You do not need to clone or install anything.**
 
-**Time:** ~15 minutes for §1–§7. §8 needs a Prava mandate approved in a browser, which
-is another 2–3 minutes the first time.
-
-**Cost:** under 5 cents of real OpenAI spend for the whole walkthrough.
-
-> ### On the OpenAI free tier? Read this first.
->
-> The core walkthrough (§4, §5, §6, §9) is **17 requests and about 1,000 input
-> tokens** — comfortably under half of a free-tier day, whichever limit binds.
->
-> **Two things will bite you, and neither is Meter's fault:**
->
-> **1. Do not run `scripts/demo_live.py --n 2` (§5, "All 32 features at once").** It is
-> 64 requests and **600,000 input tokens** — several times a free-tier daily token
-> allowance, because it includes the high-consumption features whose prompts are 33k–44k
-> tokens each. A free-tier-safe version is given in that section.
->
-> **2. The free tier allows ~3 requests per minute. Pace yourself — roughly one command
-> every 20 seconds.** If you fire them back to back, OpenAI returns a `429` of its own,
-> and it looks almost exactly like the circuit breaker tripping in §6. Tell them apart
-> like this:
->
-> | | Meter's breaker | OpenAI's rate limit |
-> | --- | --- | --- |
-> | where it appears | `try.sh` prints an error; ledger row has status `429` | error mentions `rate_limit_exceeded` / `Rate limit reached` |
-> | proxy log | `breaker TRIPPED scope=...` | no breaker line |
-> | fix | wait 120s or reset the breaker | wait 60s |
-
----
-
-## 1. Prerequisites
-
-- Python 3.12+ and Node 20+
-- `DATABASE_URL` for the shared Supabase ledger — ask Shivam
-- An OpenAI key with credit (Tier 1+; the free tier's 50 requests/day will not survive §4)
-
-Optional, needed only for the section that uses them:
-
-| section | needs |
+| | |
 | --- | --- |
-| §6 iMessage alert | `POKE_API_KEY`, `POKE_CTO_PHONE` — ask Tanay |
-| §8 Prava top-up | `PRAVA_API_KEY` + an approved mandate — Shivam |
+| **Dashboard** | https://meter-three-beta.vercel.app |
+| **Proxy API** | https://meter-proxy.onrender.com |
+| **Meter key** | `mk_74e8201b8eb1cf6e98a1c29ab7b12bd0` |
+
+Three paths, shortest first. **Path A takes two minutes and needs nothing but a browser.**
+
+> ### ⏳ First request may be slow — this is expected
+> The backend is on a free tier that sleeps when idle. The first request after a quiet
+> spell takes **up to a minute**; everything after is ~1–2 seconds. If a command seems to
+> hang, it is waking up, not broken. Wake it first and wait for the reply:
+> ```bash
+> curl https://meter-proxy.onrender.com/healthz
+> ```
 
 ---
 
-## 2. Setup
+## Path A — look at it (2 minutes, browser only)
+
+Open **https://meter-three-beta.vercel.app**
+
+You are looking at a live ledger of **~1,300 real API calls**. Everything on the page is
+queried from Postgres; nothing is mocked.
+
+| panel | what it is showing |
+| --- | --- |
+| **Control Room** | Every proxied call — predicted cost beside actual cost, per person, per feature |
+| **Team Budget** | Spend against the ceilings declared in [`meter.yaml`](meter.yaml), rolling 24h |
+| **Cost per Outcome** | `requests × annotations` joined on trace id — spend per *resolved ticket*, not per call |
+| **Treasurer Agent** | The autonomous top-up loop's own log, including the runs it refused |
+| **Provider Balances** | What the wallet holds now |
+
+**The claim to check:** in Control Room, compare *Predicted* against *Actual*. Those
+predictions were made **before** each call, by a model that had never seen that prompt.
+Median error on tagged traffic is **~7% held-out, ~10% live**.
+
+---
+
+## Path B — run it yourself against the deployed proxy (10 minutes, curl only)
+
+Still no cloning. You are calling our proxy, which uses **our** OpenAI credits — your own
+API keys and rate limits are irrelevant.
+
+### B1. Prove it is up
+
+```bash
+curl -s https://meter-proxy.onrender.com/healthz
+```
+
+Look for `"status":"ok"` and **`"learned_factors":31`** — the predictor has loaded 31
+per-feature corrections from the shared ledger.
+
+### B2. Send one prompt
+
+```bash
+curl -s https://meter-proxy.onrender.com/v1/chat/completions \
+  -H "Authorization: Bearer mk_74e8201b8eb1cf6e98a1c29ab7b12bd0" \
+  -H "X-Meter-Feature: ticket-summary" \
+  -H "X-Meter-Actor: judge" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","max_tokens":400,"messages":[{"role":"user","content":"Summarise this support ticket in two sentences for the on-call engineer: The notification fanout times out under load. Users report it started this morning. Logs point at the connection pool. We saw OperationalError: database is locked in the pod events."}]}'
+```
+
+An ordinary OpenAI response comes back. **Now refresh the dashboard** — your call is at the
+top of Control Room within three seconds, with a predicted cost recorded *before* it ran and
+the actual cost beside it.
+
+That one observation proves authentication, attribution, pre-flight estimation, the provider
+key substitution, pricing, and the ledger write.
+
+### B3. Check the prediction across features
+
+`X-Meter-Feature` is the only thing that changes. Swap the tag and the prompt together:
+
+| feature tag | prompt |
+| --- | --- |
+| `sql-from-question` | `Write a SQL query answering: how many times did the notification fanout report 'OperationalError: database is locked' per day over the last week? Table events(ts, service, message).` |
+| `changelog-entry` | `Write a one-line user-facing changelog entry for a fix to the connection pool in the notification fanout, which previously times out under load.` |
+| `pr-description` | `Write a pull request description for a change to the connection pool in our Python notification fanout. The bug was that it times out under load. Include what changed and how to test it.` |
+| `postmortem-timeline` | `Draft the timeline section of a postmortem for an incident where the notification fanout times out under load, caused by the connection pool, first seen as OperationalError: database is locked. Include detection, escalation, mitigation, and resolution entries.` |
+| `code-review-note` | `Write a short code review comment asking the author to reconsider the connection pool in this Python notification fanout, given that it currently times out under load.` |
+| `commit-message` | `Write a conventional-commit message (subject line plus one body line) for a change that fixes the connection pool in the notification fanout, which previously times out under load.` |
+
+Expect **0–20% error** for most, and the dashboard shows each one as it lands.
+
+**Two will look bad, and here is why before you conclude the model is broken.**
+`commit-message` and `ticket-classify` produce 9–40 token answers, where being six tokens
+out is a 60% error and costs **one millionth of a dollar**. Percentage error is a poor
+metric at that scale; judge those two by cost. `incident-runbook` and `error-explainer`
+read high for a different reason — their training data was collected under a 400-token cap,
+so their learned history only holds at that cap. Both limits are documented in
+[CONTEXT.md](CONTEXT.md) rather than hidden.
+
+### B4. Confirm the circuit breaker is armed
+
+The breaker needs **two** conditions: trailing 5-minute spend over a floor **and** that
+spend rate at 3× the trailing hour's average. The second condition is what stops a
+legitimately expensive feature tripping every five minutes forever.
+
+The deployed floor is the production `$20`, which you cannot reach by hand — a call costs
+$0.00004. **To watch it actually fire, run it locally** (Path C3), where the floor can be
+lowered.
+
+What you can check here is that it is armed:
+
+```bash
+curl -s https://meter-proxy.onrender.com/healthz | grep -o '"breaker":{[^}]*}'
+```
+
+`"can_fire":true` means both conditions are satisfiable with the configured windows. The
+proxy shouts at boot if they are not, because a breaker that cannot fire is worse than no
+breaker — everyone believes they are protected.
+
+### B5. Watch the Treasurer decide
+
+```bash
+curl -s https://meter-proxy.onrender.com/treasury/assess
+```
+
+It reports the wallet balance, the burn rate computed from real ledger spend, projected
+runway, and whether it would top up. Then run one pass:
+
+```bash
+curl -s -X POST https://meter-proxy.onrender.com/treasury/tick \
+  -H "Authorization: Bearer mk_74e8201b8eb1cf6e98a1c29ab7b12bd0"
+```
+
+You will see it decide to charge **$25.00** against a real Prava mandate and stop at
+`"reason":"dry_run"`. That is deliberate: `TREASURER_DRY_RUN=true` is the shipped default,
+because a process that charges a card on a timer should take two explicit switches to turn
+on. The attempt is recorded in `treasury_events` and appears in the dashboard's Treasurer
+Agent panel.
+
+The mandate is real — `curl https://meter-proxy.onrender.com/mandates` shows it with its
+remaining headroom.
+
+### B6. Cost per outcome
+
+Attribute spend to a *result* rather than a request:
+
+```bash
+curl -s https://meter-proxy.onrender.com/v1/chat/completions \
+  -H "Authorization: Bearer mk_74e8201b8eb1cf6e98a1c29ab7b12bd0" \
+  -H "X-Meter-Feature: ticket-summary" -H "X-Meter-Actor: judge" \
+  -H "X-Meter-Trace: ticket-9001" -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","max_tokens":400,"messages":[{"role":"user","content":"Summarise: the auth gateway is returning 502s for EU customers since the 14:00 deploy."}]}' > /dev/null
+
+curl -s -X POST https://meter-proxy.onrender.com/v1/annotate \
+  -H "Authorization: Bearer mk_74e8201b8eb1cf6e98a1c29ab7b12bd0" \
+  -H "Content-Type: application/json" \
+  -d '{"trace_id":"ticket-9001","outcome":"resolved","value_usd":12.50}'
+```
+
+The response gives cost, request count and margin for that outcome. One resolved ticket is
+usually a dozen calls, which is why the join is on the trace and not the request.
+
+---
+
+## Path C — run the whole thing locally (20 minutes)
+
+Only needed to watch the circuit breaker fire, receive the iMessage alert, or read the code
+while it runs.
+
+### C1. Setup
 
 ```bash
 git clone <repo> && cd meter
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate      # EVERY new terminal needs the activate
 pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Now edit `.env`. The four that matter:
+Edit `.env`:
 
 ```bash
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=sk-...                 # your own; local runs use your credits
 METER_KEYS=mk_dev_local:demo-project:dev
-DATABASE_URL=postgresql://postgres.<project-ref>:<pw>@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
-PRICING_VERSION=2026-08-01
+DATABASE_URL=postgresql://postgres.<ref>:<pw>@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?options=-c%20search_path%3Dpublic
 ```
 
-> **The `DATABASE_URL` trap — read this before you lose an hour.**
-> Use the **pooler** host, not the direct one. `db.<ref>.supabase.co` publishes only an
-> IPv6 (`AAAA`) record, so on any IPv4-only network it fails with *"failed to resolve
-> host"*. Two further details: it is **`aws-1`**, not `aws-0` (that one resolves and
-> then refuses the connection), and the username is **`postgres.<project-ref>`**, not
-> `postgres`.
-
-Check the connection before going further:
+> **Two things about `DATABASE_URL` that each cost an hour to rediscover.**
+> Use the **pooler** host: `db.<ref>.supabase.co` publishes only an IPv6 record and will not
+> resolve on an IPv4-only network. It is `aws-1`, not `aws-0`, and the user is
+> `postgres.<project-ref>`.
+> Keep the **`?options=-c%20search_path%3Dpublic`** suffix. The poolers reuse backend
+> connections without resetting session state, so without it a connection can inherit a
+> stale `search_path` and fail with `relation "requests" does not exist` — intermittently,
+> which is worse than consistently. Measured: 0/6 connections worked without it, 6/6 with.
 
 ```bash
-python -c "
-import os; from dotenv import load_dotenv; load_dotenv('.env')
-import psycopg
-with psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=15) as c:
-    print('rows:', c.execute('select count(*) from requests').fetchone()[0])"
+python -m uvicorn proxy.app:app --port 8080      # terminal 1
+cd dashboard && npm install && npm run dev       # terminal 2 (needs its own DATABASE_URL on :6543)
 ```
 
-**Expect:** a row count in the thousands. If it hangs or fails to resolve, re-read the
-box above.
+**Check:** `curl localhost:8080/healthz` reports `learned_factors: 31`. If it reports `0`,
+run `python scripts/seed_demo.py` and restart — the predictor has no history and every
+estimate will be the raw heuristic, roughly 80% error instead of 10%.
 
-### Lock the ledger (once per database)
+> `No module named uvicorn` means the virtualenv is not active. A new terminal does not
+> inherit it. Either `source .venv/bin/activate` first, or call
+> `.venv/bin/python -m uvicorn ...` directly.
 
-Supabase exposes every table in `public` through its API, and the `anon` role behind the
-publishable key arrives with **full read AND write access** — including `TRUNCATE` on
-`requests`, `wallets` and `mandates`. That key is meant to be shipped in browsers; it is
-only safe to publish because row-level security is supposed to be the gate.
-
-```bash
-python scripts/secure_ledger.py --check   # report only
-python scripts/secure_ledger.py           # enable RLS, revoke the API-role grants
-```
-
-It costs the application nothing: the proxy and dashboard connect as `postgres`, which
-owns every table and bypasses RLS, so their access is unchanged. It only closes the door
-on the API roles, which we never use.
-
-**Re-run it after any schema change.** `proxy/db.py` runs `CREATE TABLE IF NOT EXISTS`
-at boot, and a new table arrives with RLS *off*.
-
----
-
-## 3. Start the stack
-
-Two processes, two terminals. Both stay running for the rest of this guide.
-
-```bash
-# terminal 1 — the proxy (this is the whole backend: proxy + treasury + mock provider)
-source .venv/bin/activate          # EVERY new terminal needs this
-python -m uvicorn proxy.app:app --port 8080
-```
-
-> Forgetting `source .venv/bin/activate` is the most common stumble here, because a
-> restart or a new tab does not inherit it and the error names the system Python rather
-> than the missing step: `No module named uvicorn`. If you would rather not think about
-> it, call the interpreter directly instead — `.venv/bin/python -m uvicorn proxy.app:app
-> --port 8080` works from a plain shell.
-
-```bash
-# terminal 2 — the dashboard
-cd dashboard && npm install && npm run dev
-```
-
-Confirm the backend is healthy:
-
-```bash
-curl -s localhost:8080/healthz | python3 -m json.tool
-```
-
-**Expect** `"status": "ok"` and, in the `predictor` block, **`learned_factors: 31`**.
-
-> `learned_factors: 0` means the predictor has no history and every estimate will be
-> the raw heuristic — roughly 80% error instead of 10%. It is the single most common
-> reason this walkthrough "does not work". Fix it with `python scripts/seed_demo.py`,
-> which loads 1,224 real observations, then restart the proxy.
-
-Open **http://localhost:3000**. You should see spend, a Team Budget card, a Live Logs
-table, and a Treasurer Agent panel.
-
----
-
-## 4. Prove the pipeline: one prompt, end to end
-
-`scripts/try.sh` sends one prompt through the proxy and prints what the predictor
-guessed against what actually happened.
+### C2. One prompt, with the prediction shown
 
 ```bash
 ./scripts/try.sh ticket-summary "Summarise this support ticket in two sentences for the on-call engineer: The notification fanout times out under load. Users report it started this morning. Logs point at the connection pool. We saw OperationalError: database is locked in the pod events."
 ```
 
-**Expect** the model's answer, then:
+Prints predicted vs actual tokens, predicted vs actual cost, and the learned correction
+factor. **`history factor 1.00` means no learned history for that tag** — the prediction is
+uncorrected and will be much worse.
 
-```
-  feature tag     ticket-summary
-  input tokens    58
-  max_tokens      1500
-  predicted out   47
-  actual out      41
-  error           15%
-  predicted cost  $0.000037
-  actual cost     $0.000033
-  history factor  0.67
-```
-
-That single block is the whole product working: authenticated, attributed to a feature
-and an actor, **estimated before the call**, forwarded, captured, and priced.
-
-`history factor 0.67` means the learned correction was applied. **`1.00` means no
-history for that tag** — the prediction is uncorrected and will be much worse.
-
-Watch **http://localhost:3000** — the row appears in Live Logs within 3 seconds, and
-"total requests" increments.
-
----
-
-## 5. Prove the accuracy claim across features
-
-The claim is **~10% median error on templated traffic**. Verify it yourself rather than
-taking the number on trust.
-
-Run these. Each is `./scripts/try.sh <feature-tag> "<prompt>"`.
+The same script works against the deployed proxy:
 
 ```bash
-./scripts/try.sh sql-from-question "Write a SQL query answering: how many times did the notification fanout report 'OperationalError: database is locked' per day over the last week? Table events(ts, service, message)."
-
-./scripts/try.sh changelog-entry "Write a one-line user-facing changelog entry for a fix to the connection pool in the notification fanout, which previously times out under load."
-
-./scripts/try.sh pr-description "Write a pull request description for a change to the connection pool in our Python notification fanout. The bug was that it times out under load. Include what changed and how to test it."
-
-./scripts/try.sh api-doc-paragraph "Write the reference documentation paragraph for an endpoint that reports the health of the connection pool in the notification fanout. Describe the response fields."
-
-./scripts/try.sh postmortem-timeline "Draft the timeline section of a postmortem for an incident where the notification fanout times out under load, caused by the connection pool, first seen as OperationalError: database is locked. Include detection, escalation, mitigation, and resolution entries."
-
-./scripts/try.sh regex-explain "Explain what this pattern matches and when it would fail, in the context of parsing logs from our Python notification fanout: ^\[(?P<ts>[^\]]+)\]\s+(?P<lvl>WARN|ERROR)\s+(?P<msg>.*)$"
-
-./scripts/try.sh code-review-note "Write a short code review comment asking the author to reconsider the connection pool in this Python notification fanout, given that it currently times out under load."
-
-./scripts/try.sh test-plan "Write a test plan for a fix to the connection pool in the notification fanout, which times out under load. Cover the happy path, the regression, and one edge case."
-
-./scripts/try.sh commit-message "Write a conventional-commit message (subject line plus one body line) for a change that fixes the connection pool in the notification fanout, which previously times out under load."
-
-./scripts/try.sh ticket-classify "Classify this issue by severity (P0-P3) and component. Answer with just the labels. The notification fanout times out under load. Signature: OperationalError: database is locked."
+METER_URL=https://meter-proxy.onrender.com \
+METER_KEY=mk_74e8201b8eb1cf6e98a1c29ab7b12bd0 \
+./scripts/try.sh ticket-summary "…"
 ```
 
-**Expected error, per feature** — from a real run of these exact prompts:
+### C3. The circuit breaker, and the iMessage
 
-| feature | typical error | notes |
-| --- | --- | --- |
-| `sql-from-question` | 2–10% | |
-| `changelog-entry` | 0–15% | |
-| `pr-description` | 0–16% | |
-| `api-doc-paragraph` | 4–13% | |
-| `postmortem-timeline` | 17–19% | |
-| `regex-explain` | 8% | |
-| `code-review-note` | 11–18% | |
-| `test-plan` | 2–20% | occasionally worse — see note below |
-| `commit-message` | 2–24% | ~40-token answers, so % is harsh |
-| `ticket-classify` | 50–88% | ~9-token answers; the % is meaningless, the cost error is $0.000001 |
-
-**Median across all of them should land around 10–18%.** Do not expect every row to be
-good — expect the *median* to be, and expect the two short-output features to look bad
-in percentage terms while being irrelevant in cost terms.
-
-### Three honest caveats
-
-**Percentage error is brutal on tiny answers.** `ticket-classify` produces ~9 tokens.
-Being 6 tokens off is 67% error and costs one millionth of a cent. Judge those two
-features by cost, not by percentage.
-
-**`incident-runbook` and `error-explainer` will read 39–47%.** Their training data was
-collected at a 400-token cap and every row hit it, so their learned history says "400
-tokens" — true only at `max_tokens=400`. `try.sh` prints a warning for both. This is a
-known data-collection artifact, not a prediction failure.
-
-**Writing the request in your own words roughly quadruples the error — ~40% instead of
-~10%.** The correction keys on the *feature tag*, not on your text, so a prompt tagged
-`ticket-summary` that implies a much longer answer than that feature usually produces
-is predicted as though it were typical. This is the honest limit of the approach and
-worth knowing before anyone demos an improvised prompt.
-
-### All 32 features at once
-
-**Paid tier only.** 64 requests and ~600,000 input tokens, because it includes the
-high-consumption features whose prompts run 33k–44k tokens each:
+Restart the proxy with a demo-scale floor — a real call costs $0.00004, so the production
+`$20` is unreachable by hand:
 
 ```bash
-python scripts/demo_live.py --n 2          # ~4 minutes, ~4 cents, blows a free-tier day
-```
-
-**Free-tier-safe version** — the same harness restricted to small-input features,
-16 requests and under 1,000 input tokens:
-
-```bash
-python scripts/demo_live.py --n 2 --tags ticket-summary,commit-message,changelog-entry,\
-sql-from-question,code-review-note,ticket-classify,pr-description,api-doc-paragraph
-```
-
----
-
-## 6. Prove the circuit breaker and the iMessage alert
-
-The breaker cuts spend on a runaway feature. It needs **two** conditions, both true:
-
-1. **Floor** — spend in the trailing 5 minutes clears a threshold (`$20` in production)
-2. **Burst** — that 5-minute *rate* exceeds the trailing hour's average by 3×
-
-The second condition is what stops a legitimately expensive feature from tripping every
-five minutes forever. It asks *"is this feature behaving unusually for itself?"*
-
-A templated call costs $0.00003, so $20 is unreachable by hand. Restart the proxy with a
-demo-scale floor:
-
-```bash
-# terminal 1: Ctrl-C, then
 BREAKER_WINDOW_USD=0.0001 python -m uvicorn proxy.app:app --port 8080
 ```
 
-> This is a **runtime override**. `.env` still says `$20`, so restarting without it
-> returns you to production settings. Write the command down before demo day.
+> A **runtime override**, not a file edit. `.env` still says `$20`, so a plain restart
+> returns you to production settings.
 
-Now run these four in quick succession:
+Now run four `ticket-summary` prompts in quick succession (those in B3 work). Expect the
+first two or three to succeed and the next to return **429**.
 
-```bash
-./scripts/try.sh ticket-summary "Summarise this support ticket in two sentences for the on-call engineer: The auth gateway leaks file descriptors. Users report it started this morning. Logs point at the connection pool. We saw OOMKilled at 512Mi in the pod events."
-
-./scripts/try.sh ticket-summary "Summarise this support ticket in two sentences for the on-call engineer: The billing worker drops the last page of results. Users report it started this morning. Logs point at the cache key. We saw ECONNRESET during a keep-alive request in the pod events."
-
-./scripts/try.sh ticket-summary "Summarise this support ticket in two sentences for the on-call engineer: The search indexer double-charges on retry. Users report it started this morning. Logs point at the idempotency check. We saw context deadline exceeded after 30s in the pod events."
-
-./scripts/try.sh ticket-summary "Summarise this support ticket in two sentences for the on-call engineer: The CDN purge job deadlocks on concurrent writes. Users report it started this morning. Logs point at the pagination cursor. We saw OperationalError: database is locked in the pod events."
-```
-
-**Expect** the first 2–3 to succeed and the next to come back **429**.
-
-Immediately run a **different** feature:
+Then immediately run a **different** feature:
 
 ```bash
 ./scripts/try.sh commit-message "Write a conventional-commit message (subject line plus one body line) for a change that fixes the retry policy in the auth gateway, which previously leaks file descriptors."
 ```
 
-**Expect 200.** This is the important one: the runaway feature is cut off while
-everything else keeps serving. That is throttle mode, and it is a stronger claim than
-"we turned the key off".
-
-The proxy log should show:
+**It succeeds.** That is the point: the runaway feature is cut off while everything else
+keeps serving. The log shows both conditions being satisfied, not just the floor:
 
 ```
 breaker TRIPPED scope=demo-project:ticket-summary mode=throttle
         spend=$0.0001/300s floor=$0.00 burst=4.54x (need 3.00x, ceiling 12x)
-ALERT circuit breaker tripped
-poke alert sent (HTTP 202)
 ```
 
-`poke alert sent (HTTP 202)` means the iMessage went out. **Without `POKE_API_KEY` and
-`POKE_CTO_PHONE` set you will see nothing** — the alert package returns early and, by
-design, swallows its own errors so a third-party outage can never fail a request. The
-log is your only evidence either way.
+**For the iMessage** you need `POKE_API_KEY` and `POKE_CTO_PHONE` in `.env`.
 
 > **Linq sandbox rule:** the recipient must have messaged the sending line **first**, or
-> delivery fails silently with error `2008`. If the log says sent and no message
-> arrives, that is why.
+> delivery fails silently with error `2008`. Text the line once before testing. Alert
+> dispatch runs on a daemon thread and swallows its own errors by design — a third-party
+> outage must never fail a request — so `poke alert sent (HTTP 202)` in the log is your
+> only confirmation.
 
-### Recovering
+**Recovering:** the breaker is never permanently open. Wait 120 seconds and send another
+request to that feature — it re-measures and closes itself if spend has decayed. Recovery
+is **lazy**: no background job, so the database row stays marked open until a request
+triggers the check. `POST /v1/breaker/reset` clears it immediately.
 
-The breaker is never permanently open. Three ways back:
+### C4. The automated checks
 
-1. **Wait 120 seconds**, then send another request to that feature. It re-measures
-   ("half-open") and closes itself if spend has decayed. Recovery is **lazy** — no
-   background job. The database row stays marked open until a request triggers the
-   check, which looks alarming and is not.
-2. **Manual reset**, any time:
-   ```bash
-   curl -s -X POST localhost:8080/v1/breaker/reset \
-     -H "Authorization: Bearer mk_dev_local" -H "Content-Type: application/json" \
-     -d '{"project_id":"demo-project","feature":"ticket-summary"}'
-   ```
-3. **Fix the cause.** If the burst is still happening it re-trips on the next check,
-   which is correct.
+```bash
+python tests/test_predictor.py     # 131 — the estimator
+python tests/test_proxy.py         # 249 — proxy, ledger, breaker, budget
+python tests/test_treasury.py      # 182 — wallets, mandates, Treasurer
+python tests/test_alerts.py        #  46 — Poke/Linq
+python scripts/e2e_journey.py --offline   # 21 — drives the running app
+ruff check .
+```
+
+**608 + 21 checks in about a minute**, none of which call a provider.
+
+`e2e_journey.py` exists because everything else tested modules in isolation, and
+`GET /mandates` was returning a **500** with all 608 of them passing.
 
 ---
 
-## 7. Prove budget ceilings
+## Deploying your own
 
-Ceilings live in `meter.yaml` at the repo root — in the repo, not the database, so a
-change to a spend limit gets reviewed like any other change. Confirm what loaded:
+[`DEPLOY.md`](DEPLOY.md) is the runbook: Render for the backend, Vercel for the dashboard,
+Supabase for the ledger, all free. Two things it will save you:
 
-```bash
-curl -s localhost:8080/healthz | python3 -c "import sys,json; print(json.load(sys.stdin)['budget'])"
-```
-
-**Expect** `meter_yaml_found: true` and 19 ceilings.
-
-The dashboard's Team Budget card shows `demo-project` against its $3.00/day ceiling,
-tracking the ledger to six decimals.
-
-> **The bar will not visibly move.** One call is $0.0003 against a $3.00 ceiling —
-> about 0.01%. The number updates correctly; the percentage does not budge. To make it
-> climb visibly, drop one feature's ceiling to ~$0.01 in `meter.yaml` and restart.
-
-Syntax that will silently bite you — a feature ceiling is a **mapping**, not a number:
-
-```yaml
-features:
-  ticket-summary: { ceiling_usd_per_day: 0.50 }   # correct
-  ticket-summary: 0.50                            # parses as YAML, then ignored
-```
-
-The bare-number form loads the project ceiling and drops every feature ceiling without
-an error.
+- **`python scripts/secure_ledger.py`** — Supabase's `anon` role arrives with full read and
+  write on every table, including `TRUNCATE`. That key is designed to ship in browsers; it
+  is only safe because RLS is meant to be the gate, and RLS is off by default.
+- **`POST /mandates/sync`** — a mandate created at Prava is not visible to the Treasurer
+  until it is claimed into the local table. Without it the agent refuses with
+  `no_chargeable_mandate`, which looks like a broken integration rather than a missing step.
 
 ---
 
-## 8. Prove the Treasurer and Prava — **Shivam**
+## What is *not* proven
 
-This is the only section that needs a real Prava wallet, and it is the Prava track's
-core requirement: *the agent takes a meaningful action*.
+Stated plainly, because a walkthrough that lists only successes is how a demo claims
+something it has not earned.
 
-### What the Treasurer actually watches
+- **A real Prava charge.** Everything up to it works and is visible in
+  `/treasury/events` — mandate selection, the rails, the audit row. `TREASURER_DRY_RUN=true`
+  stops it at the last step, deliberately.
+- **Open-ended prompt accuracy: ~49% median.** The ~10% figure is for *tagged, repeated*
+  feature traffic, which is what real product traffic looks like. Arbitrary one-off prompts
+  are close to a hard ceiling — output length is only weakly predictable from prompt text
+  (R² = 0.28 across 1,224 measured calls).
+- **A brand-new feature tag starts at ~80% error** and needs ~20 calls of its own. Coverage
+  does not transfer between features: bucket-level history made a held-out feature *worse*
+  (71% → 74% median, 39% → 625% at worst). The honest claim is **"tag your features, and
+  after ~20 calls each you get sub-15% cost prediction."**
+- **`severity-triage` sits at ~69%** and no amount of tuning fixes it. Its untruncated
+  outputs still spread 5.1×, so the model itself is inconsistent on that task.
+- **One backend instance only.** `proxy/budget.py` serialises reservations with an
+  in-process lock, so a second instance would mean two locks seeing the same headroom and a
+  ceiling that silently stops holding. Redis would fix it; it is not built.
 
-**Not the budget ceiling.** Those are unrelated:
-
-| | budget ceiling (`meter.yaml`) | Treasurer |
-| --- | --- | --- |
-| watches | project spend in the ledger | **wallet balance vs burn rate** |
-| fires when | spend + estimate > ceiling | runway < 0.75h, or balance < $10 |
-| does what | refuses the request with `429` | calls Prava, tops up the wallet |
-
-Running out of budget headroom gets you a 429. It never triggers a top-up.
-
-### Step 1 — create a wallet
-
-```bash
-curl -s -X POST "localhost:8080/wallets/seed?project_id=demo-project&provider=openai&balance_usd=0.05&reset=true" \
-  -H "Authorization: Bearer mk_dev_local"
-```
-
-> **These are query parameters, not a JSON body.** Passing `-d '{"balance_usd":0.05}'`
-> is silently ignored — the endpoint accepts it, uses its defaults, and returns 200, so
-> the mistake looks like success. Same for `/mandates/create`.
->
-> `reset=true` matters too: the balance applies **on creation only**, so without it a
-> re-run returns the existing wallet untouched. That is deliberate — it stops a re-run
-> wiping a top-up the Treasurer already made — but it means `reset=true` is how you put
-> the demo back to its starting state between run-throughs.
-
-**Expect** `"balance_usd": 0.05`. Use `balance_usd=4.00` for the demo's "getting low"
-state, or `0.05` to make the Treasurer fire immediately.
-
-### Step 2 — check the decision
-
-```bash
-curl -s localhost:8080/treasury/assess | python3 -m json.tool
-```
-
-**Expect** `"should_topup": true` with `"trigger": "runway"`, because §4–§6 generated
-real burn against a near-empty wallet.
-
-### Step 3 — a mandate
-
-```bash
-curl -s localhost:8080/mandates/chargeable | python3 -m json.tool
-```
-
-If that is empty, the Treasurer will refuse with `no_chargeable_mandate` — correctly,
-because it checks it has permission to spend **before** reaching for the network. No
-Prava call is made at all.
-
-To create one:
-
-```bash
-# query parameters again, not a body
-curl -s -X POST "localhost:8080/mandates/create?project_id=demo-project&amount_usd=50&recurring_frequency=monthly&user_email=you@example.com" \
-  -H "Authorization: Bearer mk_dev_local" | python3 -m json.tool
-```
-
-Open the returned `approval_url`, add a card, clear the device-binding OTP (`456789` in
-sandbox), and register a passkey. **Budget 2–3 minutes the first time**, well under a
-minute for repeats on the same browser — which is exactly why a live demo should approve
-beforehand.
-
-Then claim it locally:
-
-```bash
-curl -s -X POST localhost:8080/mandates/sync -H "Authorization: Bearer mk_dev_local"
-curl -s localhost:8080/mandates/chargeable | python3 -m json.tool
-```
-
-### Step 4 — run the loop
-
-```bash
-curl -s -X POST localhost:8080/treasury/tick -H "Authorization: Bearer mk_dev_local" | python3 -m json.tool
-curl -s localhost:8080/treasury/events | python3 -m json.tool
-```
-
-**`TREASURER_DRY_RUN=true` is the default and should stay that way until you mean it.**
-In dry run the agent decides, records the event, and does not spend. The Treasurer Agent
-panel on the dashboard shows both lines either way.
-
-To do it for real, set `TREASURER_DRY_RUN=false`, restart, and re-tick. Expect a
-`treasury_events` row settling to `succeeded` with a `prava_txn_id`, and the wallet
-balance rising.
-
-### Known state as of this writing
-
-The loop has been verified up to the mandate check: it detects the wallet, computes
-runway, decides to request $25.00, checks its rails, refuses without a mandate, writes
-the audit row, and the dashboard renders it. **The Prava call itself is unverified** —
-the key on the author's machine returns `401 AUTH_1001`. Shivam's wallet is the one that
-closes this.
-
----
-
-## 9. Prove cost-per-outcome
-
-Spend attributed to a *result*, not just a request. Tag a call with a trace, then
-annotate that trace with what it achieved:
-
-```bash
-curl -s localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer mk_dev_local" \
-  -H "X-Meter-Feature: ticket-summary" -H "X-Meter-Actor: shivam" \
-  -H "X-Meter-Trace: ticket-4471" -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","max_tokens":400,"messages":[{"role":"user","content":"Summarise: the auth gateway is returning 502s for EU customers since the 14:00 deploy."}]}' > /dev/null
-
-curl -s -X POST localhost:8080/v1/annotate \
-  -H "Authorization: Bearer mk_dev_local" -H "Content-Type: application/json" \
-  -d '{"trace_id":"ticket-4471","outcome":"resolved","value_usd":12.50}'
-```
-
-The Cost per Outcome table on the dashboard joins `requests × annotations` on
-`trace_id`. One resolved ticket is usually a dozen calls, which is why the join is on
-the trace and not the request.
-
----
-
-## Budget for the whole guide
-
-| section | requests | input tokens |
-| --- | --- | --- |
-| §4 one prompt | 1 | ~60 |
-| §5 ten features | 10 | ~500 |
-| §5 free-tier-safe sweep (optional) | 16 | ~700 |
-| §6 breaker | 5 | ~300 |
-| §9 cost per outcome | 1 | ~40 |
-| **total** | **33** | **~1,600** |
-
-Against a free tier's ~200 requests/day that is **17%**. §10 costs nothing — the test
-suites never call a provider. The only thing that breaks the budget is the paid-tier
-sweep in §5, which is labelled.
-
----
-
-## 10. Run the automated checks
-
-```bash
-python tests/test_predictor.py     # 131 checks — the estimator
-python tests/test_proxy.py         # 242 checks — proxy, ledger, breaker, budget
-python tests/test_treasury.py      # 182 checks — wallets, mandates, Treasurer
-python tests/test_alerts.py        #  46 checks — Poke/Linq
-python scripts/e2e_journey.py --offline   # 21 checks, drives the running app
-```
-
-**601 + 21 checks, all green, in about a minute.**
-
-`e2e_journey.py` is the one to run before any demo: it boots the real ASGI app and walks
-the whole journey. It exists because every other test exercised modules in isolation,
-and `GET /mandates` was answering a **500** with all 601 of them passing.
-
----
-
-## Troubleshooting
-
-| symptom | cause |
-| --- | --- |
-| `failed to resolve host db.<ref>.supabase.co` | Direct host is IPv6-only. Use the **pooler** — see §2. |
-| `learned_factors: 0` | Ledger has no history. `python scripts/seed_demo.py`, restart the proxy. |
-| Every prediction has `history factor 1.00` | No learned factor for that tag. Either it is a new feature (needs ~20 calls) or the ledger is unseeded. |
-| `Unknown Meter key` | The key in your request is not in `METER_KEYS`. It is `mk_dev_local` by default, **not** `mk_demo`. |
-| Prediction is wildly wrong, tiny input tokens | You sent an empty prompt. `try.sh` refuses these; a hand-written `curl` will not. |
-| `No module named uvicorn` / `No module named psycopg` | The virtualenv is not active. Every new terminal needs `source .venv/bin/activate` first — a restart or a fresh tab does not inherit it. Or skip activation and call `.venv/bin/python -m uvicorn ...` directly. |
-| Breaker will not trip | Threshold is $20 by default. Restart with `BREAKER_WINDOW_USD=0.0001`. |
-| Breaker will not clear | 120s cooldown, and recovery is lazy — send a request to that feature to trigger the re-check. |
-| iMessage never arrives | `POKE_API_KEY`/`POKE_CTO_PHONE` unset, or the Linq sandbox rule (§6). |
-| Feature ceilings missing from `/healthz` | Bare-number YAML instead of a mapping — see §7. |
-| `no_chargeable_mandate` | Expected without a mandate. Not a bug: the rails check permission before touching the network. |
-
----
-
-## What is NOT proven yet
-
-Stated plainly so nobody demos a claim we have not earned:
-
-- **The Prava charge itself.** Everything up to it is verified; the transaction is not.
-  §8 is Shivam's to close.
-- **Cross-model analysis.** Cut from scope (`PROPOSALS.md` B11). The offline script
-  exists but was never run. The proxy deliberately does **not** shadow-call a second
-  provider on live traffic — doubling a customer's bill inside a cost-control tool is
-  indefensible.
-- **Open-ended prompt accuracy.** ~49% median, and close to a hard ceiling: output
-  length is only weakly predictable from prompt text (R² = 0.28). The product's claim is
-  about *tagged, repeated* feature traffic, and should always be stated that way.
-- **Deployment.** Everything here runs locally. The dashboard is not deployed.
-
----
-
-## The one-paragraph version
-
-Meter is a drop-in proxy: point any OpenAI SDK at it and every call is metered,
-attributed to a feature and a person, cost-predicted *before* it runs, and written to a
-shared ledger. Features you tag get ~10% cost prediction after about 20 calls. A runaway
-feature is throttled and an engineer gets an iMessage. When the provider balance runs
-short, an agent holding a Prava mandate tops it up without waking anyone.
+Every number above is reproducible from this repository —
+`scripts/accuracy_report.py`, `scripts/consistency_check.py`, `scripts/shrinkage_sweep.py`.

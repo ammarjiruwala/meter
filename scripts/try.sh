@@ -20,14 +20,25 @@ if [ -z "$PY" ]; then
   if [ -x .venv/bin/python ]; then PY=".venv/bin/python"; else PY="python3"; fi
 fi
 
+# Point at any proxy. Defaults to a local one; set METER_URL to use the deployed
+# instance without cloning or running anything:
+#   METER_URL=https://meter-proxy.onrender.com METER_KEY=mk_... ./scripts/try.sh ...
 PORT="${METER_PORT:-8080}"
-URL="http://localhost:${PORT}"
+URL="${METER_URL:-http://localhost:${PORT}}"
+URL="${URL%/}"
 KEY="${METER_KEY:-$(grep '^METER_KEYS' .env 2>/dev/null | cut -d= -f2 | cut -d, -f1 | cut -d: -f1)}"
 KEY="${KEY:-mk_dev_local}"
 
-if ! curl -s --max-time 3 "${URL}/healthz" >/dev/null 2>&1; then
-  echo "Proxy is not running on ${URL}." >&2
-  echo "Start it with:  python -m uvicorn proxy.app:app --port ${PORT}" >&2
+# 90s, not 3s. A free-tier host spins down when idle and the first request pays a cold
+# start of up to a minute -- a short timeout here would report "not running" for a
+# service that is merely waking up, which is the most misleading error we could give.
+if ! curl -s --max-time 90 "${URL}/healthz" >/dev/null 2>&1; then
+  echo "No proxy answering at ${URL}." >&2
+  if [ -n "${METER_URL:-}" ]; then
+    echo "If this is a free-tier host it may be waking up — try once more." >&2
+  else
+    echo "Start one with:  python -m uvicorn proxy.app:app --port ${PORT}" >&2
+  fi
   exit 1
 fi
 
@@ -93,19 +104,30 @@ usage = d["usage"]
 print("\n" + textwrap.shorten(d["choices"][0]["message"]["content"], 300))
 print()
 
-sys.path.insert(0, ".")
-from proxy import pg
-r = pg.fetchone(
-    "SELECT predicted_output_tokens, output_tokens, predicted_cost_usd, cost_usd, "
-    "history_factor FROM requests WHERE id NOT LIKE 'seed_%%' ORDER BY ts DESC LIMIT 1")
-row = (None if r is None else (r["predicted_output_tokens"], r["output_tokens"],
-                               r["predicted_cost_usd"], r["cost_usd"], r["history_factor"]))
+# Prefer the ledger (it carries the prediction), but fall back to the response when
+# running against a remote proxy where we have no database credentials.
+row = None
+try:
+    sys.path.insert(0, ".")
+    from proxy import pg
+    r = pg.fetchone(
+        "SELECT predicted_output_tokens, output_tokens, predicted_cost_usd, cost_usd, "
+        "history_factor FROM requests WHERE id NOT LIKE 'seed_%%' ORDER BY ts DESC LIMIT 1")
+    if r is not None:
+        row = (r["predicted_output_tokens"], r["output_tokens"],
+               r["predicted_cost_usd"], r["cost_usd"], r["history_factor"])
+except Exception:
+    pass
 
 print(f"  feature tag     {tag}")
 print(f"  input tokens    {usage['prompt_tokens']}")
 print(f"  max_tokens      {maxtok}")
 if not row or row[0] is None:
-    print("  (no prediction recorded — is PREDICT_ENABLED on?)"); sys.exit(0)
+    # No ledger access (remote proxy). The response still carries the truth about
+    # what was spent; the prediction lives on the dashboard.
+    print(f"  actual out      {usage['completion_tokens']}")
+    print("\n  (prediction not shown: no ledger access from here — see the dashboard)")
+    sys.exit(0)
 pred, actual, pcost, acost, factor = row
 err = abs(pred - actual) / max(actual, 1) * 100
 print(f"  predicted out   {pred}")
