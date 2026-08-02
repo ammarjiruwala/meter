@@ -25,6 +25,52 @@ function decimalsFor(abs: number): number {
 }
 
 /**
+ * Prediction error for one row, as a percentage of the actual cost.
+ *
+ * Denominator and guard match `scripts/show_ledger.py --accuracy`, which computes
+ * `abs(p - a) / a` over rows with a real actual. Sharing the denominator matters:
+ * a column that measured error against the *prediction* would disagree with the
+ * accuracy report the predictor is tuned against, and the two numbers would be
+ * quietly incomparable.
+ *
+ * Signed here, where that report takes the absolute value, because per-row the
+ * direction is the whole point. The predictor is deliberately biased high
+ * (`SAFETY_MARGIN = 1.15`), so a column of `+` values is the estimator working as
+ * designed; a `−` is an under-estimate, the one direction a budget tool cannot
+ * afford — it means the request cost more than was reserved for it. The aggregate
+ * report says the same thing with its "under" column.
+ *
+ * Returns "—" rather than a number in the two cases where a percentage would be a
+ * fiction: no prediction at all (Anthropic, where the predictor declines rather
+ * than returning a tiktoken figure that is 10–20% wrong), and no actual to divide
+ * by (a refused request never reached the provider, so it has no true cost).
+ */
+export function predictionError(
+  predicted: number | null | undefined,
+  actual: number | null | undefined,
+): string {
+  if (predicted === null || predicted === undefined) return "—";
+  if (actual === null || actual === undefined || actual <= 0) return "—";
+
+  const pct = ((predicted - actual) / actual) * 100;
+  // A tenth of a percent is noise at three figures and clutter at two, so the
+  // precision follows the magnitude rather than being fixed.
+  const decimals = Math.abs(pct) >= 10 ? 0 : 1;
+  const sign = pct > 0 ? "+" : pct < 0 ? "−" : "";
+  return `${sign}${Math.abs(pct).toFixed(decimals)}%`;
+}
+
+/** True when the estimate came in under the real cost — the unsafe direction. */
+export function isUnderPredicted(
+  predicted: number | null | undefined,
+  actual: number | null | undefined,
+): boolean {
+  if (predicted === null || predicted === undefined) return false;
+  if (actual === null || actual === undefined || actual <= 0) return false;
+  return predicted < actual;
+}
+
+/**
  * Money for a headline card: always cents, always grouped.
  *
  * `formatUsd` widens to 4 and 6 decimals under a dollar, which is correct for a

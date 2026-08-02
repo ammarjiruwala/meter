@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from "react";
 import type { LiveLogRow } from "@/lib/db";
-import { usdColumnFormatter, providerLabel, relativeTime } from "@/lib/format";
+import {
+  usdColumnFormatter,
+  providerLabel,
+  relativeTime,
+  predictionError,
+  isUnderPredicted,
+} from "@/lib/format";
 import { StatusBadge, toneForStatus } from "@/components/ui/primitives";
 import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
 
@@ -54,6 +60,7 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
           { label: "Model" },
           { label: "Predicted", align: "right" },
           { label: "Actual", align: "right" },
+          { label: "Error", align: "right" },
           { label: "Status", align: "right" },
           { label: "Time", align: "right" },
         ]}
@@ -76,6 +83,21 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
               {usd(row.predicted_cost_usd)}
             </Cell>
             <Cell align="right">{usd(row.cost_usd)}</Cell>
+            {/* Signed against the actual cost, matching show_ledger.py's
+                denominator. Only an under-estimate is tinted: over-estimating is
+                the safety margin doing its job and does not need attention, while
+                a request that cost more than was reserved for it does. */}
+            <Cell
+              align="right"
+              muted={!isUnderPredicted(row.predicted_cost_usd, row.cost_usd)}
+              className={
+                isUnderPredicted(row.predicted_cost_usd, row.cost_usd)
+                  ? "text-status-warn"
+                  : ""
+              }
+            >
+              {predictionError(row.predicted_cost_usd, row.cost_usd)}
+            </Cell>
             <Cell align="right" numeric={false}>
               <StatusBadge tone={toneForStatus(row.status)}>
                 {row.status ?? "—"}
