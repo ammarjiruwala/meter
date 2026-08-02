@@ -14,10 +14,13 @@
  * effectively polling at 4s. The panels stay live: worst case a row is 2s old,
  * against a poll that was already going to be up to 3s behind.
  *
- * In-process and per-instance, which is fine — `dashboard/fly.toml` runs a single
- * machine (`min_machines_running = 1`, `auto_stop_machines = false`). If that ever
- * scales out, each instance keeps its own cache and the bound becomes one query per
- * endpoint per 2s *per instance*, which is still the property we want.
+ * In-process and per-instance, and that holds up on either deployment target.
+ * `dashboard/fly.toml` runs a single machine (`min_machines_running = 1`), so there is
+ * exactly one cache. On Vercel — which `DEPLOY.md` now recommends, because Fly stopped
+ * being free — each serverless instance keeps its own, so the bound becomes one query
+ * per endpoint per 2s *per instance*. Weaker, still the property we want, and still far
+ * better than one query per viewer per 3s. The pool it protects is the Supabase
+ * transaction pooler, which is sized for exactly this fan-out.
  *
  * Stashed on globalThis for the same reason the pool is: Next reloads modules on
  * every edit in dev, and a fresh Map per reload would silently disable the cache.
