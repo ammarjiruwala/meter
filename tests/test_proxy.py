@@ -15,6 +15,7 @@ Owner: Shubh (Proxy & Infra).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -1642,6 +1643,70 @@ def test_soft_budget() -> None:
     check("no ceilings configured means nothing to poll", budget.soft_breaches(0.8) == [])
 
 
+
+def test_ceiling_spend_one_round_trip() -> None:
+    """One query for both ceiling numbers — the round trip count IS the latency now."""
+    print("\nceiling spend (one round trip)")
+    from proxy import budget
+
+    db.record_request({
+        "id": "req-cs-1", "ts": db.now_iso(), "project_id": "proj-cs",
+        "feature": "alpha", "actor": "t", "model": "gpt-4o-mini", "provider": "openai",
+        "endpoint": "/v1/chat/completions", "cost_usd": 0.30, "status": 200,
+    })
+    db.record_request({
+        "id": "req-cs-2", "ts": db.now_iso(), "project_id": "proj-cs",
+        "feature": "beta", "actor": "t", "model": "gpt-4o-mini", "provider": "openai",
+        "endpoint": "/v1/chat/completions", "cost_usd": 0.20, "status": 200,
+    })
+    db.record_request({
+        "id": "req-cs-3", "ts": db.now_iso(), "project_id": "proj-cs",
+        "feature": None, "actor": "t", "model": "gpt-4o-mini", "provider": "openai",
+        "endpoint": "/v1/chat/completions", "cost_usd": 0.05, "status": 200,
+    })
+
+    f, p = db.ceiling_spend("proj-cs", "alpha", 3600)
+    check("feature spend counts only that feature", abs(f - 0.30) < 1e-9, str(f))
+    check("project spend counts every tag including untagged", abs(p - 0.55) < 1e-9, str(p))
+
+    # The distinction throttle mode rests on: untagged means `feature IS NULL`, NOT the
+    # project total. Collapsing the two queries must not have quietly changed this.
+    f_untagged, p_untagged = db.ceiling_spend("proj-cs", None, 3600)
+    check("untagged means feature IS NULL, not the project total",
+          abs(f_untagged - 0.05) < 1e-9, str(f_untagged))
+    check("project total is the same either way", abs(p_untagged - 0.55) < 1e-9,
+          str(p_untagged))
+
+    check("it agrees with the two queries it replaced",
+          abs(f - db.window_spend("proj-cs", "alpha", 3600)) < 1e-9
+          and abs(p - db.project_window_spend("proj-cs", 3600)) < 1e-9)
+
+    # And the count itself: authorize must make exactly ONE database call. At ~50ms per
+    # round trip to a hosted ledger, a second one is 50ms on every enforced request.
+    calls = {"n": 0}
+    real = db.ceiling_spend
+
+    def counted(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    path = Path(_TMP) / "meter-rt.yaml"
+    path.write_text(
+        "projects:\n  proj-cs:\n    ceiling_usd_per_day: 100\n"
+        "    features:\n      alpha: { ceiling_usd_per_day: 50 }\n"
+    )
+    budget.load_meter_yaml(path)
+    db.ceiling_spend = counted
+    try:
+        d = asyncio.run(budget.authorize("proj-cs", "alpha", 0.01))
+        check("authorize is allowed with both ceilings configured", d.blocked is False)
+        check("and it made exactly ONE database round trip", calls["n"] == 1,
+              f"{calls['n']} calls — a regression here is +50ms per request in production")
+        asyncio.run(budget.release(d.reservation_id))
+    finally:
+        db.ceiling_spend = real
+
+
 def main() -> int:
     try:
         return _run()
@@ -1658,6 +1723,7 @@ def main() -> int:
 def _run() -> int:
     for suite in (
         test_client_request_id,
+        test_ceiling_spend_one_round_trip,
         test_soft_budget,
         test_routing,
         test_header_substitution,

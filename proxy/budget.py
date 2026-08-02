@@ -327,26 +327,40 @@ async def authorize(project_id: str, feature: str | None, estimate_usd: float) -
         # exists to close.
         _expire(time.monotonic())
 
+        # ONE round trip for both numbers, not two. They are the same table, the same
+        # project and the same window, differing only by a feature filter — so asking
+        # separately bought nothing and cost a second *sequential network round trip* on
+        # the request path once the ledger moved to a hosted Postgres. `ceiling_spend`
+        # returns (feature, project); the untagged case still means `feature IS NULL`
+        # rather than the project total, which is the distinction throttle mode rests on.
+        #
+        # Both are fetched even when only one ceiling is configured. That is deliberate:
+        # the unused aggregate is computed inside a scan that has to happen anyway, so it
+        # is free, and branching here to save it would reintroduce the second query on
+        # the path where both ceilings *are* set — which is the configuration that
+        # matters and the one the demo runs.
+        feature_settled, project_settled = await asyncio.to_thread(
+            db.ceiling_spend, project_id, feature, window
+        )
+
         if feature_ceiling is not None:
-            settled = await asyncio.to_thread(db.window_spend, project_id, feature, window)
             held = _held(project_id, feature)
-            if settled + held + estimate_usd > feature_ceiling:
+            if feature_settled + held + estimate_usd > feature_ceiling:
                 return Decision(
                     blocked=True,
                     scope=_scope(project_id, feature),
                     ceiling_usd=feature_ceiling,
-                    spend_usd=settled + held,
+                    spend_usd=feature_settled + held,
                 )
 
         if project_ceiling is not None:
-            settled = await asyncio.to_thread(db.project_window_spend, project_id, window)
             held = _held(project_id, None)
-            if settled + held + estimate_usd > project_ceiling:
+            if project_settled + held + estimate_usd > project_ceiling:
                 return Decision(
                     blocked=True,
                     scope=_scope(project_id, None),
                     ceiling_usd=project_ceiling,
-                    spend_usd=settled + held,
+                    spend_usd=project_settled + held,
                 )
 
         reservation_id = f"rsv_{uuid.uuid4().hex}"

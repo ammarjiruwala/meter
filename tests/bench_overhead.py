@@ -68,11 +68,20 @@ async def main() -> None:
         type=str,
         help="Path to meter.yaml for the enforced-path benchmark",
     )
+    parser.add_argument(
+        "--breaker",
+        action="store_true",
+        help="Leave the circuit breaker ON. It ships enabled, so this is the *default "
+             "production* configuration — and it was unmeasurable before this flag, "
+             "because the benchmark hardcoded it off. It costs two more database round "
+             "trips per request, which is the whole story once the ledger is remote.",
+    )
     args = parser.parse_args()
 
     _section("Overhead Benchmark")
     print(f"Requests: {args.requests}")
     print(f"Meter YAML: {args.meter_yaml or 'none (minimal path)'}")
+    print(f"Breaker:    {'on (ships this way)' if args.breaker else 'off'}")
 
     # Set up a temporary environment
     with tempfile.TemporaryDirectory(prefix="meter-bench-") as tmpdir:
@@ -92,7 +101,7 @@ async def main() -> None:
             f"OPENAI_API_KEY=fake\n"
             f"ANTHROPIC_API_KEY=fake\n"
             f"PREDICT_ENABLED=true\n"
-            f"BREAKER_ENABLED=false\n"
+            f"BREAKER_ENABLED={'true' if args.breaker else 'false'}\n"
             f"TREASURER_DRY_RUN=true\n"
         )
 
@@ -107,7 +116,7 @@ async def main() -> None:
         os.environ["DB_SCHEMA"] = schema
         os.environ["METER_KEYS"] = "mk_bench:bench-project:dev"
         os.environ["OPENAI_API_KEY"] = "fake"
-        os.environ["BREAKER_ENABLED"] = "false"
+        os.environ["BREAKER_ENABLED"] = "true" if args.breaker else "false"
         os.environ["PREDICT_ENABLED"] = "true"
         os.environ["TREASURER_DRY_RUN"] = "true"
         if yaml_path:

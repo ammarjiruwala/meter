@@ -473,6 +473,49 @@ def project_window_spend(project_id: str, window_s: float) -> float:
     return float(row["spend"])
 
 
+def ceiling_spend(project_id: str, feature: str | None, window_s: float) -> tuple[float, float]:
+    """Feature spend and project spend over one window, in **one** round trip.
+
+    Returns ``(feature_spend, project_spend)``.
+
+    `budget.authorize` needs both numbers, and asking for them separately was two
+    sequential queries against the same table, same project and same window — differing
+    only by a `feature` filter. Under SQLite that cost microseconds and nobody noticed.
+    With the ledger on a hosted Postgres it is a second **network round trip** on the
+    request path, and the trips are sequential, so it is added latency on every single
+    call rather than a rounding error.
+
+    Measured on the deployed shape: the enforced path made 5 blocking round trips per
+    request; this removes one of them. See `proxy/README.md` for the full count and why
+    the count, not the query cost, is what matters once the database is 50ms away.
+
+    ``feature is None`` keeps `window_spend`'s meaning exactly — untagged traffic only,
+    rows where `feature IS NULL`, **not** the project total. Getting that wrong would make
+    the untagged scope trip on any tagged feature's burn.
+    """
+    conn = connect()
+    cutoff = iso_seconds_ago(window_s)
+    # One scan, two aggregates. `FILTER` would read better but CASE keeps this in the
+    # dialect-neutral form the rest of the file uses.
+    if feature is None:
+        sql = (
+            "SELECT COALESCE(SUM(CASE WHEN feature IS NULL THEN cost_usd END), 0) AS feature_spend, "
+            "COALESCE(SUM(cost_usd), 0) AS project_spend "
+            "FROM requests WHERE project_id = ? AND ts >= ?"
+        )
+        params: tuple = (project_id, cutoff)
+    else:
+        sql = (
+            "SELECT COALESCE(SUM(CASE WHEN feature = ? THEN cost_usd END), 0) AS feature_spend, "
+            "COALESCE(SUM(cost_usd), 0) AS project_spend "
+            "FROM requests WHERE project_id = ? AND ts >= ?"
+        )
+        params = (feature, project_id, cutoff)
+    with _lock:
+        row = conn.execute(sql, params).fetchone()
+    return float(row["feature_spend"]), float(row["project_spend"])
+
+
 # ── Budgets ──────────────────────────────────────────────────────────────────
 
 
