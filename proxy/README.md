@@ -92,14 +92,16 @@ curl -X POST localhost:8080/v1/annotate \
 # {"cost_usd":2.0,"request_count":12,"value_usd":40.0,"margin_usd":38.0, ...}
 ```
 
-The ledger lands in `meter.db` (SQLite, gitignored):
+The ledger lands in Postgres (`DATABASE_URL`, schema `DB_SCHEMA`). Read it with:
 
 ```bash
-sqlite3 meter.db \
-  "SELECT feature, actor, model, input_tokens, output_tokens,
-          printf('$%.6f', cost_usd), overhead_ms, estimated
-   FROM requests ORDER BY ts DESC LIMIT 10;"
+python scripts/show_ledger.py                   # last 25 requests
+python scripts/show_ledger.py --accuracy        # predictor error by bucket
+python scripts/show_ledger.py --tables          # every table, with row counts
 ```
+
+Every query it runs is a SELECT, so it cannot disturb the proxy's writer — under MVCC
+readers never block writers.
 
 ## Test it
 
@@ -127,12 +129,13 @@ request path asserting the prediction reaches the ledger and no hold leaks.
 | `pricing.py` | `Usage` → dollars, using `pricing/{version}.yaml` |
 | `breaker.py` | Rolling-window spend anomaly detection, throttle/revoke, half-open recovery |
 | `budget.py` | `meter.yaml` loader, daily ceilings, in-process authorize/capture reservations |
-| `db.py` | SQLite ledger, meter keys, breaker events, annotations, window queries |
+| `db.py` | Ledger schema and queries: meter keys, breaker events, annotations, window queries |
+| `pg.py` | Postgres pool and query helpers. Everything that touches the database goes through here |
 | `config.py` | Environment parsing. No I/O, safe to import from anywhere |
 
 `app.py` also imports `treasury/` (Shivam) to mount its routers and to create its tables at
-boot. The dependency runs one way — `treasury.db` reads `proxy.config` for `DB_PATH` so the
-two halves can never disagree about which file the database is.
+boot. The dependency runs one way — `treasury.db` goes through `proxy.pg` so the two halves
+can never disagree about which database they are talking to.
 
 ## Endpoints
 
@@ -202,12 +205,20 @@ every attempt. Nothing outside `_proxy` can observe the difference.
 
 Steps 1–7 are what `X-Meter-Overhead-Ms` measures.
 
-**Quote it as: "p50 +0.26 ms, measured 2026-08-01 on loopback."** Never without the
-qualifier. The full figure: p50 +0.26 ms wall-clock (minimal path) / +0.35 ms (enforced
-path), self-reported in-process, measured with the committed harness
-(`tests/bench_overhead.py`) against a local fake upstream — loopback, no TLS, single
-client, so it is a floor rather than a production number, though comfortably inside the
-5 ms budget ARCHITECTURE.md §8 sets.
+⚠ **This number is distance-bound since the Postgres port and there is currently no
+honest way to quote it.** Measured 2026-08-02: **p50 +52.7 ms** from a laptop against
+Supabase in ap-south-1. Essentially all of it is one network round trip — a warm query to
+that database measures ~50 ms from here, against microseconds for a local SQLite read.
+The proxy's own work has not changed; only the storage hop has. It should return to
+single digits with the proxy colocated with the database on Fly.io, **but nobody has
+measured that yet — do not put a latency number on a slide until it comes from the
+deployed proxy.**
+
+The pre-Postgres figures, which are the measurement of the proxy's own work: p50
++0.26 ms wall-clock (minimal path) / +0.35 ms (enforced path), self-reported in-process,
+measured with the committed harness (`tests/bench_overhead.py`) against a local fake
+upstream — loopback, no TLS, single client, so a floor rather than a production number,
+though comfortably inside the 5 ms budget ARCHITECTURE.md §8 sets.
 
 > **These numbers were re-validated 2026-08-01 after a bug in the harness itself, and they
 > survived.** The fake upstream had been answering **422 to every call**: this file uses
@@ -230,25 +241,32 @@ Two caveats, both load-bearing if this goes in front of judges:
    `X-Meter-Overhead-Ms` is on every response, so re-deriving it is a loop plus one
    `SELECT`.
 2. **The estimate adds ~0.03 ms** (`predictor/README.md`); a reserve costs one or two
-   SQLite reads, but *only* when a ceiling is configured — `budget.authorize` returns on a
-   dict lookup when `meter.yaml` is absent, so the demo path is barely affected.
+   database reads, but *only* when a ceiling is configured — `budget.authorize` returns on
+   a dict lookup when `meter.yaml` is absent. That distinction used to be minor and is not
+   any more: a read is a network round trip now, so the enforced path pays for one where
+   the demo path pays for none.
 3. **Single client. It says nothing about behaviour under concurrency** — that is
    `tests/load_soak.py`, below.
 
 ### Under sustained concurrent load
 
 `tests/load_soak.py` is the other half, and answers a different question: two writers on
-one SQLite file while N clients drive the enforced path for a sustained period. It exists
-because CLAUDE.md's claim that WAL plus `busy_timeout` covers two writers was an argument
-with nothing measuring it.
+one ledger while N clients drive the enforced path for a sustained period. It exists
+because the claim that the two writers were safe was an argument with nothing measuring
+it.
 
 ```bash
 python tests/load_soak.py --seconds 20 --concurrency 16
 ```
 
-Measured 2026-08-01, 16 clients for 15s — **~5,000 requests at ~400 req/s, every one
-ledgered, zero `database is locked`, zero failed ledger writes, worst event-loop stall
-44 ms.** The Treasurer ticked throughout, writing `treasury_events` to the same file.
+Measured 2026-08-01 on the SQLite ledger, 16 clients for 15s — **~5,000 requests at
+~400 req/s, every one ledgered, zero `database is locked`, zero failed ledger writes,
+worst event-loop stall 44 ms.** The Treasurer ticked throughout.
+
+Re-run on Postgres 2026-08-02, 8 clients for 12s — **all 9 checks pass**, every 2xx
+ledgered, zero lock or pool errors, event-loop p99 16 ms. **Throughput is not comparable
+to the SQLite figure and must not be quoted against it**: the database is a WAN hop away,
+so that run is bound by the same ~50 ms round trip as the overhead number above.
 
 It is deliberately **not in CI**: throughput and stall thresholds are timing-sensitive and
 a shared runner would make it flaky, which is how a load test gets muted. Run it before
@@ -259,17 +277,20 @@ What it checks, and why each one is there:
 | Check | Why |
 | --- | --- |
 | No ledger row dropped | A missing row understates spend — the one direction of error a budget tool cannot have. Scoped to 200s, because refusals are ledgered too. |
-| No `database is locked` | `busy_timeout` should make a losing writer wait, not raise. Watched via a log handler, since the proxy deliberately swallows ledger-write failures. |
+| No lock or pool errors | A losing writer should wait, not raise. Counts `PoolTimeout` and `deadlock detected` alongside the old `database is locked` — the new engine's version of the same failure. Watched via a log handler, since the proxy deliberately swallows ledger-write failures. |
 | The Treasurer actually wrote | A soak whose second writer sat idle would pass while proving nothing. |
-| Event loop never stalls | The one that catches something real. A blocking SQLite call made from a coroutine holds the only event loop and stalls every in-flight request, and **nothing logs an error when it happens**. `busy_timeout` is 5000 ms, which bounds that stall at five seconds. |
+| Event loop never stalls | The one that catches something real. A blocking database call made from a coroutine holds the only event loop and stalls every in-flight request, and **nothing logs an error when it happens**. This got worse with the port, not better: a psycopg round trip is tens of milliseconds where a local SQLite read was microseconds, so one unwrapped call now stalls the loop for far longer. Every one is supposed to go through `asyncio.to_thread`. |
 
-**Throughput does not scale past ~16 clients**, and the harness reports a no-proxy
-baseline at the same concurrency so the ceiling is attributable rather than assumed: at 64
-clients the proxy sustained ~122 req/s against a ~247 req/s baseline. Roughly half that
-collapse is the harness saturating its own event loop; the rest is the documented design —
-one process-wide SQLite connection behind a lock, plus the shared `asyncio.to_thread`
-pool. That ceiling is inherent to the A5 decision, not a defect, and it moves with Redis
-and Postgres at replica #2.
+**Throughput did not scale past ~16 clients on SQLite**, and the harness reports a
+no-proxy baseline at the same concurrency so the ceiling was attributable rather than
+assumed: at 64 clients the proxy sustained ~122 req/s against a ~247 req/s baseline.
+Roughly half that collapse was the harness saturating its own event loop; the rest was the
+design — one process-wide SQLite connection behind a lock, plus the shared
+`asyncio.to_thread` pool. **The one-connection-behind-a-lock half is gone**: Postgres
+serves concurrent writers from a pool, sized by `DB_POOL_MAX`. The shared `to_thread` pool
+remains, and it now bounds how many round trips can be in flight at once — so if the
+deployed proxy needs more concurrency, that pool and `DB_POOL_MAX` are the two numbers to
+raise together.
 
 **Not covered: streaming.** The streamed path holds a reservation across the whole
 response and heartbeats it — the silent failure ARCHITECTURE.md §2 warns about, on the
@@ -305,18 +326,21 @@ the tokens were burned either way.
 still produce a ledger row, flagged `estimated = true`. A missing row understates spend,
 which is the one direction of error a budget tool cannot have.
 
-**The proxy is no longer the only writer to `meter.db`.** `treasury/db.py` writes `wallets`
-and `treasury_events` to the same file — the Treasurer credits a balance while the proxy is
-writing ledger rows. WAL already made concurrent *reads* safe for the dashboard; concurrent
-writers serialise, which is why both connections set `busy_timeout` and why every treasury
-write is a single statement with no transaction held open across a network call to Prava.
-If you add a long-running transaction on this side, that assumption breaks.
+**The proxy is not the only writer.** `treasury/db.py` writes `wallets` and
+`treasury_events` to the same database — the Treasurer credits a balance while the proxy is
+writing ledger rows. Postgres makes the lock contention this used to be about a non-event:
+readers never block writers under MVCC, and concurrent writers touch different rows. But
+the rule that made it safe still holds, in a new form — every treasury write is a single
+statement with **no transaction held open across a network call to Prava**, because one
+that is held pins a pooled connection for the length of that round trip. Multi-statement
+writes go through `pg.transaction()`; a bare `BEGIN` does nothing useful, since each
+statement otherwise borrows its own connection.
 
 **The treasury tables are created in `lifespan`, not on first use.** `treasury.db.connect()`
 is lazy, so without that call the `wallets` table would not exist until somebody happened to
 hit a treasury route — and the dashboard reads that table directly and read-only. It would
-have failed with "no such table: wallets" on any machine where nobody had called the
-endpoint yet, which is every teammate's machine on a fresh clone.
+have failed on a database where nobody had called the endpoint yet, which is what a fresh
+project looks like.
 
 **A ceiling check that reads the ledger and then calls is wrong, and the bug only appears
 under load.** Between the `SELECT sum(cost)` and the row that call eventually writes,
@@ -399,7 +423,7 @@ Each of these is a deliberate omission with a reason, not an oversight.
 | Missing | Why | Who / when |
 | --- | --- | --- |
 | **Redis-backed reservations** | Reservations now exist, held in-process (`budget.py`). Redis is not what makes authorize/capture correct — serialisation is, and one proxy process plus an `asyncio.Lock` is an identical guarantee. Redis becomes load-bearing at replica #2; the upgrade is `_holds` → a Redis hash and `authorize` → the Lua script | Shubh, at replica #2 (PROPOSALS.md A5) |
-| **Postgres** | Still SQLite. Shivam's treasury tables (`wallets`, `mandates`, `treasury_events`) landed in this same file, also with ARCHITECTURE.md §4 column names verbatim, so the port stays one swap for both halves | Shivam, post-hackathon (was "Phase 2", deferred — SQLite is deliberate for the demo) |
+| ~~**Postgres**~~ | **Done — Shivam, 2026-08-02.** Both halves ported together through `proxy/pg.py`, since the treasury tables already used ARCHITECTURE.md §4 column names verbatim. `?` placeholders are rewritten to `%s` by `pg.q()`, so the SQL here is byte-identical to the SQLite version and the diff is a change of execution layer rather than fifty rewritten statements. Follow-ups left open on purpose: `ts` TEXT → `timestamptz` and money → `numeric(14,6)` | Shipped |
 | **Prediction for Claude models** | `tiktoken` has no Anthropic vocabulary, and the predictor raises rather than returning a number ~10-20% wrong. Those requests reserve `$0`, so a ceiling still stops them — one request later than it stops an OpenAI one | Needs Anthropic's `count_tokens` endpoint (a network call in the request path — not free) |
 | **The predictor's learning tier** | `learner.py` stays on priors until ~30 rows per bucket exist. The ledger now records `predicted_output_tokens` and `bucket`, so the feedback loop is *closed* — but nobody calls `load_fits()` on a schedule yet | Ammar |
 | **7-day breaker baseline** | Resolved differently: the burst check compares against the trailing *hour*, which needs no accumulated history and works on day one. See ARCHITECTURE.md §6 | Done |

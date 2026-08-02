@@ -25,7 +25,7 @@ Backend (Python, repo root):
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                            # provider + Prava keys; .env is gitignored
+cp .env.example .env                            # provider + Prava keys, DATABASE_URL; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
 python tests/test_proxy.py                      # 241 checks, no framework, ~3s
@@ -38,14 +38,15 @@ Two measurement harnesses, neither in CI and neither a pass/fail gate on a norma
 
 ```bash
 python tests/bench_overhead.py                  # added latency; run 3x before quoting a number
-python tests/load_soak.py --seconds 20 --concurrency 16   # two writers, one SQLite file
+python tests/load_soak.py --seconds 20 --concurrency 16   # two writers, one ledger
 python tests/load_soak.py --stream                         # streamed path + reservation heartbeat
 ```
 
 Dashboard (Next.js, from [dashboard/](dashboard/)):
 
 ```bash
-npm install && npm run dev                      # reads ../meter.db directly, read-only
+cp .env.example .env.local                      # DATABASE_URL; the dashboard has its own
+npm install && npm run dev                      # reads the same Postgres, read-only
 npm run build && npm run lint
 ```
 
@@ -62,11 +63,14 @@ seconds, and their thresholds are timing-sensitive, which is why they are delibe
 Run `load_soak.py` before claiming anything about concurrency, and `bench_overhead.py` three times
 before putting a latency number on a slide: single readings of it do not reproduce.
 
-Inspect the ledger directly (SQLite, WAL mode, safe to read while the proxy writes):
+Inspect the ledger. Every query it runs is a SELECT, so it cannot disturb the proxy's
+writer — under MVCC readers never block writers:
 
 ```bash
-sqlite3 meter.db "SELECT feature, actor, model, cost_usd, overhead_ms, estimated
-                  FROM requests ORDER BY ts DESC LIMIT 10;"
+python scripts/show_ledger.py                   # last 25 requests
+python scripts/show_ledger.py --accuracy        # predictor error by bucket
+python scripts/show_ledger.py --tables          # every table, with row counts
+python scripts/show_ledger.py --schema scratch  # a throwaway schema from a harness run
 ```
 
 Two one-off Prava sandbox scripts live at the repo root. They hit the live sandbox directly,
@@ -77,14 +81,14 @@ third that duplicates a route — `test_charge.py` was deleted for exactly that,
 
 ## How the pieces fit
 
-Four components, one process, one SQLite file:
+Four components. The first three are one process; all four share one Postgres:
 
 | Component | What it is | Owner |
 | --- | --- | --- |
 | [proxy/](proxy/) | FastAPI hot path. Auth → attribute → estimate → breaker → reserve → forward → capture | Shubh |
 | [treasury/](treasury/) | Wallets, Prava mandates/charges, mock provider billing. **Routers mounted onto the proxy app** | Shivam |
 | [predictor/](predictor/) | Pre-flight `tiktoken` cost estimate. Called by the proxy at ESTIMATE | Ammar |
-| [dashboard/](dashboard/) | Next.js 16 App Router + Tailwind. Reads `meter.db` **read-only**, no API to the proxy except `/api/live-logs` | Tanay |
+| [dashboard/](dashboard/) | Next.js 16 App Router + Tailwind. Reads the ledger **read-only** via `pg`, no API to the proxy except `/api/live-logs` | Tanay |
 
 Consequences worth knowing before you change anything:
 
@@ -92,23 +96,35 @@ Consequences worth knowing before you change anything:
   routes sit deliberately *off* the `/v1` prefix (`/wallets`, `/mandates`, `/charge`,
   `/mock-openai/billing`) — `/v1` is the surface a caller's provider SDK targets, and control-plane
   routes do not belong in it.
-- **Dependencies run one way:** `treasury.db` reads `proxy.config` for `DB_PATH`, and `predictor`
-  reads `proxy.pricing` for rates, so a prediction and the ledger row it is later compared against
-  cannot disagree. Nothing in `proxy/` may import `predictor/` or `treasury/` at module scope beyond
-  the router mount in `app.py`.
-- **`meter.db` has two writers.** The proxy writes `requests`; `treasury/db.py` writes `wallets`,
-  `mandates`, `treasury_events`. WAL plus `busy_timeout` covers it *because* every treasury write is
-  a single statement with no transaction held open across a network call to Prava. Add a
-  long-running transaction and that assumption breaks.
-- **Treasury tables are created in `app.py`'s `lifespan`, not on first use**, so a fresh clone that
-  has never hit a treasury route still lets the dashboard read `wallets`.
-- **Every dashboard query guards on the table existing** (and, for the prediction columns, on the
-  *column* existing) — either side can create `meter.db` with only its own half of the schema, and a
-  database whose proxy has not restarted since the last migration has the table but not the columns.
-  Keep both guards when adding a card.
-- **New `requests` columns need an entry in `_ADDED_REQUEST_COLUMNS`** ([proxy/db.py](proxy/db.py)).
-  `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without the ALTER, teammates with
-  an older `meter.db` get a failing INSERT on their machine only.
+- **Everything goes through [proxy/pg.py](proxy/pg.py).** One pool, per-statement autocommit,
+  `?` placeholders rewritten to `%s` by `q()`. `DATABASE_URL` is required — the proxy raises at
+  first query rather than degrading, because a proxy that cannot bill anyone should not serve.
+  `DB_SCHEMA` picks the schema; the test suites and scratch harnesses each mint a throwaway one
+  and drop it, which is what keeps a test run off the demo's data.
+- **Dependencies run one way:** `treasury.db` and `predictor` both go through `proxy.pg` /
+  `proxy.pricing`, so a prediction and the ledger row it is later compared against cannot
+  disagree. Nothing in `proxy/` may import `predictor/` or `treasury/` at module scope beyond the
+  router mount in `app.py`.
+- **The ledger has two writers.** The proxy writes `requests`; `treasury/db.py` writes `wallets`,
+  `mandates`, `treasury_events`. Postgres row-level locking makes that a non-event where SQLite
+  needed WAL and `busy_timeout` — but the rule that made it safe still holds and is now about
+  *connections*: every treasury write is a single statement with no transaction held open across
+  a network call to Prava. Hold one across a Prava round trip and you pin a pooled connection for
+  its duration.
+- **Multi-statement writes need `pg.transaction()`, not a bare `BEGIN`.** Every other statement
+  borrows its own pooled connection, so a `BEGIN` opens a transaction on a connection that goes
+  straight back to the pool and the rest of the block runs outside it — silently non-atomic.
+  `replace_budgets` is the only caller that needs this.
+- **Treasury tables are created in `app.py`'s `lifespan`, not on first use**, so a fresh database
+  that has never had a treasury route hit still lets the dashboard read `wallets`.
+- **Every dashboard query guards on the table existing** (and, for the prediction and
+  `sort_order` columns, on the *column* existing) — either side can create the schema with only
+  its own half of the tables, and a database whose proxy has not restarted since the last
+  migration has the table but not the columns. Keep both guards when adding a card.
+- **New columns need an entry in `_ADDED_COLUMNS`** ([proxy/db.py](proxy/db.py)).
+  `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without the ALTER, anyone whose
+  proxy has not restarted gets a failing INSERT — and since the database is shared now, that is
+  everyone at once rather than one machine.
 - **Budgets live in `meter.yaml` at the repo root** (see `meter.yaml.example`), not in `.env`. The
   loader *replaces* rather than upserts, because a ceiling deleted from the file must stop being
   enforced. No file means no ceilings and no added latency.
@@ -118,16 +134,22 @@ Consequences worth knowing before you change anything:
 ## Repo state
 
 [CONTEXT.md](CONTEXT.md) §6a is the live status board — trust it over this section. As of the last
-update, all of this **works**: proxy, ledger, circuit breaker, treasury schema + Prava rail,
-predictor v3 (wired into the request path, with its learning loop running in the proxy), daily
-ceilings with authorize/capture reservations, `POST /v1/annotate`, the model allowlist, the
-Treasurer agent loop, Poke/Linq alerts (a real iMessage was delivered end to end), `docker compose
-up`, and the dashboard — layout, live logs, Team Budget, Cost per Outcome and the Treasurer panel.
+update, all of this **works**: proxy, ledger **on Postgres**, circuit breaker, treasury schema +
+Prava rail, predictor v3 (wired into the request path, with its learning loop running in the
+proxy), daily ceilings with authorize/capture reservations, `POST /v1/annotate`, the model
+allowlist, the Treasurer agent loop, Poke/Linq alerts (a real iMessage was delivered end to end),
+`docker compose up`, and the dashboard — layout, live logs, Team Budget, Cost per Outcome and the
+Treasurer panel.
 
-Still **not started**: Postgres (SQLite is the shipped datastore, decided in `PROPOSALS.md` A5),
-Redis-backed reservations (only load-bearing at proxy replica #2), and **cross-model routing plus
-the Model Efficiency view on top of it** — that is the one genuinely open lane, and four
-`PLAN.md` items hang off it (`PROPOSALS.md` B11).
+Still **not started**: Redis-backed reservations (only load-bearing at proxy replica #2), and
+**cross-model routing plus the Model Efficiency view on top of it** — that is the one genuinely
+open lane, and four `PLAN.md` items hang off it (`PROPOSALS.md` B11).
+
+One number to be careful with: **proxy overhead is distance-bound now.** Measured p50 is ~53 ms
+from a laptop against Supabase in ap-south-1, against ARCHITECTURE.md's single-digit-millisecond
+claim, and essentially all of it is one network round trip. It should return to single digits with
+the proxy colocated with the database on Fly.io — but nobody has measured that yet, so do not quote
+a latency number until it comes from the deployed proxy.
 
 Two blockers on the Prava side are external rather than unbuilt, and both are open: a sandbox
 outage on credential minting, and **one purchase per payment cycle**, confirmed by a live Visa
@@ -149,7 +171,7 @@ edit one doc to match another, because the one you "fixed" may have been the cor
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the full production design (authorize/capture with Redis
 Lua reservations, SSE stream parsing, pricing YAML with cache-read/write tiers, write-ahead
 `treasury_events`). [CONTEXT.md](CONTEXT.md) §3 describes the 48-hour hackathon MVP, which is
-deliberately smaller (predictive `tiktoken` cost estimate, SQLite/Postgres ledger, mock provider
+deliberately smaller (predictive `tiktoken` cost estimate, Postgres ledger, mock provider
 billing endpoint at `/mock-openai/billing`, 5-minute rolling breaker window).
 
 Build to CONTEXT.md's MVP scope. Consult ARCHITECTURE.md for *why* a mechanism exists before

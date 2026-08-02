@@ -1,20 +1,19 @@
 # The whole backend — proxy, treasury, mock provider — is one process, so one
-# service. The dashboard is a separate dev process reading meter.db read-only;
-# run it on the host against the volume (or skip it; it is not required).
+# service. The dashboard is a separate Next.js process; run it on the host with
+# `npm run dev` from dashboard/, pointed at the same DATABASE_URL.
 services:
   meter:
     build: .
     ports:
       - "8080:8080"
+    # DATABASE_URL lives here. There is no local database any more: the ledger,
+    # wallets and treasury events are all in Postgres, so this service is stateless
+    # and the named volume it used to need is gone. It refuses to start without
+    # DATABASE_URL, by design — a proxy with no ledger cannot bill anyone.
     env_file: .env
     volumes:
-      # Named volume for the ledger: survives `docker compose down`.
-      - meter-data:/data
       # Budget-as-code and pricing stay on the host so they change by PR/rebuild,
       # not by exec'ing into the container.
       - ./meter.yaml:/app/meter.yaml:ro
       - ./pricing:/app/pricing:ro
     restart: unless-stopped
-
-volumes:
-  meter-data:
