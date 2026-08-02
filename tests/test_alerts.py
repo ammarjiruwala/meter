@@ -16,6 +16,7 @@ Owner: Tanay (Frontend & DX).
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -284,8 +285,54 @@ def test_breaker_seam() -> None:
         poke.httpx.post = original
 
 
+def test_demo_scale_money_is_visible() -> None:
+    """Demo-scale amounts must not render as $0.00.
+
+    WALKTHROUGH §6 instructs a restart with `BREAKER_WINDOW_USD=0.0001`, because real
+    templated traffic is far too cheap to trip the $20 production floor. Two decimals
+    then rounded both figures away and the delivered iMessage read:
+
+        $0.00 in 5 min against a $0.00 floor
+
+    Both numbers were real; the message said nothing happened against a threshold of
+    nothing. That is the text on the phone held up as evidence the system alerts a human,
+    and it is produced by following the guide exactly.
+    """
+    print("\ndemo-scale money formatting")
+
+    body = poke.compose(
+        "demo-project:ticket-summary", "throttle",
+        {"window_spend_usd": 0.0001, "threshold_usd": 0.0001,
+         "window_s": 300, "burst_ratio": 9.34},
+    )
+    # Substring-matching "$0.00" would also match "$0.0001", so compare the whole token.
+    money_tokens = re.findall(r"\$[\d,.]+", body)
+    check("the demo-scale alert shows no bare $0.00",
+          "$0.00" not in money_tokens, str(money_tokens))
+    check("the real spend figure is visible", "$0.0001" in money_tokens,
+          str(money_tokens))
+    check("the burst ratio still reads", "9.3x" in body, body)
+
+    # Production scale must be untouched — this is the common case.
+    prod = poke.compose(
+        "api-prod:chat", "throttle",
+        {"window_spend_usd": 24.13, "threshold_usd": 20.0,
+         "window_s": 300, "burst_ratio": 4.5},
+    )
+    check("production amounts keep two decimals",
+          "$24.13" in prod and "$20.00" in prod, prod)
+
+    # And the soft-budget message, which has the same problem at demo scale.
+    budget = poke.compose_budget("demo-project", 0.0024, 0.003)
+    check("the soft-budget warning is legible too",
+          "$0.00" not in re.findall(r"\$[\d,.]+", budget), budget)
+
+    check("a true zero still reads $0.00", poke._money(0) == "$0.00", poke._money(0))
+
+
 def main() -> int:
     for suite in (
+        test_demo_scale_money_is_visible,
         test_requires_configuration,
         test_phone_validation,
         test_payload_shape,

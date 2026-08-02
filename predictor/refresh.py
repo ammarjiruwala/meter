@@ -228,6 +228,32 @@ def refresh_now(db_path: str | None = None, gate: bool = True) -> Dict[str, Any]
 
     kept, report = _select_keys(holdout, candidate)
 
+    # A key that could not be *re-validated* this pass keeps the factor it already had.
+    #
+    # `set_history` replaces the whole installed set, so anything missing from `kept`
+    # silently reverts to 1.0 — the raw heuristic. But "not enough fresh evidence to
+    # re-check" and "this correction is wrong" are different states, and only the second
+    # justifies discarding a factor that was earning its place two minutes ago.
+    #
+    # Observed live 2026-08-02: ordinary walkthrough traffic shifted the holdout boundary
+    # and `demo-project/test-plan` went `unproven` for five consecutive passes — ten
+    # minutes — then came back on its own. A request in that window was predicted at 92%
+    # error instead of 13%, with nothing anywhere reporting a problem: `try.sh` showed
+    # `history factor 1.00` and `/healthz` read `learned_factors: 30` instead of 31.
+    # On a demo that is a feature quietly printing a number seven times worse than the
+    # slide claims.
+    #
+    # Keys the gate actively rejected (`dropped …`) are NOT carried — that is the gate
+    # doing its job, and overriding it would reinstate a correction measured to be worse.
+    previous = dict(engine.current_history())
+    for key, factor in previous.items():
+        if key in kept:
+            continue
+        verdict = report.get(key)
+        if verdict is None or verdict == "unproven":
+            kept[key] = factor
+            report[key] = f"carried ({verdict or 'no held-out rows this pass'})"
+
     before = _median_err(holdout, engine.current_history())
     after = _median_err(holdout, kept)
 
@@ -243,6 +269,8 @@ def refresh_now(db_path: str | None = None, gate: bool = True) -> Dict[str, Any]
 
     summary = {"rows": len(usable), "holdout": len(holdout),
                "candidate_keys": len(candidate_h), "installed_keys": len(kept),
+               "carried_keys": sum(1 for v in report.values()
+                                   if str(v).startswith("carried")),
                "gated": True,
                "median_before": round(before * 100, 1),
                "median_after": round(after * 100, 1),

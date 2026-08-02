@@ -85,7 +85,14 @@ _HOP_BY_HOP = {
 async def lifespan(app: FastAPI):
     db.connect()
     seeded = db.seed_keys(config.METER_KEYS)
-    log.info("ledger ready at %s (%d meter key(s) seeded)", config.DB_PATH, seeded)
+    # Names the database actually in use, not `config.DB_PATH` — that is the old SQLite
+    # file path, which survived the Postgres port and made the first line of every boot
+    # announce a `meter.db` that does not exist, directly contradicting the line above it.
+    # The host is worth printing: pointing at the wrong database is the failure that looks
+    # like "where did all the data go".
+    log.info("ledger ready at %s schema=%s (%d meter key(s) seeded)",
+             (config.DATABASE_URL or "").split("@")[-1].split("?")[0] or "unset",
+             config.DB_SCHEMA, seeded)
 
     # Create the treasury tables at boot rather than on first use. `treasury.db.connect()`
     # is lazy, so without this the `wallets` table does not exist until somebody happens to
