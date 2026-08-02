@@ -1,0 +1,45 @@
+# Meter budgets — demo configuration.
+#
+# Ceilings are deliberately set at DEMO SCALE, not production scale. The product's
+# defaults are $20/5min for the circuit breaker and hundreds of dollars a day per
+# project, which are the right numbers for a company spending thousands a day. This
+# repo's entire spend to date is about $2.20, so those defaults would never move a
+# progress bar or fire anything on stage.
+#
+# Say this out loud in the demo rather than letting someone find it: "thresholds are
+# configured for demo scale; production defaults are in meter.yaml.example."
+#
+# Sizing: the trailing 24h already holds ~$2.17 of seeded and test traffic, and a live
+# templated call costs ~$0.0002. A $3.00 project ceiling therefore starts around 72%
+# used and each call moves it visibly without tripping mid-demo.
+
+projects:
+  # Must match the project in METER_KEYS (`key:project:environment`).
+  demo-project:
+    ceiling_usd_per_day: 3.00
+
+    features:
+      # Per-feature ceilings. Whichever ceiling binds first refuses the request, and the
+      # 429 names which one it was. These are set well above each feature's observed
+      # spend so the demo shows headroom rather than a wall.
+      ticket-summary: { ceiling_usd_per_day: 0.50 }
+      commit-message: { ceiling_usd_per_day: 0.50 }
+      sql-from-question: { ceiling_usd_per_day: 0.50 }
+      incident-runbook: { ceiling_usd_per_day: 0.50 }
+      error-explainer: { ceiling_usd_per_day: 0.50 }
+      changelog-entry: { ceiling_usd_per_day: 0.25 }
+      code-review-note: { ceiling_usd_per_day: 0.25 }
+      ticket-classify: { ceiling_usd_per_day: 0.25 }
+      pr-description: { ceiling_usd_per_day: 0.50 }
+      api-doc-paragraph: { ceiling_usd_per_day: 0.50 }
+      postmortem-timeline: { ceiling_usd_per_day: 0.50 }
+      regex-explain: { ceiling_usd_per_day: 0.50 }
+      test-plan: { ceiling_usd_per_day: 0.50 }
+
+      # The high-consumption features. Larger ceilings because a single call moves
+      # real money -- which is the point of having them.
+      repo-wide-audit: { ceiling_usd_per_day: 1.00 }
+      multi-log-correlate: { ceiling_usd_per_day: 1.00 }
+      dataset-profile: { ceiling_usd_per_day: 1.00 }
+      legal-contract-review: { ceiling_usd_per_day: 1.00 }
+      book-chapter-summary: { ceiling_usd_per_day: 1.00 }
