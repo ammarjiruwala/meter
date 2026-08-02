@@ -80,9 +80,31 @@ def pool() -> ConnectionPool:
             # 2. Supabase's transaction pooler cannot support prepared statements at all,
             #    and the dashboard has to use that pooler on Vercel.
             #
-            # The cost is negligible here: a round trip to the database is ~28 ms, which
-            # dwarfs whatever re-planning saves.
-            kwargs={"row_factory": dict_row, "prepare_threshold": None},
+            # The cost is negligible here: a round trip to the database dominates
+            # whatever re-planning saves.
+            #
+            # `autocommit=True` halves the round trips, which is the single largest
+            # latency lever in this file. Without it psycopg opens a transaction on the
+            # first statement and the pool's context manager ends it on the way out, so
+            # every one-statement helper below costs a query *and* a COMMIT — two waits
+            # on a link where one wait is ~50 ms. Measured against Supabase: 201 ms per
+            # `fetchone` before, ~50 ms after.
+            #
+            # It is also the semantics this module already documents: `_Connection.commit`
+            # is a no-op and every write in `proxy/db.py` and `treasury/db.py` is a single
+            # statement. Multi-statement atomicity is needed in exactly one place —
+            # schema creation — and `executescript` takes an explicit transaction for it.
+            kwargs={"row_factory": dict_row, "prepare_threshold": None,
+                    "autocommit": True},
+            # Retire connections before the far end does. A hosted database closes idle
+            # connections on its own schedule, and the pool does not validate a
+            # connection before handing it out — so a checkout that happens to draw a
+            # server-closed one raises "consuming input failed: server closed the
+            # connection unexpectedly" at the call site. Seen once against Supabase
+            # mid-run. Validating on checkout would fix it too, but that is an extra
+            # round trip on every query and round trips are the whole cost here.
+            max_idle=300.0,
+            max_lifetime=1800.0,
             configure=_configure,
             open=True,
         )
@@ -104,11 +126,11 @@ def _configure(conn) -> None:
     `DB_SCHEMA` defaults to `public`, so normal runs are unaffected.
     """
     conn.execute(f'SET search_path TO "{config.DB_SCHEMA}"')
-    # The pool discards any connection its configure callback leaves inside a
-    # transaction ("connection left in status INTRANS"), and it does so quietly — the
-    # symptom is every connection being thrown away and `getconn` timing out, which
-    # reads like an unreachable database rather than a callback bug. `SET` is
-    # session-scoped, so it survives the commit.
+    # Under autocommit this is already outside a transaction, but the commit stays. The
+    # pool discards any connection its configure callback leaves inside one ("connection
+    # left in status INTRANS"), and it does so quietly — the symptom is every connection
+    # being thrown away and `getconn` timing out, which reads like an unreachable
+    # database rather than a callback bug. `SET` is session-scoped, so it survives.
     conn.commit()
 
 
@@ -171,10 +193,11 @@ def execute_returning(sql: str, params: tuple | list = ()) -> dict[str, Any] | N
 def executescript(sql: str) -> None:
     """Run several statements, for schema creation.
 
-    psycopg sends a multi-statement string as one implicit transaction, which is what we
-    want: the schema lands whole or not at all.
+    The explicit transaction is the point. The pool runs in autocommit (see `pool()`), so
+    without it each statement in the script would commit on its own and a failure halfway
+    through would leave the schema half-created. Here it lands whole or not at all.
     """
-    with pool().connection() as conn:
+    with pool().connection() as conn, conn.transaction():
         conn.execute(sql)
 
 

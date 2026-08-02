@@ -27,6 +27,7 @@ import statistics
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -76,12 +77,17 @@ async def main() -> None:
     # Set up a temporary environment
     with tempfile.TemporaryDirectory(prefix="meter-bench-") as tmpdir:
         tmpdir_path = Path(tmpdir)
-        db_path = tmpdir_path / "bench.db"
         env_path = tmpdir_path / ".env"
+
+        # A throwaway Postgres schema, the way the tests isolate themselves. The number
+        # this harness reports is added latency, so it must not be measured against a
+        # `requests` table carrying the demo's history: index depth is part of what a
+        # write costs.
+        schema = "bench_" + uuid.uuid4().hex[:8]
 
         # Minimal .env for the benchmark
         env_path.write_text(
-            f"METER_DB_PATH={db_path}\n"
+            f"DB_SCHEMA={schema}\n"
             f"METER_KEYS=mk_bench:bench-project:dev\n"
             f"OPENAI_API_KEY=fake\n"
             f"ANTHROPIC_API_KEY=fake\n"
@@ -98,7 +104,7 @@ async def main() -> None:
             env_path.write_text(env_path.read_text() + f"METER_YAML_PATH={yaml_path}\n")
 
         # Override the config module's env loading
-        os.environ["METER_DB_PATH"] = str(db_path)
+        os.environ["DB_SCHEMA"] = schema
         os.environ["METER_KEYS"] = "mk_bench:bench-project:dev"
         os.environ["OPENAI_API_KEY"] = "fake"
         os.environ["BREAKER_ENABLED"] = "false"
@@ -177,6 +183,9 @@ async def main() -> None:
             proxy_server.should_exit = True
             fake_server.should_exit = True
             await asyncio.sleep(0.5)
+            from proxy import pg
+            pg.drop_schema(schema)
+            pg.close()
 
 
 async def start_fake_upstream(port: int) -> uvicorn.Server:
