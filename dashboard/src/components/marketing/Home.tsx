@@ -459,6 +459,10 @@ export function Home() {
               </div>
             </div>
           </div>
+          {/* This section is 150vh, so its last screenful needs its own snap point
+              — without one the scroll has no reason to settle where step 03 is
+              finally readable, and you get carried into the CTA instead. */}
+          <div className="snap-end" aria-hidden="true" />
         </section>
 
         {/* ── FINAL CTA ──────────────────────────────────────────── */}
