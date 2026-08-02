@@ -30,12 +30,27 @@ function getPool(): Pool | null {
     globalForPg.meterPool = null;
     return null;
   }
+  // On a serverless platform every concurrent function instance gets its own module
+  // scope, so `globalThis` de-duplicates the pool within an instance and not across
+  // them. A pool of 4 therefore means 4 x (number of live instances), and Supabase's
+  // transaction pooler caps CLIENTS at 200 across everything — this dashboard, the
+  // proxy, and anyone's local dev server. We hit exactly that: every database-backed
+  // route started returning 500 with `EMAXCONN: max client connections reached,
+  // limit: 200`, while the static route kept serving, which reads like a broken app
+  // rather than an exhausted connection budget.
+  //
+  // One connection per instance is the right number where a function handles one
+  // request at a time; a larger pool buys nothing and multiplies across instances.
+  const serverless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
   globalForPg.meterPool = new Pool({
     connectionString: CONNECTION_STRING,
     // Small on purpose. The dashboard polls; it does not need to hold connections the
     // proxy could be using, and Supabase's connection budget is shared between them.
-    max: Number(process.env.DASHBOARD_DB_POOL_MAX ?? 4),
-    idleTimeoutMillis: 30_000,
+    max: Number(process.env.DASHBOARD_DB_POOL_MAX ?? (serverless ? 1 : 4)),
+    // Serverless instances are frozen rather than shut down, so an idle connection can
+    // be held long after the request that opened it. Release quickly there; a long-lived
+    // local server can afford to keep them warm.
+    idleTimeoutMillis: serverless ? 5_000 : 30_000,
     connectionTimeoutMillis: 10_000,
     // Pins search_path for every connection this pool opens, so unqualified table names
     // resolve to the same schema the proxy wrote into.
