@@ -71,6 +71,10 @@ SEQUENCE: tuple[Prompt, ...] = (
         ),
         claim="A different feature, a different shape of answer, the same accuracy. "
               "Measured at 9% median error in a real run.",
+        # Capped well below the 400 the others use. Uncapped this returned ~280 tokens of
+        # SQL, which pushed the accuracy panel beside it off the screen -- and the whole
+        # point of putting them side by side is that both are visible at once.
+        max_tokens=160,
     ),
     Prompt(
         id="pr",

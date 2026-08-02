@@ -1,36 +1,44 @@
 "use client";
 
 /**
- * The judge console — "Try it yourself", PITCH.md Acts 1 to 6.
+ * The console: the one control the judge's Control Room has that `/dashboard` does not.
  *
- * Judging is asynchronous: nobody presents this, and nobody answers a judge's questions.
- * So every step states what it is about to prove, and every failure states what to do
- * next. There are no dead ends and no spinner without a claim attached to it.
+ * It renders between the Treasurer Agent and the Request Ledger, so the agent whose
+ * decisions it triggers and the ledger every call lands in are both on screen while it is
+ * used. Everything else on the page — spend, budgets, balances, outcomes — is the real
+ * dashboard, scoped to this judge. This component adds no cards beyond the ones it needs.
  *
- * The one structural rule, which the layout exists to serve: **the prediction renders
- * before the answer arrives.** A table showing both proves nothing — it could have been
- * filled in afterwards. Watching the forecast land first is the product.
+ * Two rules the layout serves:
+ *
+ * 1. **The prediction renders before the answer.** Separate state, staged labels. A table
+ *    showing both proves nothing — it could have been filled in afterwards.
+ * 2. **Say what happened, in a sentence.** No status code stands in for language, and a
+ *    429 from the breaker is the product working, so it is never painted as an error.
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   JudgeError,
   judge,
   rememberToken,
-  storedToken,
   usd,
   type JudgePrompt,
   type JudgeSession,
   type JudgeStats,
-  type LedgerRow,
-  type OutcomeRow,
   type RunResult,
   type TopupResult,
   type TreasuryState,
 } from "@/lib/judge";
 import { Panel } from "@/components/ui/primitives";
 
-type Phase = "welcome" | "running";
+type ServerSession = {
+  token: string;
+  projectId: string;
+  displayName: string | null;
+  callsUsed: number;
+  callCap: number;
+};
 
 type PromptSet = {
   sequence: JudgePrompt[];
@@ -39,671 +47,623 @@ type PromptSet = {
   why_not_editable: string;
 };
 
-/** One finished step, kept so the console can show the whole trail rather than the last. */
-type Entry = { prompt: JudgePrompt; result: RunResult };
-
 const OUTCOME_VALUE_USD = 12.5;
 
-export function JudgeConsole() {
-  const [phase, setPhase] = useState<Phase>("welcome");
-  const [session, setSession] = useState<JudgeSession | null>(null);
+export function JudgeConsole({ session }: { session: ServerSession }) {
+  const router = useRouter();
+  const token = session.token;
+
   const [prompts, setPrompts] = useState<PromptSet | null>(null);
+  const [step, setStep] = useState(0);
+  const [stats, setStats] = useState<JudgeStats | null>(null);
+  const [live, setLive] = useState<JudgeSession | null>(null);
+  const [result, setResult] = useState<{ prompt: JudgePrompt; run: RunResult } | null>(null);
+  const [stage, setStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-
-  const [step, setStep] = useState(0);
-  const [entries, setEntries] = useState<Entry[]>([]);
-  const [stats, setStats] = useState<JudgeStats | null>(null);
-  const [ledger, setLedger] = useState<LedgerRow[]>([]);
-  const [outcomes, setOutcomes] = useState<OutcomeRow[]>([]);
   const [traceId, setTraceId] = useState<string | null>(null);
 
-  const [runaway, setRunaway] = useState<Awaited<
-    ReturnType<typeof judge.runaway>
-  > | null>(null);
-  const [alertNote, setAlertNote] = useState<string | null>(null);
   const [treasury, setTreasury] = useState<TreasuryState | null>(null);
   const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
   const [topup, setTopup] = useState<TopupResult | null>(null);
-
-  // The forecast, shown on its own while the call is still in flight. This state existing
-  // separately from `entries` is the whole point: it is rendered, visibly, before there is
-  // an answer to put beside it.
-  const [pending, setPending] = useState<{
-    prompt: JudgePrompt;
-    stage: string;
-  } | null>(null);
+  const [runaway, setRunaway] = useState<Awaited<ReturnType<typeof judge.runaway>> | null>(null);
+  const [alertNote, setAlertNote] = useState<string | null>(null);
 
   useEffect(() => {
-    judge.prompts().then(setPrompts).catch(() => {
-      setError(
-        "Could not load the walkthrough from the Meter API. It may be waking up — reload in a moment.",
-      );
-    });
-  }, []);
-
-  // Rehydrate a session across a reload, together with everything it already did — a
-  // judge who refreshes mid-run must not come back to a console claiming their ledger is
-  // empty. Done inline rather than by calling a shared helper so this effect owns its
-  // whole job and needs no dependency on a memoized callback.
-  useEffect(() => {
-    const token = storedToken();
-    if (!token) return;
-    let live = true;
+    let alive = true;
     (async () => {
       try {
-        const s = await judge.readSession(token);
-        if (!live) return;
-        setSession(s);
-        setPhase("running");
-        const [l, o] = await Promise.all([judge.ledger(token), judge.outcomes(token)]);
-        if (!live) return;
-        setLedger(l.rows);
-        setOutcomes(o.rows);
+        const [p, s, t] = await Promise.all([
+          judge.prompts(),
+          judge.stats(token),
+          judge.treasury(token).catch(() => null),
+        ]);
+        if (!alive) return;
+        setPrompts(p);
+        setStats(s);
+        setTreasury(t);
+        // Resume where the session left off rather than restarting the sequence.
+        setStep(Math.min(s.calls, p.sequence.length));
       } catch {
-        // Unknown or expired: drop the stale token and start clean rather than
-        // stranding someone on a console wired to a session that no longer exists.
-        rememberToken(null);
+        if (alive) setError("Could not reach the Meter API. It may be waking up.");
       }
     })();
     return () => {
-      live = false;
+      alive = false;
     };
-  }, []);
-
-  /** Re-read the session's ledger. Called after each action, never from an effect. */
-  async function refresh(token: string) {
-    try {
-      const [l, o] = await Promise.all([judge.ledger(token), judge.outcomes(token)]);
-      setLedger(l.rows);
-      setOutcomes(o.rows);
-    } catch {
-      // A stale table is better than an error banner over a working console.
-    }
-  }
+  }, [token]);
 
   function fail(err: unknown) {
-    if (err instanceof JudgeError) {
-      if (err.status === 440) {
-        rememberToken(null);
-        setSession(null);
-        setPhase("welcome");
-        setError("Your session expired. Start a new one — nothing is lost.");
-        return;
-      }
-      setError(err.message);
+    if (err instanceof JudgeError && err.status === 440) {
+      rememberToken(null);
+      router.refresh();
       return;
     }
-    setError(String(err));
+    setError(err instanceof JudgeError ? err.message : String(err));
   }
 
-  async function start(form: Record<string, unknown>) {
-    setBusy("Creating your private session…");
+  async function run(prompt: JudgePrompt, withTrace = false) {
     setError(null);
-    try {
-      const s = await judge.createSession(form);
-      rememberToken(s.token);
-      setSession(s);
-      setPhase("running");
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function runStep(prompt: JudgePrompt, useTrace = false) {
-    if (!session) return;
-    setError(null);
-    const trace = useTrace ? traceId ?? `judge-${Date.now().toString(36)}` : undefined;
+    const trace = withTrace ? traceId ?? `judge-${Date.now().toString(36)}` : undefined;
     if (trace) setTraceId(trace);
 
-    // Staged deliberately. Each label names what is being proved, so the wait is
-    // evidence rather than a spinner.
-    setPending({ prompt, stage: "Predicting cost before the call…" });
-    const tick = setTimeout(
-      () => setPending({ prompt, stage: "Calling OpenAI…" }),
-      700,
-    );
+    setStage("Predicting the cost, before the call runs…");
+    const tick = setTimeout(() => setStage("Calling gpt-4o-mini…"), 700);
     try {
-      const { result, stats: s, session: updated } = await judge.run(
-        session.token,
-        prompt.id,
-        trace,
-      );
-      setPending({ prompt, stage: "Writing the ledger row…" });
-      setEntries((prev) => [...prev, { prompt, result }]);
-      setStats(s);
-      setSession(updated);
+      const out = await judge.run(token, prompt.id, trace);
+      setResult({ prompt, run: out.result });
+      setStats(out.stats);
+      setLive(out.session);
       setStep((n) => n + 1);
-      await refresh(session.token);
+      // Re-render the server page so every card above picks up the new row.
+      router.refresh();
     } catch (err) {
       fail(err);
     } finally {
       clearTimeout(tick);
-      setPending(null);
+      setStage(null);
     }
   }
 
-  async function doRunaway() {
-    if (!session) return;
-    setBusy("Firing calls until the breaker trips…");
+  async function act<T>(label: string, fn: () => Promise<T>, after?: (v: T) => void) {
+    setBusy(label);
     setError(null);
     try {
-      const out = await judge.runaway(session.token);
-      setRunaway(out);
-      setSession(out.session);
-      await refresh(session.token);
+      const value = await fn();
+      after?.(value);
+      router.refresh();
     } catch (err) {
       fail(err);
     } finally {
       setBusy(null);
     }
-  }
-
-  async function reset() {
-    if (!session || !prompts) return;
-    setBusy("Closing the breaker…");
-    try {
-      await judge.resetBreaker(session.token, prompts.runaway.feature);
-      setRunaway(null);
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function markResolved() {
-    if (!session || !traceId) return;
-    setBusy("Recording the outcome…");
-    try {
-      const out = await judge.annotate(session.token, traceId, OUTCOME_VALUE_USD);
-      setOutcomes(out.outcomes);
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function loadTreasury() {
-    if (!session) return;
-    setBusy("Reading your wallet…");
-    try {
-      setTreasury(await judge.treasury(session.token));
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function connectCard(amountUsd: number) {
-    if (!session) return;
-    setBusy("Opening a mandate setup session with Prava…");
-    try {
-      const out = await judge.mandate(session.token, amountUsd);
-      setApprovalUrl(out.approval_url);
-      window.open(out.approval_url, "_blank", "noopener");
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function runTreasurer() {
-    if (!session) return;
-    setBusy("Syncing your mandate, then running one Treasurer pass…");
-    try {
-      const out = await judge.topup(session.token);
-      setTopup(out.result);
-      setTreasury(await judge.treasury(session.token));
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function testAlert() {
-    if (!session) return;
-    setBusy("Sending a test message…");
-    setAlertNote(null);
-    try {
-      const out = await judge.alertTest(session.token);
-      setAlertNote(out.note);
-    } catch (err) {
-      fail(err);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  if (phase === "welcome") {
-    return (
-      <Welcome
-        onStart={start}
-        busy={busy}
-        error={error}
-        why={prompts?.why_not_editable ?? null}
-      />
-    );
   }
 
   const next = prompts?.sequence[step] ?? null;
-  const done = prompts !== null && step >= prompts.sequence.length;
+  const finishedPrompts = prompts !== null && step >= prompts.sequence.length;
+  const callsLeft = live?.calls_remaining ?? session.callCap - session.callsUsed;
 
   return (
-    <div className="flex flex-col gap-6">
-      <SessionBar
-        session={session}
-        onEnd={async () => {
-          if (session) await judge.endSession(session.token).catch(() => {});
-          rememberToken(null);
-          setSession(null);
-          setEntries([]);
-          setPhase("welcome");
-        }}
+    <div className="flex flex-col gap-[24px]">
+      {error && <Banner tone="bad">{error}</Banner>}
+
+      {/* Prompt on the left, answer and numbers on the right. */}
+      <div className="grid grid-cols-1 items-start gap-[24px] lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <Panel title="Console" tag={`${callsLeft} calls left`}>
+          <div className="flex flex-col gap-[16px] p-[20px]">
+            {next ? (
+              <>
+                <div className="t-body" style={{ color: "var(--color-text-secondary)" }}>
+                  {next.claim}
+                </div>
+                <div
+                  className="rounded-[8px] p-[14px] font-mono text-[12.5px] leading-[1.6]"
+                  style={{
+                    background: "var(--color-surface-3)",
+                    color: "var(--color-text-secondary)",
+                  }}
+                >
+                  <div
+                    className="mb-[8px] text-[11px] uppercase tracking-[0.08em]"
+                    style={{ color: "var(--color-text-tertiary)" }}
+                  >
+                    gpt-4o-mini · {next.feature} · max {next.max_tokens} tokens
+                  </div>
+                  {next.prompt}
+                </div>
+                <button
+                  className="judge-btn"
+                  disabled={!!stage || !!busy}
+                  onClick={() => void run(next, step === 0)}
+                >
+                  {stage
+                    ? "Running…"
+                    : `Run prompt ${step + 1} of ${prompts!.sequence.length}`}
+                </button>
+              </>
+            ) : (
+              <div className="t-body" style={{ color: "var(--color-text-secondary)" }}>
+                All three prompts are done. Their rows are in the Request Ledger below, and
+                the accuracy is on the right.
+              </div>
+            )}
+
+            {finishedPrompts && traceId && (
+              <button
+                className="judge-btn-quiet"
+                disabled={!!busy}
+                onClick={() =>
+                  void act("Recording the outcome…", () =>
+                    judge.annotate(token, traceId, OUTCOME_VALUE_USD),
+                  )
+                }
+              >
+                Mark that ticket resolved — worth {usd(OUTCOME_VALUE_USD)}
+              </button>
+            )}
+
+            {prompts && (
+              <p className="text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
+                The prompt is fixed. {prompts.why_not_editable}
+              </p>
+            )}
+          </div>
+        </Panel>
+
+        <div className="flex flex-col gap-[24px]">
+          <Answer stage={stage} result={result} />
+          <Statistics stats={stats} last={result?.run ?? null} />
+        </div>
+      </div>
+
+      <Treasury
+        state={treasury}
+        approvalUrl={approvalUrl}
+        topup={topup}
+        busy={!!busy}
+        busyLabel={busy}
+        onLoad={() =>
+          void act("Reading your wallet…", () => judge.treasury(token), setTreasury)
+        }
+        onConnect={(amount) =>
+          void act(
+            "Opening a Prava setup session…",
+            () => judge.mandate(token, amount),
+            (r) => setApprovalUrl(r.approval_url),
+          )
+        }
+        onRun={() =>
+          void act(
+            "Syncing your mandate, then running the Treasurer…",
+            async () => {
+              const out = await judge.topup(token);
+              setTopup(out.result);
+              return judge.treasury(token);
+            },
+            setTreasury,
+          )
+        }
       />
 
-      {error && <Notice tone="bad">{error}</Notice>}
-      {busy && <Notice tone="info">{busy}</Notice>}
-
-      <Panel title="Run a prompt" tag={`gpt-4o-mini · step ${Math.min(step + 1, 3)}/3`}>
-        <div className="p-5 flex flex-col gap-4">
-          {next ? (
-            <>
-              <div className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                {next.claim}
-              </div>
-              <PromptBox prompt={next} />
-              <button
-                className="judge-btn"
-                disabled={!!pending || !!busy}
-                onClick={() => void runStep(next, step === 0)}
-              >
-                {pending ? "Running…" : `Run — ${next.title}`}
-              </button>
-            </>
-          ) : (
-            <div className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
-              All three done. Below: what the breaker does when a feature runs away.
-            </div>
-          )}
-
-          {prompts && (
-            <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
-              The prompt is fixed and not editable. {prompts.why_not_editable}
-            </p>
-          )}
-        </div>
-      </Panel>
-
-      {pending && <PendingCard prompt={pending.prompt} stage={pending.stage} />}
-
-      {entries.length > 0 && <Results entries={entries} stats={stats} />}
-
-      {done && (
-        <>
-          <OutcomePanel
-            outcomes={outcomes}
-            canMark={!!traceId}
-            onMark={() => void markResolved()}
-            busy={!!busy}
-          />
-          <TreasuryPanel
-            state={treasury}
-            approvalUrl={approvalUrl}
-            topup={topup}
-            onLoad={() => void loadTreasury()}
-            onConnect={(n) => void connectCard(n)}
-            onRun={() => void runTreasurer()}
-            busy={!!busy}
-          />
-          <BreakerPanel
-            session={session}
-            runaway={runaway}
-            onRun={() => void doRunaway()}
-            onReset={() => void reset()}
-            onTestAlert={() => void testAlert()}
-            alertNote={alertNote}
-            busy={!!busy}
-          />
-          <NotProven />
-        </>
-      )}
-
-      <LedgerPanel rows={ledger} />
+      <Breaker
+        runaway={runaway}
+        hasAlerts={!!live?.has_alerts}
+        alertPhone={live?.alert_phone ?? null}
+        alertNote={alertNote}
+        floorUsd={live?.breaker_floor_usd ?? null}
+        busy={!!busy || !!stage}
+        onTestAlert={() =>
+          void act("Sending a test message…", () => judge.alertTest(token), (r) =>
+            setAlertNote(r.note),
+          )
+        }
+        onRun={() =>
+          void act(
+            "Firing calls until the breaker trips…",
+            () => judge.runaway(token),
+            setRunaway,
+          )
+        }
+        onReset={() =>
+          void act(
+            "Closing the breaker…",
+            () => judge.resetBreaker(token, prompts?.runaway.feature ?? "ticket-summary"),
+            () => setRunaway(null),
+          )
+        }
+      />
     </div>
   );
 }
 
-/* ── Act 1 ─────────────────────────────────────────────────────────────────── */
+/* ── The answer ─────────────────────────────────────────────────────────────── */
 
-function Welcome({
-  onStart,
-  busy,
-  error,
-  why,
+/**
+ * How much of an answer to show before folding it.
+ *
+ * The response is the least interesting thing on this half of the screen — the judge is
+ * here to see the *cost* of it, not to read a pull request description. Left unbounded,
+ * `pr-description` returns 400 tokens of prose and pushes the accuracy panel beneath it
+ * off the bottom of the viewport, so the one number the page exists to show is the one
+ * thing you have to scroll for.
+ *
+ * Character count rather than measuring the rendered height: it needs no ref, no
+ * ResizeObserver and no state written from an effect, and being approximate costs nothing
+ * when the only decision is whether to offer a toggle.
+ */
+const ANSWER_FOLD_CHARS = 420;
+
+function Answer({
+  stage,
+  result,
 }: {
-  onStart: (form: Record<string, unknown>) => void;
-  busy: string | null;
-  error: string | null;
-  why: string | null;
+  stage: string | null;
+  result: { prompt: JudgePrompt; run: RunResult } | null;
 }) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [open, setOpen] = useState(false);
-  const [openai, setOpenai] = useState("");
-  const [prava, setPrava] = useState("");
-  const [linq, setLinq] = useState("");
-  const [phone, setPhone] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const answer = result?.run.answer ?? "";
+  const foldable = answer.length > ANSWER_FOLD_CHARS;
 
   return (
-    <Panel title="Try it yourself" tag="~10 min">
-      <div className="p-5 flex flex-col gap-5">
-        <p style={{ color: "var(--color-text-secondary)" }}>
-          You&rsquo;ll get your own private session. Every call you make is metered,
-          attributed and <strong>cost-predicted before it runs</strong>. Then you&rsquo;ll
-          watch a runaway feature get throttled, and an agent pay its own bill.
-        </p>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Your name" value={name} onChange={setName} placeholder="Ada Lovelace" />
-          <Field
-            label="Email"
-            value={email}
-            onChange={setEmail}
-            placeholder="ada@example.com"
-            hint="Used as the identity on any payment mandate you approve."
-          />
-        </div>
-
-        <button
-          type="button"
-          className="text-left text-xs underline"
-          style={{ color: "var(--color-text-tertiary)" }}
-          onClick={() => setOpen((v) => !v)}
-        >
-          {open ? "− Hide optional keys" : "+ Optional: use your own keys"}
-        </button>
-
-        {open && (
-          <div className="flex flex-col gap-3 rounded-lg p-4"
-               style={{ background: "var(--color-surface-3)" }}>
-            <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
-              All optional. Skip every one of these and the walkthrough still works —
-              we use ours.
-            </p>
-            <Field label="OpenAI API key" value={openai} onChange={setOpenai}
-                   placeholder="sk-…" secret
-                   hint="Without this you spend our credit, not yours." />
-            <Field label="Prava merchant key" value={prava} onChange={setPrava}
-                   placeholder="sk_test_…" secret
-                   hint="With your own key the charge lands in your Prava dashboard, with your own revoke button." />
-            <Field label="Linq API key" value={linq} onChange={setLinq}
-                   placeholder="linq_…" secret />
-            <Field label="Your phone (E.164)" value={phone} onChange={setPhone}
-                   placeholder="+15551234567"
-                   hint="Linq's sandbox drops messages silently unless you have texted the sending line first — there is a test button once you start." />
+    <Panel title="Response" tag={result ? result.prompt.feature : "waiting"}>
+      <div className="p-[20px]">
+        {stage ? (
+          <div
+            className="flex items-center gap-[10px] text-[13px]"
+            style={{ color: "var(--color-status-warn)" }}
+          >
+            <span
+              className="inline-block h-[6px] w-[6px] animate-pulse rounded-full"
+              style={{ background: "var(--color-status-warn)" }}
+            />
+            {stage}
           </div>
+        ) : result ? (
+          result.run.blocked ? (
+            <Outcome
+              tone="warn"
+              headline="Blocked — and that is the product working."
+              detail={result.run.reason ?? "The circuit breaker refused this call."}
+            />
+          ) : (
+            <>
+              <div className="relative">
+                <p
+                  className="t-body overflow-hidden whitespace-pre-wrap"
+                  style={{
+                    color: "var(--color-text-secondary)",
+                    maxHeight: foldable && !expanded ? "184px" : undefined,
+                  }}
+                >
+                  {answer}
+                </p>
+                {foldable && !expanded && (
+                  // Fades into the panel rather than cutting mid-line, so it reads as
+                  // folded rather than truncated.
+                  <div
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-0 bottom-0 h-[56px]"
+                    style={{
+                      background:
+                        "linear-gradient(to bottom, transparent, var(--color-surface-1))",
+                    }}
+                  />
+                )}
+              </div>
+              {foldable && (
+                <button
+                  className="mt-[10px] text-[12px] underline"
+                  style={{ color: "var(--color-text-tertiary)" }}
+                  onClick={() => setExpanded((v) => !v)}
+                >
+                  {expanded
+                    ? "Show less"
+                    : `Read the full response (${answer.length.toLocaleString()} characters)`}
+                </button>
+              )}
+            </>
+          )
+        ) : (
+          <p className="text-[13px]" style={{ color: "var(--color-text-tertiary)" }}>
+            Run a prompt on the left. The cost estimate appears here first, before the
+            answer does.
+          </p>
         )}
-
-        {error && <Notice tone="bad">{error}</Notice>}
-
-        <button
-          className="judge-btn"
-          disabled={!!busy}
-          onClick={() =>
-            onStart({
-              name: name.trim(),
-              email: email.trim(),
-              openai_api_key: openai.trim(),
-              prava_api_key: prava.trim(),
-              poke_api_key: linq.trim(),
-              poke_phone: phone.trim(),
-            })
-          }
-        >
-          {busy ?? "Start my session"}
-        </button>
-
-        <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
-          Your session is private. Keys are held in memory for this session only and are
-          never written to the ledger. {why}
-        </p>
       </div>
     </Panel>
   );
 }
 
-/* ── Pieces ────────────────────────────────────────────────────────────────── */
+/* ── The numbers ────────────────────────────────────────────────────────────── */
 
-function Field({
-  label, value, onChange, placeholder, hint, secret = false,
+/** Green under 15%, amber to 30%, red above — the bands the repo actually claims. */
+function errorTone(pct: number | null): string {
+  if (pct === null) return "var(--color-text-tertiary)";
+  if (pct <= 15) return "var(--color-status-good)";
+  if (pct <= 30) return "var(--color-status-warn)";
+  return "var(--color-status-bad)";
+}
+
+function Statistics({
+  stats,
+  last,
 }: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  hint?: string;
-  secret?: boolean;
+  stats: JudgeStats | null;
+  last: RunResult | null;
 }) {
+  const row = last?.row ?? null;
+  const err = row?.output_token_error_pct ?? null;
+
   return (
-    <label className="flex flex-col gap-1 text-sm">
-      <span style={{ color: "var(--color-text-secondary)" }}>{label}</span>
-      <input
-        className="judge-input"
-        type={secret ? "password" : "text"}
-        value={value}
-        placeholder={placeholder}
-        autoComplete="off"
-        onChange={(e) => onChange(e.target.value)}
-      />
-      {hint && (
-        <span className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
-          {hint}
-        </span>
-      )}
-    </label>
+    <Panel
+      title="Prediction accuracy"
+      tag={stats?.enough_for_median ? "median over your calls" : "this call"}
+    >
+      <div className="flex flex-col gap-[20px] p-[20px]">
+        {row && (
+          <div className="grid grid-cols-3 gap-[12px]">
+            <Stat
+              label="Predicted"
+              value={`${row.predicted_output_tokens ?? "—"}`}
+              sub={usd(row.predicted_cost_usd)}
+            />
+            <Stat
+              label="Actual"
+              value={`${row.output_tokens ?? "—"}`}
+              sub={usd(row.cost_usd)}
+            />
+            <Stat
+              label="Off by"
+              value={err === null ? "—" : `${err}%`}
+              sub={
+                row.history_factor
+                  ? `factor ${row.history_factor.toFixed(2)}`
+                  : "no history"
+              }
+              color={errorTone(err)}
+              big
+            />
+          </div>
+        )}
+
+        {row && (
+          <Bars
+            predicted={row.predicted_output_tokens ?? 0}
+            actual={row.output_tokens ?? 0}
+            tone={errorTone(err)}
+          />
+        )}
+
+        {stats && stats.calls > 0 && (
+          <div
+            className="flex flex-wrap gap-[24px] border-t pt-[16px]"
+            style={{ borderColor: "var(--color-border-subtle)" }}
+          >
+            <Stat label="Calls" value={String(stats.calls)} />
+            <Stat label="Spent" value={usd(stats.spend_usd)} />
+            <Stat
+              label={stats.enough_for_median ? "Median error" : "Error so far"}
+              value={
+                stats.median_error_pct === null ? "—" : `${stats.median_error_pct}%`
+              }
+              color={errorTone(stats.median_error_pct)}
+            />
+            <Stat
+              label="Within 2×"
+              value={stats.within_2x_pct === null ? "—" : `${stats.within_2x_pct}%`}
+            />
+          </div>
+        )}
+
+        {stats && !stats.enough_for_median && stats.calls > 0 && (
+          <p className="text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
+            One or two calls is not a median — this is a single observation. It becomes a
+            median at three.
+          </p>
+        )}
+
+        {!row && !stats?.calls && (
+          <p className="text-[13px]" style={{ color: "var(--color-text-tertiary)" }}>
+            Nothing measured yet.
+          </p>
+        )}
+      </div>
+    </Panel>
   );
 }
 
-function Notice({ tone, children }: { tone: "bad" | "info" | "good"; children: React.ReactNode }) {
-  const color =
-    tone === "bad" ? "var(--color-status-bad)"
-    : tone === "good" ? "var(--color-status-good)"
-    : "var(--color-status-warn)";
+function Stat({
+  label,
+  value,
+  sub,
+  color,
+  big = false,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  color?: string;
+  big?: boolean;
+}) {
   return (
-    <div className="rounded-lg px-4 py-3 text-sm"
-         style={{ border: `1px solid ${color}`, color, background: "var(--color-surface-2)" }}>
+    <div className="flex flex-col gap-[2px]">
+      <span
+        className="text-[11px] uppercase tracking-[0.08em]"
+        style={{ color: "var(--color-text-tertiary)" }}
+      >
+        {label}
+      </span>
+      <span
+        className={
+          big ? "text-[28px] font-semibold leading-none" : "text-[18px] leading-none"
+        }
+        style={{ color: color ?? "var(--color-text-primary)" }}
+      >
+        {value}
+      </span>
+      {sub && (
+        <span
+          className="font-mono text-[11px]"
+          style={{ color: "var(--color-text-tertiary)" }}
+        >
+          {sub}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Two bars to the same scale. The gap between them *is* the error. */
+function Bars({
+  predicted,
+  actual,
+  tone,
+}: {
+  predicted: number;
+  actual: number;
+  tone: string;
+}) {
+  const max = Math.max(predicted, actual, 1);
+  const rows: [string, number, string][] = [
+    ["predicted", predicted, "var(--color-text-tertiary)"],
+    ["actual", actual, tone],
+  ];
+  return (
+    <div className="flex flex-col gap-[8px]">
+      {rows.map(([label, value, colour]) => (
+        <div key={label} className="flex items-center gap-[10px]">
+          <span
+            className="w-[64px] text-[11px]"
+            style={{ color: "var(--color-text-tertiary)" }}
+          >
+            {label}
+          </span>
+          <div
+            className="h-[8px] flex-1 overflow-hidden rounded-full"
+            style={{ background: "var(--color-surface-4)" }}
+          >
+            <div
+              className="h-full rounded-full transition-[width] duration-500"
+              style={{ width: `${(value / max) * 100}%`, background: colour }}
+            />
+          </div>
+          <span
+            className="w-[52px] text-right font-mono text-[11px]"
+            style={{ color: "var(--color-text-secondary)" }}
+          >
+            {value} tok
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── Plain-language outcomes ────────────────────────────────────────────────── */
+
+function Outcome({
+  tone,
+  headline,
+  detail,
+  evidence,
+}: {
+  tone: "good" | "warn" | "bad";
+  headline: string;
+  detail?: string;
+  evidence?: [string, string][];
+}) {
+  const colour =
+    tone === "good"
+      ? "var(--color-status-good)"
+      : tone === "bad"
+        ? "var(--color-status-bad)"
+        : "var(--color-status-warn)";
+  return (
+    <div
+      className="flex flex-col gap-[8px] rounded-[8px] p-[16px]"
+      style={{
+        background: "var(--color-surface-3)",
+        borderLeft: `2px solid ${colour}`,
+      }}
+    >
+      <div className="text-[14px] font-semibold" style={{ color: colour }}>
+        {headline}
+      </div>
+      {detail && (
+        <div className="text-[13px]" style={{ color: "var(--color-text-secondary)" }}>
+          {detail}
+        </div>
+      )}
+      {evidence && evidence.length > 0 && (
+        <div
+          className="mt-[4px] flex flex-col gap-[2px] font-mono text-[11px]"
+          style={{ color: "var(--color-text-tertiary)" }}
+        >
+          {evidence.map(([k, v]) => (
+            <div key={k}>
+              {k}: {v}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Banner({
+  tone,
+  children,
+}: {
+  tone: "bad" | "info";
+  children: React.ReactNode;
+}) {
+  const colour =
+    tone === "bad" ? "var(--color-status-bad)" : "var(--color-status-warn)";
+  return (
+    <div
+      className="rounded-[8px] px-[16px] py-[12px] text-[13px]"
+      style={{
+        border: `1px solid ${colour}`,
+        color: colour,
+        background: "var(--color-surface-2)",
+      }}
+    >
       {children}
     </div>
   );
 }
 
-function SessionBar({
-  session, onEnd,
-}: { session: JudgeSession | null; onEnd: () => void }) {
-  if (!session) return null;
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg px-4 py-3"
-         style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border-subtle)" }}>
-      <div className="text-xs font-mono" style={{ color: "var(--color-text-tertiary)" }}>
-        {session.project_id} · {session.calls_remaining} of {session.call_cap} calls left
-        {session.has_prava_key && " · your Prava key"}
-        {session.has_alerts && ` · alerts to ${session.alert_phone}`}
-      </div>
-      <button className="judge-btn-quiet" onClick={onEnd}>
-        End session &amp; clear my keys
-      </button>
-    </div>
-  );
-}
+/* ── The agent pays ─────────────────────────────────────────────────────────── */
 
-function PromptBox({ prompt }: { prompt: JudgePrompt }) {
-  return (
-    <div className="rounded-lg p-4 text-sm font-mono"
-         style={{ background: "var(--color-surface-3)", color: "var(--color-text-secondary)" }}>
-      <div className="mb-2 text-xs uppercase tracking-wide"
-           style={{ color: "var(--color-text-tertiary)" }}>
-        {prompt.feature} · max {prompt.max_tokens} tokens
-      </div>
-      {prompt.prompt}
-    </div>
-  );
-}
-
-/** The forecast, alone on screen, before there is an answer to compare it to. */
-function PendingCard({ prompt, stage }: { prompt: JudgePrompt; stage: string }) {
-  return (
-    <Panel title="In flight" tag={prompt.feature}>
-      <div className="p-5">
-        <div className="text-sm" style={{ color: "var(--color-status-warn)" }}>
-          {stage}
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function Results({ entries, stats }: { entries: Entry[]; stats: JudgeStats | null }) {
-  return (
-    <Panel
-      title="What happened"
-      tag={
-        stats?.enough_for_median
-          ? `median error ${stats.median_error_pct}%`
-          : `${entries.length} call${entries.length === 1 ? "" : "s"}`
-      }
-    >
-      <div className="flex flex-col divide-y" style={{ borderColor: "var(--color-border-subtle)" }}>
-        {entries.map((e, i) => (
-          <div key={i} className="p-5 flex flex-col gap-2">
-            <div className="flex items-center justify-between text-sm">
-              <span className="font-mono" style={{ color: "var(--color-text-primary)" }}>
-                {e.prompt.feature}
-              </span>
-              <span style={{ color: e.result.blocked ? "var(--color-status-bad)" : "var(--color-status-good)" }}>
-                {e.result.blocked ? `blocked · ${e.result.status}` : `${e.result.status} · ${e.result.elapsed_ms} ms`}
-              </span>
-            </div>
-            {e.result.row && (
-              <div className="flex flex-wrap gap-6 rounded-lg p-3"
-                   style={{ background: "var(--color-surface-3)" }}>
-                <Metric label="Predicted"
-                        value={`${e.result.row.predicted_output_tokens ?? "—"} tok · ${usd(e.result.row.predicted_cost_usd)}`} />
-                <Metric label="Actual"
-                        value={`${e.result.row.output_tokens ?? "—"} tok · ${usd(e.result.row.cost_usd)}`} />
-                <Metric label="Error"
-                        value={e.result.row.output_token_error_pct === null
-                          ? "—" : `${e.result.row.output_token_error_pct}%`} />
-                <Metric label="Learned factor"
-                        value={e.result.row.history_factor === null
-                          ? "1.00" : e.result.row.history_factor.toFixed(2)} />
-              </div>
-            )}
-            {e.result.answer && (
-              <p className="text-sm whitespace-pre-wrap"
-                 style={{ color: "var(--color-text-secondary)" }}>
-                {e.result.answer}
-              </p>
-            )}
-            {e.prompt.caveat && (
-              <p className="text-xs" style={{ color: "var(--color-status-warn)" }}>
-                {e.prompt.caveat}
-              </p>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {stats && (
-        <div className="border-t p-5 text-sm" style={{ borderColor: "var(--color-border-subtle)" }}>
-          <div className="flex flex-wrap gap-6">
-            <Metric label="Calls" value={String(stats.calls)} />
-            <Metric label="Spend" value={usd(stats.spend_usd)} />
-            <Metric label="Predicted" value={usd(stats.predicted_usd)} />
-            <Metric
-              label={stats.enough_for_median ? "Median error" : "Error (this call)"}
-              value={stats.median_error_pct === null ? "—" : `${stats.median_error_pct}%`}
-            />
-            <Metric
-              label="Within 2×"
-              value={stats.within_2x_pct === null ? "—" : `${stats.within_2x_pct}%`}
-            />
-          </div>
-          {!stats.enough_for_median && (
-            <p className="mt-3 text-xs" style={{ color: "var(--color-text-tertiary)" }}>
-              One or two calls is not a median — this is a single observation. It becomes a
-              median at three.
-            </p>
-          )}
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col">
-      <span className="text-xs uppercase tracking-wide"
-            style={{ color: "var(--color-text-tertiary)" }}>{label}</span>
-      <span className="font-mono" style={{ color: "var(--color-text-primary)" }}>{value}</span>
-    </div>
-  );
-}
-
-function OutcomePanel({
-  outcomes, canMark, onMark, busy,
-}: { outcomes: OutcomeRow[]; canMark: boolean; onMark: () => void; busy: boolean }) {
-  return (
-    <Panel title="Cost per outcome" tag="requests × annotations">
-      <div className="p-5 flex flex-col gap-4">
-        <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
-          Spend per <em>resolved thing</em>, not per call — joined on the trace id, because
-          one resolved ticket is usually a dozen calls.
-        </p>
-        <button className="judge-btn" disabled={!canMark || busy} onClick={onMark}>
-          Mark that ticket resolved — worth {usd(OUTCOME_VALUE_USD)}
-        </button>
-        {outcomes.map((o) => (
-          <div key={o.trace_id} className="flex flex-wrap gap-6 text-sm font-mono">
-            <Metric label="Trace" value={o.trace_id} />
-            <Metric label="Calls" value={String(o.request_count)} />
-            <Metric label="Cost" value={usd(o.cost_usd)} />
-            <Metric label="Value" value={usd(o.value_usd)} />
-            <Metric label="Margin" value={usd(o.margin_usd)} />
-          </div>
-        ))}
-      </div>
-    </Panel>
-  );
-}
-
-function TreasuryPanel({
-  state, approvalUrl, topup, onLoad, onConnect, onRun, busy,
+function Treasury({
+  state,
+  approvalUrl,
+  topup,
+  busy,
+  busyLabel,
+  onLoad,
+  onConnect,
+  onRun,
 }: {
   state: TreasuryState | null;
   approvalUrl: string | null;
   topup: TopupResult | null;
+  busy: boolean;
+  busyLabel: string | null;
   onLoad: () => void;
   onConnect: (amountUsd: number) => void;
   onRun: () => void;
-  busy: boolean;
 }) {
   const [amount, setAmount] = useState(25);
-  const settled = topup?.ok === true;
 
   return (
     <Panel title="The agent pays its own bill" tag="Prava mandate">
-      <div className="p-5 flex flex-col gap-4">
+      <div className="flex flex-col gap-[16px] p-[20px]">
+        {busyLabel && <Banner tone="info">{busyLabel}</Banner>}
+
         {!state ? (
           <>
-            <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+            <p className="t-body" style={{ color: "var(--color-text-secondary)" }}>
               Your provider wallet starts nearly empty, so the Treasurer has something real
               to notice. Watch it decide, write its intent down before acting, and settle.
             </p>
@@ -713,62 +673,115 @@ function TreasuryPanel({
           </>
         ) : (
           <>
-            <div className="flex flex-wrap gap-6">
-              <Metric label="Balance" value={usd(state.assessment.balance_usd)} />
-              <Metric label="Floor" value={usd(state.assessment.floor_usd)} />
-              <Metric label="Trigger" value={state.assessment.trigger ?? "none"} />
-              <Metric label="Would top up"
-                      value={usd(state.assessment.recommended_topup_usd)} />
+            <div className="grid grid-cols-2 gap-[16px] sm:grid-cols-4">
+              <Stat label="Wallet" value={usd(state.assessment.balance_usd)} />
+              <Stat label="Floor" value={usd(state.assessment.floor_usd)} />
+              <Stat
+                label="Verdict"
+                value={state.assessment.should_topup ? "Top up" : "Healthy"}
+                color={
+                  state.assessment.should_topup
+                    ? "var(--color-status-warn)"
+                    : "var(--color-status-good)"
+                }
+              />
+              <Stat
+                label="Would charge"
+                value={usd(state.assessment.recommended_topup_usd)}
+              />
             </div>
 
-            <p className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
-              We seeded this wallet at {usd(state.assessment.balance_usd)}. A real one
-              drains over weeks and you do not have weeks — everything else here is live.
+            <p className="text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
+              We seeded this wallet at {usd(state.assessment.balance_usd)} so you would not
+              have to wait weeks for it to drain. Everything else here is live.
             </p>
 
             {!state.uses_own_merchant_key && (
-              <Notice tone="info">
-                You did not supply a Prava merchant key, so this will stop at{" "}
-                <code>dry_run</code> rather than charging anything. You will see the
-                decision and the audit row it wrote. To settle a real charge on{" "}
-                <strong>your own</strong> account, start again and paste your sandbox
-                merchant key.
-              </Notice>
+              <Outcome
+                tone="warn"
+                headline="No card will be charged — you did not add a Prava merchant key."
+                detail="You will still see the agent decide, and the audit row it writes before acting. To settle a real charge on your own Prava account, start a new session and paste your sandbox merchant key."
+              />
             )}
 
             {state.mandates.length === 0 && (
-              <div className="flex flex-col gap-3 rounded-lg p-4"
-                   style={{ background: "var(--color-surface-3)" }}>
-                <div className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
-                  Connect a card. Takes {state.guidance.expect_minutes}. The sandbox
-                  device-binding code is <code>{state.guidance.sandbox_otp}</code>.
+              <div
+                className="flex flex-col gap-[12px] rounded-[8px] p-[16px]"
+                style={{ background: "var(--color-surface-3)" }}
+              >
+                <div
+                  className="text-[13px]"
+                  style={{ color: "var(--color-text-secondary)" }}
+                >
+                  Authorise a mandate. Takes {state.guidance.expect_minutes}.
                 </div>
-                <label className="flex items-center gap-3 text-sm">
+                <label className="flex flex-wrap items-center gap-[12px] text-[13px]">
                   <span style={{ color: "var(--color-text-tertiary)" }}>Amount</span>
                   <input
-                    className="judge-input w-28"
+                    className="judge-input w-[96px]"
                     type="number"
                     min={state.guidance.min_usd}
                     max={state.guidance.max_usd}
                     value={amount}
                     onChange={(e) => setAmount(Number(e.target.value))}
                   />
-                  <span className="text-xs" style={{ color: "var(--color-text-tertiary)" }}>
+                  <span
+                    className="text-[12px]"
+                    style={{ color: "var(--color-text-tertiary)" }}
+                  >
                     ${state.guidance.min_usd}–${state.guidance.max_usd}. Above $
                     {state.guidance.max_usd} this sandbox cannot mint credentials.
                   </span>
                 </label>
-                <button className="judge-btn" disabled={busy}
-                        onClick={() => onConnect(amount)}>
-                  Connect a card
+                <button
+                  className="judge-btn"
+                  disabled={busy}
+                  onClick={() => onConnect(amount)}
+                >
+                  Authorise a mandate
                 </button>
+
                 {approvalUrl && (
-                  <Notice tone="info">
-                    A Prava approval page opened in a new tab. Approve it there, then come
-                    back and run the Treasurer.{" "}
-                    <a href={approvalUrl} target="_blank" rel="noopener noreferrer"
-                       className="underline">Reopen the page</a>
-                  </Notice>
+                  <div
+                    className="flex flex-col gap-[10px] rounded-[8px] p-[14px]"
+                    style={{
+                      background: "var(--color-surface-2)",
+                      border: "1px solid var(--color-border-subtle)",
+                    }}
+                  >
+                    <div
+                      className="text-[13px]"
+                      style={{ color: "var(--color-text-primary)" }}
+                    >
+                      Approve it here, then come back to this page — you do not leave the
+                      dashboard.
+                    </div>
+                    <iframe
+                      src={approvalUrl}
+                      title="Prava mandate approval"
+                      className="h-[520px] w-full rounded-[6px]"
+                      style={{ background: "#fff", border: "none" }}
+                    />
+                    <div
+                      className="text-[12px]"
+                      style={{ color: "var(--color-text-tertiary)" }}
+                    >
+                      Card verification asks for a one-time code. Enter{" "}
+                      <strong style={{ color: "var(--color-text-primary)" }}>
+                        {state.guidance.sandbox_otp}
+                      </strong>{" "}
+                      — it is the fixed sandbox code, not something texted to you.{" "}
+                      <a
+                        href={approvalUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                      >
+                        Open in a new tab
+                      </a>{" "}
+                      if the frame will not load.
+                    </div>
+                  </div>
                 )}
               </div>
             )}
@@ -777,48 +790,35 @@ function TreasuryPanel({
               Run the Treasurer
             </button>
 
-            {topup && (
-              <div className="flex flex-col gap-2 rounded-lg p-4"
-                   style={{ background: "var(--color-surface-3)" }}>
-                {settled ? (
-                  <>
-                    <div className="text-sm" style={{ color: "var(--color-status-good)" }}>
-                      Charged {usd(topup.amount_usd)} · settlement{" "}
-                      {topup.settlement_status} · balance now {usd(topup.balance_usd)}
-                    </div>
-                    <div className="text-xs font-mono"
-                         style={{ color: "var(--color-text-tertiary)" }}>
-                      txn {topup.prava_txn_id} · audit row tev_{topup.event_id}
-                    </div>
-                    <p className="text-xs" style={{ color: "var(--color-text-secondary)" }}>
-                      That audit row was written <strong>before</strong> Prava was called,
-                      and its id is the idempotency key — which is what makes a retry safe.
-                      Prava echoes it back as the charge reference, so you can see the same
-                      mechanism from their side, in your own dashboard.
-                    </p>
-                    <Notice tone="info">{state.guidance.one_per_cycle}</Notice>
-                  </>
-                ) : (
-                  <div className="text-sm" style={{ color: "var(--color-status-warn)" }}>
-                    Stopped at <code>{topup.reason}</code>
-                    {topup.would_have_charged !== undefined &&
-                      ` — would have charged ${usd(topup.would_have_charged)}`}
-                    . {topup.hint ?? ""}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {state.events.length > 0 && (
-              <div className="flex flex-col gap-1 text-xs font-mono"
-                   style={{ color: "var(--color-text-tertiary)" }}>
-                {state.events.slice(0, 5).map((e) => (
-                  <div key={e.id}>
-                    tev_{e.id} · {e.status} · {usd(e.amount_usd)}
-                  </div>
-                ))}
-              </div>
-            )}
+            {topup &&
+              (topup.ok ? (
+                <Outcome
+                  tone="good"
+                  headline={`Charged ${usd(topup.amount_usd)} to your card, and it settled.`}
+                  detail={`Your provider wallet is now ${usd(
+                    topup.balance_usd,
+                  )}. The audit row was written BEFORE Prava was called, and its id is the idempotency key — which is what makes a retry safe. Prava echoes it back as the charge reference, so the same row is visible from their side, in your own dashboard. Each mandate allows one purchase per monthly cycle, so topping up again means authorising another mandate.`}
+                  evidence={[
+                    ["Prava transaction", topup.prava_txn_id ?? "—"],
+                    ["Settlement", topup.settlement_status ?? "—"],
+                    ["Audit row", `tev_${topup.event_id}`],
+                  ]}
+                />
+              ) : (
+                <Outcome
+                  tone="warn"
+                  headline={
+                    topup.reason === "dry_run"
+                      ? `The agent decided to pay ${usd(
+                          topup.would_have_charged,
+                        )} and stopped before charging.`
+                      : topup.reason === "no_chargeable_mandate"
+                        ? "There is no mandate to charge yet — authorise one above first."
+                        : `The top-up did not go through: ${topup.reason}.`
+                  }
+                  detail={topup.hint}
+                />
+              ))}
           </>
         )}
       </div>
@@ -826,33 +826,45 @@ function TreasuryPanel({
   );
 }
 
-function BreakerPanel({
-  session, runaway, onRun, onReset, onTestAlert, alertNote, busy,
+/* ── The breaker ────────────────────────────────────────────────────────────── */
+
+function Breaker({
+  runaway,
+  hasAlerts,
+  alertPhone,
+  alertNote,
+  floorUsd,
+  busy,
+  onRun,
+  onReset,
+  onTestAlert,
 }: {
-  session: JudgeSession | null;
   runaway: Awaited<ReturnType<typeof judge.runaway>> | null;
+  hasAlerts: boolean;
+  alertPhone: string | null;
+  alertNote: string | null;
+  floorUsd: number | null;
+  busy: boolean;
   onRun: () => void;
   onReset: () => void;
   onTestAlert: () => void;
-  alertNote: string | null;
-  busy: boolean;
 }) {
   return (
-    <Panel title="The circuit breaker" tag={`floor ${usd(session?.breaker_floor_usd)}`}>
-      <div className="p-5 flex flex-col gap-4">
-        <p className="text-sm" style={{ color: "var(--color-text-secondary)" }}>
+    <Panel title="The circuit breaker" tag={floorUsd ? `floor ${usd(floorUsd)}` : "armed"}>
+      <div className="flex flex-col gap-[16px] p-[20px]">
+        <p className="t-body" style={{ color: "var(--color-text-secondary)" }}>
           Two conditions, both required: spend over a floor <strong>and</strong> that spend
-          running several times faster than this tag&rsquo;s own trailing rate. The second is
-          what stops it firing on a feature that is merely expensive.
+          running several times faster than this feature&rsquo;s own trailing rate. The
+          second is what stops it firing on a feature that is merely expensive.
         </p>
 
-        {session?.has_alerts && (
-          <div className="flex flex-col gap-2">
+        {hasAlerts && (
+          <>
             <button className="judge-btn-quiet" disabled={busy} onClick={onTestAlert}>
-              Send a test message to {session.alert_phone} first
+              Send a test message to {alertPhone} first
             </button>
-            {alertNote && <Notice tone="info">{alertNote}</Notice>}
-          </div>
+            {alertNote && <Banner tone="info">{alertNote}</Banner>}
+          </>
         )}
 
         <button className="judge-btn" disabled={busy} onClick={onRun}>
@@ -860,32 +872,44 @@ function BreakerPanel({
         </button>
 
         {runaway && (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-[10px]">
             {runaway.calls.map((c, i) => (
-              <div key={i} className="flex items-start justify-between gap-4 text-sm font-mono">
-                <span style={{ color: "var(--color-text-tertiary)" }}>call {i + 1}</span>
-                <span className="flex-1"
-                      style={{ color: c.blocked ? "var(--color-status-bad)" : "var(--color-status-good)" }}>
-                  {c.blocked ? `✗ ${c.status} — ${c.reason ?? "throttled"}` : `✓ ${c.status}`}
+              <div
+                key={i}
+                className="flex items-center gap-[12px] font-mono text-[12.5px]"
+              >
+                <span
+                  className="w-[56px]"
+                  style={{ color: "var(--color-text-tertiary)" }}
+                >
+                  call {i + 1}
+                </span>
+                <span
+                  style={{
+                    color: c.blocked
+                      ? "var(--color-status-warn)"
+                      : "var(--color-status-good)",
+                  }}
+                >
+                  {c.blocked ? `blocked · ${c.reason ?? "throttled"}` : "went through"}
                 </span>
               </div>
             ))}
 
             {runaway.tripped && runaway.control && (
-              <Notice tone="good">
-                And immediately after, a <strong>different</strong> feature
-                (<code>{runaway.control_feature}</code>) returned{" "}
-                {runaway.control.status}. The runaway tag is throttled while everything
-                else keeps serving — this is a tag-scoped throttle, not a key-wide cut.
-              </Notice>
+              <Outcome
+                tone="good"
+                headline={`The runaway feature is cut off. ${runaway.control_feature} still works.`}
+                detail="That is the claim worth checking: one tag is throttled while everything else on the same key keeps serving. Not a key-wide cut — a tag-scoped throttle."
+              />
             )}
 
             {runaway.alerted && (
-              <Notice tone="info">
-                An alert was dispatched to your phone with the same numbers. If nothing
-                arrives, you have not texted the Linq sending line yet — the sandbox drops
-                those silently.
-              </Notice>
+              <Outcome
+                tone="good"
+                headline="An alert went to your phone with the same numbers."
+                detail="If nothing arrives, you have not texted the Linq sending line yet — the sandbox drops those silently."
+              />
             )}
 
             {runaway.tripped && (
@@ -896,86 +920,6 @@ function BreakerPanel({
           </div>
         )}
       </div>
-    </Panel>
-  );
-}
-
-function LedgerPanel({ rows }: { rows: LedgerRow[] }) {
-  return (
-    <Panel title="Your ledger" tag={`${rows.length} row${rows.length === 1 ? "" : "s"}`} live>
-      {rows.length === 0 ? (
-        <div className="p-5 text-sm" style={{ color: "var(--color-text-tertiary)" }}>
-          Empty — nothing has been billed to your session yet. Run a prompt above.
-        </div>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm font-mono">
-            <thead>
-              <tr style={{ color: "var(--color-text-tertiary)" }}>
-                <th className="p-3 text-left">feature</th>
-                <th className="p-3 text-right">predicted</th>
-                <th className="p-3 text-right">actual</th>
-                <th className="p-3 text-right">error</th>
-                <th className="p-3 text-right">cost</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.id} style={{ borderTop: "1px solid var(--color-border-subtle)" }}>
-                  <td className="p-3" style={{ color: "var(--color-text-primary)" }}>{r.feature}</td>
-                  <td className="p-3 text-right" style={{ color: "var(--color-text-secondary)" }}>
-                    {r.predicted_output_tokens ?? "—"}
-                  </td>
-                  <td className="p-3 text-right" style={{ color: "var(--color-text-secondary)" }}>
-                    {r.output_tokens ?? "—"}
-                  </td>
-                  <td className="p-3 text-right"
-                      style={{ color: (r.output_token_error_pct ?? 0) <= 20
-                        ? "var(--color-status-good)" : "var(--color-status-warn)" }}>
-                    {r.output_token_error_pct === null ? "—" : `${r.output_token_error_pct}%`}
-                  </td>
-                  <td className="p-3 text-right" style={{ color: "var(--color-text-secondary)" }}>
-                    {usd(r.cost_usd)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </Panel>
-  );
-}
-
-/**
- * Kept verbatim from WALKTHROUGH.md and deliberately not softened. Judges have seen
- * twenty demos claiming everything worked; the team that names its own weak points is
- * the one believed about the rest. Every number here is reproducible from the repo.
- */
-function NotProven() {
-  return (
-    <Panel title="What we haven't proven" tag="read this">
-      <ul className="p-5 flex flex-col gap-2 text-sm"
-          style={{ color: "var(--color-text-secondary)" }}>
-        <li>
-          <strong>Open-ended prompts are ~49% median error.</strong> The ~10% figure is for
-          tagged, repeated feature traffic — which is what real product traffic looks like.
-        </li>
-        <li>
-          <strong>A brand-new feature tag starts at ~80%</strong> and needs about 20 calls of
-          its own. Coverage does not transfer between features: bucket-level history made a
-          held-out feature <em>worse</em> (71% → 74% median, 39% → 625% at worst).
-        </li>
-        <li>
-          <strong><code>severity-triage</code> sits at ~69%</strong> and no amount of tuning
-          fixes it. Its untruncated outputs still spread 5.1×.
-        </li>
-        <li>
-          <strong>One backend instance only.</strong> Reservations are serialised with an
-          in-process lock, so a second instance would mean two locks seeing the same
-          headroom. Redis would fix it; it is not built.
-        </li>
-      </ul>
     </Panel>
   );
 }

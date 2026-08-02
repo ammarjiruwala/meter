@@ -76,12 +76,26 @@ export function isUnderPredicted(
  * `formatUsd` widens to 4 and 6 decimals under a dollar, which is correct for a
  * ledger column where a single call really does cost $0.000037 — and wrong at
  * 32px, where "$0.8375" reads as a precision nobody asked for and breaks the
- * tabular rhythm across the row. Sub-cent totals round to "$0.00" here, which is
- * the honest summary of an amount that small.
+ * tabular rhythm across the row.
+ *
+ * Two decimals is right for a team's totals and wrong for a judge's. A session that
+ * has genuinely made calls spends about $0.00003 of them, and rounding that to
+ * "$0.00" tells someone who just watched three requests succeed that nothing
+ * happened — the same misleading zero that made a breaker alert read "$0.00 in 5 min
+ * against a $0.00 floor" on a real phone (EXPERIENCE.md #35).
+ *
+ * So: two decimals once there are cents to show, and widen below that until the
+ * figure is visible. A true zero still prints "$0.00", because that one is honest.
  */
 export function formatUsdHeadline(n: number | null | undefined): string {
   if (n === null || n === undefined) return "—";
-  return usdAt(n, 2);
+  if (n === 0 || Math.abs(n) >= 0.01) return usdAt(n, 2);
+  // Enough places for two significant figures, capped so the hero stays readable.
+  const places = Math.min(
+    Math.max(2, -Math.floor(Math.log10(Math.abs(n))) + 1),
+    6,
+  );
+  return usdAt(n, places);
 }
 
 function usdAt(n: number, decimals: number): string {

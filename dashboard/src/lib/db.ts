@@ -62,7 +62,7 @@ function getPool(): Pool | null {
   return globalForPg.meterPool;
 }
 
-async function query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+export async function query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
   const pool = getPool();
   if (!pool) return [];
   const result = await pool.query(sql, params);
@@ -136,21 +136,30 @@ function numOrNull(value: unknown): number | null {
 }
 
 /**
- * The public dashboard shows the team's own traffic, never a judge's.
+ * A view of the ledger: the team's, or one judge's.
  *
- * A "Try it yourself" session is a tenant like any other — that is exactly what makes it
- * safe, and it means every query here would pick it up for free (PITCH.md §5). Free is
- * the wrong price in this direction: this page is the product, and a stranger's six-call
- * demo landing in Team Spend, Cost per Outcome and the headline totals would distort the
- * numbers the page exists to show, in public, while someone is reading them.
+ * `null` is the public Control Room — every project except judge sessions, because a
+ * stranger's six-call demo must not distort the numbers that page shows in public. A
+ * project id is one judge's private view of *the same page*: identical components,
+ * identical queries, their rows.
  *
- * Judge traffic is not hidden — the console renders it from `/judge/*`, scoped to the
- * session that produced it. It is just not *this* page's traffic.
- *
- * A string literal rather than a bound parameter so it can be dropped into any WHERE
- * clause without renumbering the placeholders around it. It interpolates nothing.
+ * That symmetry is the point. The judge view is not a second dashboard to keep in sync
+ * with this one; it is this one, with a WHERE clause.
  */
-const NOT_JUDGE = "project_id NOT LIKE 'judge-%'";
+export type Scope = string | null;
+
+/**
+ * The scope predicate, plus the parameter it needs.
+ *
+ * The parameter is appended at the END of each query's list rather than the front, so
+ * every existing `$1`, `$2` … keeps its number and no call site has to be renumbered —
+ * which is the kind of edit that transposes a parameter and is not caught by types.
+ */
+function scoped(scope: Scope, nextParam: number, column = "project_id") {
+  return scope === null
+    ? { sql: `${column} NOT LIKE 'judge-%'`, params: [] as unknown[] }
+    : { sql: `${column} = $${nextParam}`, params: [scope] as unknown[] };
+}
 
 export type SpendRow = {
   project_id: string;
@@ -160,8 +169,9 @@ export type SpendRow = {
   request_count: number;
 };
 
-export async function getTeamSpend(): Promise<SpendRow[]> {
+export async function getTeamSpend(scope: Scope = null): Promise<SpendRow[]> {
   if (!(await tableExists("requests"))) return [];
+  const s = scoped(scope, 1);
   const rows = await query<SpendRow>(
     `SELECT project_id,
             actor,
@@ -169,9 +179,10 @@ export async function getTeamSpend(): Promise<SpendRow[]> {
             SUM(cost_usd) AS total_cost_usd,
             COUNT(*)      AS request_count
        FROM requests
-      WHERE ${NOT_JUDGE}
+      WHERE ${s.sql}
       GROUP BY project_id, actor, feature
       ORDER BY total_cost_usd DESC`,
+    s.params,
   );
   return rows.map((r) => ({
     ...r,
@@ -221,14 +232,20 @@ export type BreakerState = {
   count: number;
 };
 
-export async function getBreakerState(): Promise<BreakerState> {
+export async function getBreakerState(scope: Scope = null): Promise<BreakerState> {
   const idle: BreakerState = { open: false, mode: null, scope: null, count: 0 };
   if (!(await tableExists("breaker_events"))) return idle;
   const rows = await query<{ scope: string; mode: string }>(
-    `SELECT scope, mode FROM breaker_events
-      WHERE closed_at IS NULL
-        AND scope NOT LIKE 'judge-%'
-      ORDER BY id DESC`,
+    // `breaker_events.scope` is "project:feature", so the project test is a prefix
+    // match on that column rather than an equality on `project_id`.
+    scope === null
+      ? `SELECT scope, mode FROM breaker_events
+          WHERE closed_at IS NULL AND scope NOT LIKE 'judge-%'
+          ORDER BY id DESC`
+      : `SELECT scope, mode FROM breaker_events
+          WHERE closed_at IS NULL AND scope LIKE $1
+          ORDER BY id DESC`,
+    scope === null ? [] : [`${scope}:%`],
   );
   if (rows.length === 0) return idle;
   // Revoke outranks throttle: it is the more severe of the two, and if any key is
@@ -244,7 +261,8 @@ export async function getBreakerState(): Promise<BreakerState> {
 }
 
 /** The headline figure. A single number is a stat, not a chart. */
-export async function getSpendSummary(): Promise<SpendSummary> {
+export async function getSpendSummary(scope: Scope = null): Promise<SpendSummary> {
+  const s = scoped(scope, 1);
   const empty: SpendSummary = {
     total_cost_usd: 0,
     request_count: 0,
@@ -262,7 +280,8 @@ export async function getSpendSummary(): Promise<SpendSummary> {
             COALESCE(SUM(input_tokens + output_tokens), 0) AS token_count,
             MAX(ts)                    AS last_ts
        FROM requests
-      WHERE ${NOT_JUDGE}`,
+      WHERE ${s.sql}`,
+    s.params,
   );
   const row = rows[0];
   if (!row) return empty;
@@ -291,13 +310,15 @@ export type WalletRow = {
  * Returns null (rather than []) when the treasury tables have not been created yet,
  * so the card can say "run the proxy" instead of "you have no money".
  */
-export async function getProviderBalances(): Promise<WalletRow[] | null> {
+export async function getProviderBalances(scope: Scope = null): Promise<WalletRow[] | null> {
   if (!(await tableExists("wallets"))) return null;
+  const s = scoped(scope, 1);
   const rows = await query<WalletRow>(
     `SELECT id, project_id, provider, balance_usd, updated_at
        FROM wallets
-      WHERE ${NOT_JUDGE}
+      WHERE ${s.sql}
       ORDER BY project_id, provider`,
+    s.params,
   );
   return rows.map((r) => ({ ...r, balance_usd: num(r.balance_usd) }));
 }
@@ -361,7 +382,7 @@ export type BudgetScope = {
  * 2. It does not re-sort. Scopes come back in meter.yaml order (see the sort_order note
  *    below) so rows never move while someone is watching them.
  */
-export async function getBudgets(): Promise<BudgetScope[] | null> {
+export async function getBudgets(scope: Scope = null): Promise<BudgetScope[] | null> {
   const [hasProjects, hasFeatureBudgets] = await Promise.all([
     tableExists("projects"),
     tableExists("feature_budgets"),
@@ -390,11 +411,15 @@ export async function getBudgets(): Promise<BudgetScope[] | null> {
 
   const projectCeilings = hasProjects
     ? await query<{ project_id: string; ceiling_usd_day: number }>(
+        // Scoping the two ceiling queries scopes the whole function: every spend query
+        // below filters on `project_id = ANY(...)` built from these lists, so they
+        // follow automatically.
         `SELECT id AS project_id, ceiling_usd_day
            FROM projects
           WHERE ceiling_usd_day IS NOT NULL
-            AND id NOT LIKE 'judge-%'
+            AND ${scoped(scope, 1, "id").sql}
           ORDER BY ${hasProjectOrder ? "sort_order NULLS LAST, " : ""}id`,
+        scoped(scope, 1, "id").params,
       )
     : [];
 
@@ -407,7 +432,9 @@ export async function getBudgets(): Promise<BudgetScope[] | null> {
         `SELECT project_id, feature, ceiling_usd_day
            FROM feature_budgets
           WHERE ceiling_usd_day IS NOT NULL
+            AND ${scoped(scope, 1).sql}
           ORDER BY ${hasFeatureOrder ? "sort_order NULLS LAST, " : ""}feature`,
+        scoped(scope, 1).params,
       )
     : [];
 
@@ -600,7 +627,7 @@ export type HeadlineMetrics = {
  *    the one that dies first is the one that needs a decision. A second formula
  *    here would mean the card and the agent disagree about when to act.
  */
-export async function getHeadlineMetrics(): Promise<HeadlineMetrics> {
+export async function getHeadlineMetrics(scope: Scope = null): Promise<HeadlineMetrics> {
   const empty: HeadlineMetrics = {
     spend_window_usd: 0,
     spend_prev_window_usd: 0,
@@ -627,27 +654,29 @@ export async function getHeadlineMetrics(): Promise<HeadlineMetrics> {
   const [windowRows, prevRows, ceilingRows, walletRows] = await Promise.all([
     query<{ spend: number; requests: number }>(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend, COUNT(*) AS requests
-         FROM requests WHERE ts >= $1 AND ${NOT_JUDGE}`,
-      [cutoff],
+         FROM requests WHERE ts >= $1 AND ${scoped(scope, 2).sql}`,
+      [cutoff, ...scoped(scope, 2).params],
     ),
     // The window *before* this one — bounded on both sides, or it would include
     // the current window too and the delta would always read flat.
     query<{ spend: number }>(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend
-         FROM requests WHERE ts >= $1 AND ts < $2 AND ${NOT_JUDGE}`,
-      [prevCutoff, cutoff],
+         FROM requests WHERE ts >= $1 AND ts < $2 AND ${scoped(scope, 3).sql}`,
+      [prevCutoff, cutoff, ...scoped(scope, 3).params],
     ),
     hasProjects
       ? query<{ project_id: string; ceiling_usd_day: number }>(
           `SELECT id AS project_id, ceiling_usd_day
              FROM projects WHERE ceiling_usd_day IS NOT NULL
-               AND id NOT LIKE 'judge-%'`,
+               AND ${scoped(scope, 1, "id").sql}`,
+          scoped(scope, 1, "id").params,
         )
       : Promise.resolve([]),
     hasWallets
       ? query<{ project_id: string; provider: string; balance_usd: number }>(
           `SELECT project_id, provider, balance_usd FROM wallets
-        WHERE ${NOT_JUDGE}`,
+        WHERE ${scoped(scope, 1).sql}`,
+      scoped(scope, 1).params,
         )
       : Promise.resolve([]),
   ]);
@@ -740,11 +769,11 @@ export async function getHeadlineMetrics(): Promise<HeadlineMetrics> {
  * would double-count the correction. Both halves of that choice live here — swapping to
  * additive value is a change to this CTE alone.
  */
-const OUTCOME_CTES = `
+const outcomeCtes = (scope: Scope) => `
   WITH latest AS (
     SELECT a.project_id, a.trace_id, a.outcome, a.value_usd
       FROM annotations a
-     WHERE a.project_id NOT LIKE 'judge-%'
+     WHERE ${scoped(scope, 1, "a.project_id").sql}
        AND a.id = (SELECT MAX(b.id)
                      FROM annotations b
                     WHERE b.project_id = a.project_id
@@ -757,7 +786,7 @@ const OUTCOME_CTES = `
            COUNT(*)      AS request_count
       FROM requests
      WHERE trace_id IS NOT NULL
-       AND ${NOT_JUDGE}
+       AND ${scoped(scope, 1).sql}
      GROUP BY project_id, trace_id
   )
 `;
@@ -774,7 +803,7 @@ export type OutcomeRow = {
   valued_trace_count: number;
 };
 
-export async function getOutcomeCosts(): Promise<OutcomeRow[]> {
+export async function getOutcomeCosts(scope: Scope = null): Promise<OutcomeRow[]> {
   const [hasRequests, hasAnnotations] = await Promise.all([
     tableExists("requests"),
     tableExists("annotations"),
@@ -786,7 +815,7 @@ export async function getOutcomeCosts(): Promise<OutcomeRow[]> {
   // count while adding nothing to cost, quietly deflating every cost-per-trace figure.
   // They are surfaced separately as `orphan_annotations` in the coverage row instead.
   const rows = await query<OutcomeRow>(
-    `${OUTCOME_CTES}
+    `${outcomeCtes(scope)}
      SELECT l.outcome                        AS outcome,
             COUNT(*)                         AS trace_count,
             SUM(t.request_count)             AS request_count,
@@ -800,6 +829,7 @@ export async function getOutcomeCosts(): Promise<OutcomeRow[]> {
          ON t.project_id = l.project_id AND t.trace_id = l.trace_id
       GROUP BY l.outcome
       ORDER BY cost_usd DESC`,
+    scoped(scope, 1).params,
   );
   return rows.map((r) => ({
     outcome: r.outcome,
@@ -829,14 +859,14 @@ export type OutcomeCoverage = {
  * number nobody should quote on a stage, and it looks identical to one computed from 95%
  * unless the coverage is stated beside it.
  */
-export async function getOutcomeCoverage(): Promise<OutcomeCoverage | null> {
+export async function getOutcomeCoverage(scope: Scope = null): Promise<OutcomeCoverage | null> {
   const [hasRequests, hasAnnotations] = await Promise.all([
     tableExists("requests"),
     tableExists("annotations"),
   ]);
   if (!hasRequests || !hasAnnotations) return null;
   const rows = await query<OutcomeCoverage>(
-    `${OUTCOME_CTES}
+    `${outcomeCtes(scope)}
      SELECT (SELECT COUNT(*)                       FROM trace_rollup) AS traced_traces,
             (SELECT COALESCE(SUM(cost_usd), 0)     FROM trace_rollup) AS traced_cost,
             (SELECT COUNT(*)
@@ -852,7 +882,8 @@ export async function getOutcomeCoverage(): Promise<OutcomeCoverage | null> {
                  ON t.project_id = l.project_id AND t.trace_id = l.trace_id
               WHERE t.trace_id IS NULL)                               AS orphan_annotations,
             (SELECT COALESCE(SUM(cost_usd), 0)     FROM requests
-              WHERE ${NOT_JUDGE})                                     AS total_cost`,
+              WHERE ${scoped(scope, 1).sql})                          AS total_cost`,
+    scoped(scope, 1).params,
   );
   const row = rows[0];
   if (!row) return null;
@@ -903,7 +934,7 @@ export type TreasuryDecision = {
   recommended_topup_usd?: number;
 };
 
-export async function getTreasuryEvents(limit = 40): Promise<TreasuryEvent[]> {
+export async function getTreasuryEvents(limit = 40, scope: Scope = null): Promise<TreasuryEvent[]> {
   if (!(await tableExists("treasury_events"))) return [];
 
   // The wallet join supplies project and provider, which the event row does not carry.
@@ -920,10 +951,12 @@ export async function getTreasuryEvents(limit = 40): Promise<TreasuryEvent[]> {
             ${joined ? "w.project_id, w.provider" : "NULL AS project_id, NULL AS provider"}
        FROM treasury_events e
        ${joined ? "LEFT JOIN wallets w ON w.id = e.wallet_id" : ""}
-      ${joined ? "WHERE w.project_id IS NULL OR w.project_id NOT LIKE 'judge-%'" : ""}
+      ${joined ? `WHERE ${scope === null
+            ? "(w.project_id IS NULL OR w.project_id NOT LIKE 'judge-%')"
+            : "w.project_id = $2"}` : ""}
       ORDER BY e.id DESC
       LIMIT $1`,
-    [limit],
+    joined && scope !== null ? [limit, scope] : [limit],
   );
 
   return rows.map(({ decision_inputs, ...row }) => ({
@@ -968,7 +1001,7 @@ export type LiveLogRow = {
   status: number | null;
 };
 
-export async function getLiveLogs(limit = 50): Promise<LiveLogRow[]> {
+export async function getLiveLogs(limit = 50, scope: Scope = null): Promise<LiveLogRow[]> {
   if (!(await tableExists("requests"))) return [];
 
   // The prediction columns arrived with the predictor integration. A database can
@@ -995,10 +1028,10 @@ export async function getLiveLogs(limit = 50): Promise<LiveLogRow[]> {
             cost_usd,
             status
        FROM requests
-      WHERE ${NOT_JUDGE}
+      WHERE ${scoped(scope, 2).sql}
       ORDER BY ts DESC
       LIMIT $1`,
-    [limit],
+    [limit, ...scoped(scope, 2).params],
   );
   return rows.map((r) => ({
     ...r,

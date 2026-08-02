@@ -41,10 +41,16 @@ export function CostPerOutcomeTable({
         ]}
         empty={
           <p className="t-cell text-text-secondary">
-            No outcomes recorded. Attach one to a trace with{" "}
-            <span className="text-text-primary">POST /v1/annotate</span> — the
-            proxy cannot know whether a ticket was resolved, so this is how that
-            fact gets in.
+            Nothing here yet. This panel answers a different question from the rest of
+            the page: not <em>what did we spend</em>, but{" "}
+            <span className="text-text-primary">
+              what did one resolved thing cost
+            </span>
+            . A single resolved ticket is usually a dozen calls, so the join is on the
+            trace rather than the request — and against the value that outcome was worth,
+            it becomes margin. Attach one with{" "}
+            <span className="text-text-primary">POST /v1/annotate</span>; the proxy cannot
+            know whether a ticket was resolved, so that is how the fact gets in.
           </p>
         }
         rows={rows.map((row) => {
