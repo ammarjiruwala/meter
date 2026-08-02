@@ -147,9 +147,17 @@ open lane, and four `PLAN.md` items hang off it (`PROPOSALS.md` B11).
 
 One number to be careful with: **proxy overhead is distance-bound now.** Measured p50 is ~53 ms
 from a laptop against Supabase in ap-south-1, against ARCHITECTURE.md's single-digit-millisecond
-claim, and essentially all of it is one network round trip. It should return to single digits with
-the proxy colocated with the database on Fly.io — but nobody has measured that yet, so do not quote
-a latency number until it comes from the deployed proxy.
+claim. It should improve sharply with the proxy colocated with the database on Fly.io — but nobody
+has measured that yet, so do not quote a latency number until it comes from the deployed proxy.
+
+⚠ **And 53 ms is the *best* case, not the typical one.** It was measured on the minimal path;
+`bench_overhead.py` hardcoded the breaker off and defaults to no `meter.yaml`. Round trips are
+**sequential**, so overhead ≈ count × RTT, and the count depends on configuration: **2** minimal,
+**4** with the breaker on, **5** with the breaker on *and* ceilings — which is what ships. Colocation
+alone does not settle it: five sequential trips at an in-region 1–2 ms is still 5–10 ms, at or over
+ARCHITECTURE.md §8's 5 ms budget. `proxy/README.md` has the counted table and the reduction already
+made (`db.ceiling_spend` folded two budget queries into one). Use `--breaker` to measure the real
+shipping configuration; without it you are measuring a path nobody runs.
 
 Two blockers on the Prava side are external rather than unbuilt, and both are open: a sandbox
 outage on credential minting, and **one purchase per payment cycle**, confirmed by a live Visa

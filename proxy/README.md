@@ -207,12 +207,44 @@ Steps 1–7 are what `X-Meter-Overhead-Ms` measures.
 
 ⚠ **This number is distance-bound since the Postgres port and there is currently no
 honest way to quote it.** Measured 2026-08-02: **p50 +52.7 ms** from a laptop against
-Supabase in ap-south-1. Essentially all of it is one network round trip — a warm query to
-that database measures ~50 ms from here, against microseconds for a local SQLite read.
-The proxy's own work has not changed; only the storage hop has. It should return to
-single digits with the proxy colocated with the database on Fly.io, **but nobody has
-measured that yet — do not put a latency number on a slide until it comes from the
-deployed proxy.**
+Supabase in ap-south-1. The proxy's own work has not changed; only the storage hop has.
+It should improve sharply with the proxy colocated with the database on Fly.io, **but
+nobody has measured that yet — do not put a latency number on a slide until it comes from
+the deployed proxy.**
+
+### It is not one round trip — it is a *count*, and the count depends on your config
+
+The 52.7 ms above was measured on the **minimal** path, which `bench_overhead.py` used to
+be the only thing it could measure: it hardcoded `BREAKER_ENABLED=false` and defaults to
+no `meter.yaml`. That is one blocking round trip. **The configuration that actually ships
+makes more, and they are sequential**, so the overhead is roughly `count × RTT`.
+
+Counted exactly (2026-08-02, by instrumenting `pg._Connection.execute`, because at
+loopback latency the timings cannot separate three round trips from five):
+
+| Configuration | DB round trips per request | at ~50 ms RTT |
+| --- | --- | --- |
+| Minimal — breaker off, no ceilings | 2 (1 blocking + the capture write) | ~50 ms |
+| Breaker on, no ceilings | 4 | ~150 ms |
+| **Breaker on + ceilings — what ships** | **5** *(was 6)* | **~200 ms** |
+
+So the honest reading of 52.7 ms is that it is the **best case**, and the default
+production configuration is several times worse. Region alone does not fix that: at an
+in-region 1–2 ms RTT, five sequential trips is still 5–10 ms, which is at or over the 5 ms
+budget ARCHITECTURE.md §8 sets.
+
+**One trip has been removed** (2026-08-02): `budget.authorize` asked for feature spend and
+project spend as two separate queries — same table, same project, same window, differing
+only by a feature filter. `db.ceiling_spend` now returns both from one scan. Under SQLite
+that saved microseconds and would not have been worth writing; with the ledger 50 ms away
+it is 50 ms off every enforced request. `test_proxy.py` asserts `authorize` makes exactly
+one call, because this is the kind of thing that silently regresses.
+
+The remaining three are the breaker's open-breaker lookup, the breaker's rolling-window
+sum, and `resolve_key`. Folding the breaker's two into one query, or caching `resolve_key`
+briefly, are the next reductions if the deployed number still disappoints — measure before
+building either. `--breaker` on `bench_overhead.py` exists so the shipping configuration is
+measurable at all.
 
 The pre-Postgres figures, which are the measurement of the proxy's own work: p50
 +0.26 ms wall-clock (minimal path) / +0.35 ms (enforced path), self-reported in-process,

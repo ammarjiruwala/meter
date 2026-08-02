@@ -114,7 +114,32 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     fix the in-process reservation lock, so `min_machines_running = 1` and no autoscaling.
     **For the demo, deploy nothing** — a Cloudflare Tunnel over localhost needs no migration.
 
-*   **Last updated:** 2026-08-02 — **Treasury hardening (Shubh, in Shivam's module, on
+*   **Last updated:** 2026-08-02 — **Post-Postgres overhead investigated; one round trip removed
+    (Shubh, answering Shivam's handoff).** The 52.7 ms figure is real but it is the **best case**,
+    and the framing "essentially all of it is one network round trip" holds only for the config it
+    was measured in. `bench_overhead.py` hardcoded `BREAKER_ENABLED=false` and defaults to no
+    `meter.yaml`, so it measured the minimal path. **Round trips are sequential, so overhead ≈
+    count × RTT**, and the count was measured exactly by instrumenting `pg._Connection.execute`
+    (loopback timings cannot separate three trips from five):
+    *   **2** round trips minimal · **4** breaker on · **5** breaker on + ceilings enforced — the
+        last being what actually ships. At ~50 ms RTT that is ~200 ms, not 53 ms.
+    *   ⚠ **Colocation alone does not settle this.** Five sequential trips at an in-region 1–2 ms
+        is still 5–10 ms, at or over ARCHITECTURE.md §8's 5 ms budget. Region is necessary, not
+        sufficient.
+    *   ✅ **One trip removed: `db.ceiling_spend`.** `budget.authorize` was issuing two queries for
+        feature spend and project spend — same table, same project, same window, differing only by
+        a feature filter. Now one scan returning both. Under SQLite this saved microseconds and
+        would not have been worth writing; at 50 ms it is 50 ms off every enforced request.
+        `test_proxy.py` asserts `authorize` makes **exactly one** call, because this regresses
+        silently. Production path 6 → 5 round trips.
+    *   `bench_overhead.py` gained **`--breaker`**, so the shipping configuration is measurable at
+        all — it was not before. The next reductions, if the deployed number still disappoints, are
+        folding the breaker's two queries into one and briefly caching `resolve_key`. **Measure
+        first.** Suites re-verified against a local Postgres 16: **249/182/46/131**.
+    *   Still true, and still the rule: **no latency number goes on a slide until it comes from the
+        deployed proxy.**
+
+*   Prior entry — **Treasury hardening (Shubh, in Shivam's module, on
     instruction while that lane was idle).** Three things, all in `treasury/`:
     *   ✅ **M5 fixed.** `GET /treasury/assess` no longer creates a wallet — it uses a new
         `db.wallet_id_for()` instead of `ensure_wallet`. The demo trap is gone: on a fresh
