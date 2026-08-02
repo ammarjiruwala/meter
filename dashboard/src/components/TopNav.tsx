@@ -18,11 +18,9 @@ const LINKS = [
 function breakerPill(breaker: BreakerState) {
   if (!breaker.open) {
     return {
-      label: "Breaker Normal",
-      dot: "var(--color-status-good)",
-      bg: "rgba(52,211,153,0.08)",
-      border: "rgba(52,211,153,0.15)",
-      color: "var(--color-text-secondary)",
+      label: "Breaker normal",
+      color: "var(--color-status-good)",
+      border: "rgba(110,220,196,0.3)",
     };
   }
   const revoked = breaker.mode === "revoke";
@@ -30,10 +28,8 @@ function breakerPill(breaker: BreakerState) {
     label: revoked
       ? `Key revoked${breaker.count > 1 ? ` ·${breaker.count}` : ""}`
       : `Throttled${breaker.count > 1 ? ` ·${breaker.count}` : ""}`,
-    dot: revoked ? "var(--color-status-bad)" : "var(--color-status-warn)",
-    bg: revoked ? "rgba(239,68,68,0.08)" : "rgba(245,158,11,0.08)",
-    border: revoked ? "rgba(239,68,68,0.2)" : "rgba(245,158,11,0.2)",
     color: revoked ? "var(--color-status-bad)" : "var(--color-status-warn)",
+    border: revoked ? "rgba(240,104,92,0.3)" : "rgba(232,181,123,0.3)",
   };
 }
 
@@ -43,9 +39,9 @@ export function TopNav({ breaker }: { breaker: BreakerState }) {
   // Marks whichever section is under the top of the viewport.
   useEffect(() => {
     const ids = LINKS.map((l) => l.href.slice(1));
-    // 70px is just past the nav's own bottom edge (14 top + 52 tall). It has to sit
-    // ABOVE the content's 88px top padding, or at scroll zero the first section
-    // below the hero already qualifies and the nav opens on the wrong item.
+    // Just past the bar's own bottom edge. It has to sit ABOVE the content's top
+    // padding, or at scroll zero the first section below the hero already qualifies
+    // and the nav opens on the wrong item.
     const NAV_BOTTOM = 70;
     const onScroll = () => {
       let current = ids[0];
@@ -65,60 +61,61 @@ export function TopNav({ breaker }: { breaker: BreakerState }) {
   return (
     // `fixed`, not `sticky`. The layout nests this inside flex containers where
     // sticky silently stops pinning — and a sticky bar that has stopped sticking
-    // looks identical to a working one until you scroll. z-100 clears the four
+    // looks identical to a working one until you scroll. z-100 clears the three
     // fixed background layers (0–3) and the content plane (10).
+    //
+    // Full-bleed with a hairline rule, matching the homepage bar exactly, rather
+    // than the floating inset card this used to be.
     <nav
-      className="fixed left-[14px] right-[14px] top-[14px] z-[100] flex h-[52px] items-center justify-between rounded-[16px] border border-border-subtle px-[24px]"
+      className="fixed left-0 right-0 top-0 z-[100] border-b border-border-subtle py-[12px]"
       style={{
-        background: "rgba(12,12,24,0.55)",
-        backdropFilter: "blur(20px) saturate(1.3)",
-        WebkitBackdropFilter: "blur(20px) saturate(1.3)",
+        background: "rgba(8,8,12,0.6)",
+        backdropFilter: "blur(12px) saturate(180%)",
+        WebkitBackdropFilter: "blur(12px) saturate(180%)",
       }}
     >
-      {/* The homepage links here; this closes the loop. Next turns this into a full
-          page load by itself, because the two sides are separate root layouts —
-          which is exactly what we want, so no stylesheet crosses over. */}
-      <Link href="/" className="flex items-center gap-[10px]">
-        <span className="live-dot h-[8px] w-[8px]" aria-hidden="true" />
-        <span className="t-heading-sm text-text-primary">Meter</span>
-      </Link>
+      <div className="mx-auto flex w-full max-w-[1400px] items-center gap-[12px] px-[32px]">
+        {/* The homepage links here; this closes the loop. Next turns this into a
+            full page load by itself, because the two sides are separate root
+            layouts — which is exactly what we want, so no stylesheet crosses. */}
+        <Link href="/" className="brand-mark">
+          <span className="live-dot h-[6px] w-[6px]" aria-hidden="true" />
+          Meter
+        </Link>
 
-      {/* Hidden below 640px — a hamburger is out of scope, and six cramped links
-          are worse than none on a phone. */}
-      <div className="hidden gap-[4px] sm:flex">
-        {LINKS.map((link) => {
-          const isActive = active === link.href;
-          return (
+        {/* Hidden below 1024px — a hamburger is out of scope, and seven cramped
+            links are worse than none on a small screen. */}
+        <div className="ml-auto hidden items-center gap-[6px] lg:flex">
+          {LINKS.map((link) => (
             <a
               key={link.href}
               href={link.href}
-              className={`rounded-[8px] px-[14px] py-[6px] text-[13px] font-medium tracking-[-0.01em] transition-colors ${
-                isActive
-                  ? "bg-accent-dim text-accent-light"
-                  : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+              className={`glass-pill ${
+                active === link.href ? "glass-pill-active" : ""
               }`}
             >
               {link.label}
             </a>
-          );
-        })}
-      </div>
+          ))}
+        </div>
 
-      <div
-        className="flex items-center gap-[6px] rounded-[20px] border px-[12px] py-[4px] text-[12px] font-medium"
-        style={{
-          background: pill.bg,
-          borderColor: pill.border,
-          color: pill.color,
-        }}
-        title={breaker.open && breaker.scope ? `Scope: ${breaker.scope}` : undefined}
-      >
-        <span
-          className="h-[6px] w-[6px] rounded-full"
-          style={{ background: pill.dot }}
-          aria-hidden="true"
-        />
-        {pill.label}
+        <div
+          className="glass-pill ml-auto cursor-default lg:ml-[6px]"
+          style={{ color: pill.color, borderColor: pill.border }}
+          title={
+            breaker.open && breaker.scope ? `Scope: ${breaker.scope}` : undefined
+          }
+        >
+          <span
+            className="h-[6px] w-[6px] shrink-0 rounded-full"
+            style={{
+              background: pill.color,
+              boxShadow: `0 0 6px ${pill.color}`,
+            }}
+            aria-hidden="true"
+          />
+          {pill.label}
+        </div>
       </div>
     </nav>
   );

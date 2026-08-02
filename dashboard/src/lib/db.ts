@@ -457,6 +457,164 @@ export async function getBudgets(): Promise<BudgetScope[] | null> {
   return scopes;
 }
 
+// ── Headline metrics ─────────────────────────────────────────────────────────
+
+/**
+ * The Treasurer's own burn window and trigger, mirrored from treasury/config.py
+ * (TREASURER_BURN_WINDOW_S, TREASURER_TOPUP_WHEN_HOURS). Read from the environment
+ * for the same reason BUDGET_WINDOW_S is: if someone retunes the Treasurer, a
+ * dashboard hard-coding the old figures would show a runway the agent disagrees
+ * with, and the panel below it would be topping up for reasons the card denies.
+ */
+const BURN_WINDOW_S = Number(process.env.TREASURER_BURN_WINDOW_S ?? 3_600);
+const RUNWAY_TRIGGER_HOURS = Number(
+  process.env.TREASURER_TOPUP_WHEN_HOURS ?? 0.75,
+);
+
+export type HeadlineMetrics = {
+  /** Spend in the trailing ceiling window, and the window before it. */
+  spend_window_usd: number;
+  spend_prev_window_usd: number;
+  /** Fractional change vs the previous window. null when there is no prior spend
+   *  to compare against — a first-ever window has no percentage, and rendering
+   *  "+100%" for it would invent a trend out of an empty baseline. */
+  spend_delta: number | null;
+  request_count_window: number;
+
+  /** Project-level ceilings only. See the note in getHeadlineMetrics. */
+  budget_ceiling_usd: number | null;
+  budget_spend_usd: number;
+
+  /** Hours until the first wallet reaches zero at the current burn rate.
+   *  null means no measurable burn, which is infinite runway, not zero. */
+  runway_hours: number | null;
+  runway_provider: string | null;
+  runway_trigger_hours: number;
+  burn_usd_per_hour: number;
+};
+
+/**
+ * The four numbers across the top of the page.
+ *
+ * Two things here are easy to get wrong and are done deliberately:
+ *
+ * 1. **The budget total sums project ceilings only.** Feature ceilings sit *inside*
+ *    their project's ceiling — meter.yaml declares a $3.00 project cap and then
+ *    caps individual features within it — so adding all 19 scopes together would
+ *    report a budget several times the real one, and a headroom figure nobody is
+ *    entitled to. Only rows with no feature are counted.
+ * 2. **Runway mirrors treasury/treasurer.py::assess verbatim**: burn is project
+ *    spend over TREASURER_BURN_WINDOW_S divided by that window in hours, and
+ *    runway is balance / burn. The card reports the *minimum* across wallets —
+ *    the one that dies first is the one that needs a decision. A second formula
+ *    here would mean the card and the agent disagree about when to act.
+ */
+export async function getHeadlineMetrics(): Promise<HeadlineMetrics> {
+  const empty: HeadlineMetrics = {
+    spend_window_usd: 0,
+    spend_prev_window_usd: 0,
+    spend_delta: null,
+    request_count_window: 0,
+    budget_ceiling_usd: null,
+    budget_spend_usd: 0,
+    runway_hours: null,
+    runway_provider: null,
+    runway_trigger_hours: RUNWAY_TRIGGER_HOURS,
+    burn_usd_per_hour: 0,
+  };
+  if (!(await tableExists("requests"))) return empty;
+
+  const cutoff = isoSecondsAgo(BUDGET_WINDOW_S);
+  const prevCutoff = isoSecondsAgo(BUDGET_WINDOW_S * 2);
+  const burnCutoff = isoSecondsAgo(BURN_WINDOW_S);
+
+  const [hasProjects, hasWallets] = await Promise.all([
+    tableExists("projects"),
+    tableExists("wallets"),
+  ]);
+
+  const [windowRows, prevRows, ceilingRows, walletRows] = await Promise.all([
+    query<{ spend: number; requests: number }>(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS spend, COUNT(*) AS requests
+         FROM requests WHERE ts >= $1`,
+      [cutoff],
+    ),
+    // The window *before* this one — bounded on both sides, or it would include
+    // the current window too and the delta would always read flat.
+    query<{ spend: number }>(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS spend
+         FROM requests WHERE ts >= $1 AND ts < $2`,
+      [prevCutoff, cutoff],
+    ),
+    hasProjects
+      ? query<{ project_id: string; ceiling_usd_day: number }>(
+          `SELECT id AS project_id, ceiling_usd_day
+             FROM projects WHERE ceiling_usd_day IS NOT NULL`,
+        )
+      : Promise.resolve([]),
+    hasWallets
+      ? query<{ project_id: string; provider: string; balance_usd: number }>(
+          `SELECT project_id, provider, balance_usd FROM wallets`,
+        )
+      : Promise.resolve([]),
+  ]);
+
+  const spend = num(windowRows[0]?.spend);
+  const prevSpend = num(prevRows[0]?.spend);
+
+  // Spend against the capped projects specifically, not all traffic — an uncapped
+  // project's spend is real but is not measured against this ceiling.
+  let budgetSpend = 0;
+  let budgetCeiling: number | null = null;
+  if (ceilingRows.length > 0) {
+    budgetCeiling = ceilingRows.reduce(
+      (sum, r) => sum + num(r.ceiling_usd_day),
+      0,
+    );
+    const ids = ceilingRows.map((r) => r.project_id);
+    const spendRows = await query<{ spend: number }>(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS spend
+         FROM requests WHERE project_id = ANY($1) AND ts >= $2`,
+      [ids, cutoff],
+    );
+    budgetSpend = num(spendRows[0]?.spend);
+  }
+
+  // Runway, per wallet, minimum wins.
+  let runwayHours: number | null = null;
+  let runwayProvider: string | null = null;
+  let burnRate = 0;
+  for (const w of walletRows) {
+    const burnRows = await query<{ spend: number }>(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS spend
+         FROM requests WHERE project_id = $1 AND ts >= $2`,
+      [w.project_id, burnCutoff],
+    );
+    const windowHours = BURN_WINDOW_S / 3600;
+    const perHour = windowHours > 0 ? num(burnRows[0]?.spend) / windowHours : 0;
+    if (perHour <= 0) continue; // No burn is infinite runway, not zero.
+    const hours = num(w.balance_usd) / perHour;
+    if (runwayHours === null || hours < runwayHours) {
+      runwayHours = hours;
+      runwayProvider = w.provider;
+      burnRate = perHour;
+    }
+  }
+
+  return {
+    spend_window_usd: spend,
+    spend_prev_window_usd: prevSpend,
+    spend_delta: prevSpend > 0 ? (spend - prevSpend) / prevSpend : null,
+    request_count_window: num(windowRows[0]?.requests),
+    budget_ceiling_usd: budgetCeiling,
+    budget_spend_usd: budgetSpend,
+    runway_hours: runwayHours,
+    runway_provider: runwayProvider,
+    runway_trigger_hours: RUNWAY_TRIGGER_HOURS,
+    burn_usd_per_hour: burnRate,
+  };
+}
+
 // ── Cost per outcome ─────────────────────────────────────────────────────────
 
 /**

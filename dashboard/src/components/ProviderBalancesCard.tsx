@@ -5,7 +5,7 @@ import {
   relativeTime,
   isStale,
 } from "@/lib/format";
-import { Panel, PanelTitle } from "@/components/ui/primitives";
+import { Panel } from "@/components/ui/primitives";
 
 /**
  * PLAN.md Phase 3 states the Treasurer's trigger as "if provider_balance < $10".
@@ -35,9 +35,16 @@ export function ProviderBalancesCard({
 
   return (
     <section id="balances" className="scroll-mt-[90px]">
-      <Panel className="animate-in delay-4 p-[22px]">
-        <PanelTitle>Provider Balances</PanelTitle>
-
+      <Panel
+        className="animate-in delay-4"
+        title="Provider Balances"
+        tag={
+          wallets && wallets.length > 0
+            ? `${wallets.length} wallet${wallets.length === 1 ? "" : "s"}`
+            : "Treasury"
+        }
+        bodyClassName="px-[20px] py-[4px]"
+      >
         {wallets === null ? (
           <p className="t-cell text-text-secondary">
             Treasury not initialised — start the proxy to create the wallets

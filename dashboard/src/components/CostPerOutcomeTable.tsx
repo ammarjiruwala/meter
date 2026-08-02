@@ -1,13 +1,7 @@
 import type { OutcomeRow, OutcomeCoverage } from "@/lib/db";
 import { usdColumnFormatter } from "@/lib/format";
 import { StatusBadge } from "@/components/ui/primitives";
-import {
-  Cell,
-  DataTable,
-  IdentityCell,
-  Row,
-  TableHeader,
-} from "@/components/ui/DataTable";
+import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
 
 const UNLABELLED = "Unlabelled";
 
@@ -31,16 +25,13 @@ export function CostPerOutcomeTable({
 
   return (
     <section id="outcomes" className="scroll-mt-[90px]">
-      <TableHeader
-        title="Cost per Outcome"
-        meta={
-          coverage && coverage.annotated_traces > 0
-            ? `${(share * 100).toFixed(0)}% coverage · ${coverage.annotated_traces} of ${coverage.traced_traces} traces annotated`
-            : undefined
-        }
-      />
-
       <DataTable
+        title="Cost per Outcome"
+        tag={
+          coverage && coverage.annotated_traces > 0
+            ? `${(share * 100).toFixed(0)}% coverage`
+            : "Annotated"
+        }
         columns={[
           { label: "Outcome" },
           { label: "Cost", align: "right" },
@@ -114,7 +105,9 @@ export function CostPerOutcomeTable({
           coverage && rows.length > 0 ? (
             <>
               A cost-per-outcome figure is only as representative as its coverage,
-              so it is stated rather than left to be assumed.
+              so it is stated rather than left to be assumed:{" "}
+              {coverage.annotated_traces} of {coverage.traced_traces} traces
+              annotated.
               {coverage.orphan_annotations > 0 && (
                 <>
                   {" "}
