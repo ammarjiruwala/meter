@@ -21,8 +21,16 @@ export const PROXY_URL = (
   process.env.NEXT_PUBLIC_METER_PROXY_URL ?? "http://localhost:8080"
 ).replace(/\/$/, "");
 
-/** Where the browser remembers its session across a reload. */
-const TOKEN_KEY = "meter.judge.token";
+/**
+ * Where the browser remembers its session.
+ *
+ * A cookie, not `localStorage`, because the Control Room is server-rendered: the page
+ * scopes every query to the judge's project, and a server component cannot read
+ * `localStorage`. The same cookie is readable here for the cross-origin calls to the
+ * proxy, which cookies are not sent on.
+ */
+const TOKEN_KEY = "meter_judge_session";
+const TOKEN_MAX_AGE_S = 4 * 3600;
 
 export type JudgeSession = {
   token: string;
@@ -112,14 +120,21 @@ export class JudgeError extends Error {
 }
 
 export function storedToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(TOKEN_KEY);
+  if (typeof document === "undefined") return null;
+  const hit = document.cookie
+    .split("; ")
+    .find((c) => c.startsWith(`${TOKEN_KEY}=`));
+  return hit ? decodeURIComponent(hit.slice(TOKEN_KEY.length + 1)) : null;
 }
 
 export function rememberToken(token: string | null) {
-  if (typeof window === "undefined") return;
-  if (token) window.localStorage.setItem(TOKEN_KEY, token);
-  else window.localStorage.removeItem(TOKEN_KEY);
+  if (typeof document === "undefined") return;
+  // SameSite=Lax so it rides ordinary navigations to this origin, which is what the
+  // server-rendered page needs. Not `Secure` in development, where there is no TLS.
+  const secure = window.location.protocol === "https:" ? "; Secure" : "";
+  document.cookie = token
+    ? `${TOKEN_KEY}=${encodeURIComponent(token)}; Path=/; Max-Age=${TOKEN_MAX_AGE_S}; SameSite=Lax${secure}`
+    : `${TOKEN_KEY}=; Path=/; Max-Age=0; SameSite=Lax${secure}`;
 }
 
 async function call<T>(
