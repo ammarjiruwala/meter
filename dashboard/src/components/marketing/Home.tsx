@@ -233,7 +233,10 @@ export function Home() {
                     style={
                       {
                         "--a": `${(360 / ring.length) * i}deg`,
-                        "--r": r === 0 ? "300px" : "240px",
+                        // Radius comes from the ring's own class, so the two
+                        // radii live next to the tilts that determine them —
+                        // they are related by a trig identity, not free choices.
+                        "--r": "var(--ring-r)",
                       } as React.CSSProperties
                     }
                   >
