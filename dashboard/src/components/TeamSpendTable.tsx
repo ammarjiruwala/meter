@@ -1,12 +1,6 @@
 import type { SpendRow } from "@/lib/db";
 import { usdColumnFormatter } from "@/lib/format";
-import {
-  Cell,
-  DataTable,
-  IdentityCell,
-  Row,
-  TableHeader,
-} from "@/components/ui/DataTable";
+import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
 
 export function TeamSpendTable({ rows }: { rows: SpendRow[] }) {
   const total = rows.reduce((sum, r) => sum + r.total_cost_usd, 0);
@@ -14,9 +8,9 @@ export function TeamSpendTable({ rows }: { rows: SpendRow[] }) {
 
   return (
     <section id="spend" className="scroll-mt-[90px]">
-      <TableHeader title="Team Spend" meta="All time" />
-
       <DataTable
+        title="Team Spend"
+        tag="All time"
         columns={[
           { label: "Member" },
           { label: "Requests", align: "right" },
@@ -49,9 +43,9 @@ export function TeamSpendTable({ rows }: { rows: SpendRow[] }) {
                   </span>
                   {/* Share-of-total is what this table answers, and length reads
                       faster than a column of figures. */}
-                  <span className="inline-block h-[4px] w-[80px] overflow-hidden rounded-[4px] bg-white/[0.06]">
+                  <span className="inline-block h-[4px] w-[80px] overflow-hidden rounded-[4px] bg-surface-3">
                     <span
-                      className="block h-full rounded-[4px] bg-accent opacity-50"
+                      className="block h-full rounded-[4px] bg-accent opacity-60"
                       style={{ width: `${Math.max(2, share * 100)}%` }}
                     />
                   </span>

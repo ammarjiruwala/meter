@@ -66,7 +66,16 @@
   .snap-container {
     height: 100vh;
     overflow-y: auto;
-    scroll-snap-type: y mandatory;
+    /* `proximity`, not `mandatory`.
+       Not every section is one viewport tall — `.usage` is 150vh, because the
+       sticky code panel needs room to step through three states. Under mandatory
+       snapping the browser is obliged to sit on a snap point at all times, so
+       there is no way to *rest* part-way down a section taller than the screen:
+       every gesture inside it gets pulled back to the section start or thrown on
+       to the next one, and the bottom of that section can never be read.
+       Proximity snaps when a gesture ends near a boundary and otherwise leaves
+       the scroll where it was put, which is what makes a tall section legible. */
+    scroll-snap-type: y proximity;
     scroll-behavior: smooth;
   }
   @media (prefers-reduced-motion: reduce) {
@@ -75,8 +84,24 @@
   .snap-section {
     min-height: 100vh;
     scroll-snap-align: start;
+    /* Kept, and it is doing real work under proximity: it forbids a single fling
+       from flying past a section boundary, so one gesture advances at most one
+       section even though the snapping itself is now optional. */
     scroll-snap-stop: always;
     position: relative;
+  }
+  /* A tall section gets a second snap point at its end, so its final screenful is
+     somewhere the scroll will settle rather than a place you pass through. This is
+     the other half of the fix: proximity alone lets you stop there, this makes the
+     page want to. */
+  .snap-section > .snap-end {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    scroll-snap-align: end;
+    pointer-events: none;
   }
 
   /* ===========================================================
@@ -309,6 +334,19 @@
     align-items: center;
     gap: 12px;
   }
+  /* The nav needs to be a flex container in its own right.
+     Without this it is a plain block: the pills inside are inline-flex, and JSX
+     strips the newline between sibling elements, so they rendered with no gap at
+     all and read as one run-on control. `gap` was only ever declared in the
+     narrow-viewport media query below, where it was equally inert for the same
+     reason. margin-left: auto is what actually pushes the group to the right —
+     it was relying on nothing. */
+  .topbar nav {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
 
   /* ---- UNIFIED LIQUID GLASS BUTTONS ---- */
   .mark,
@@ -441,6 +479,18 @@
   .hero {
     display: flex; align-items: center; justify-content: center;
     overflow: hidden;
+    /* Shared by the wordmark and by everything that has to centre on it. */
+    --hero-fs: clamp(4.5rem, 13vw, 11rem);
+    /* The orbit rings centre on the wordmark's *line box*, but what the eye
+       centres on is its ink — and "METER" is all caps with no descenders, so its
+       ink sits well below the middle of the box that contains it.
+
+       Measured rather than guessed, via canvas TextMetrics against the real
+       loaded font: at font-size 176px the ink centre is 30.58px below the line
+       box centre, which is 0.174em. Expressed as a ratio because the hero type is
+       clamp(4.5rem, 13vw, 11rem) — a fixed pixel nudge would be correct at one
+       viewport width and wrong at every other. */
+    --orbit-optical-shift: calc(var(--hero-fs) * 0.174);
     opacity: 0; transform: translateY(30px);
     transition: opacity 1.2s cubic-bezier(0.2, 0.8, 0.2, 1), transform 1.2s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
@@ -461,13 +511,16 @@
     pointer-events: none; z-index: 2;
   }
   .orbit-ring {
-    position: absolute; top: 50%; left: 50%;
+    position: absolute;
+    top: calc(50% + var(--orbit-optical-shift));
+    left: 50%;
     width: 0; height: 0; transform-style: preserve-3d;
   }
-  .ring-1 { animation: orbit1 60s linear infinite; }
-  .ring-2 { animation: orbit2 45s linear infinite; }
+  /* One ring, nearly edge-on. rotateX leaves the x-axis alone, so its projected
+     half-width is exactly its radius: 300px in, 600px wide on screen. */
+  .ring-1 { --ring-r: 300px; animation: orbit1 60s linear infinite; }
+
   @keyframes orbit1 { 0% { transform: rotateX(-14deg) rotateY(0deg); } 100% { transform: rotateX(-14deg) rotateY(360deg); } }
-  @keyframes orbit2 { 0% { transform: rotateX(58deg) rotateZ(18deg) rotateY(0deg); } 100% { transform: rotateX(58deg) rotateZ(18deg) rotateY(360deg); } }
 
   .t3d { position: absolute; top: 0; left: 0; width: 0; height: 0; transform-style: preserve-3d; transform: rotateY(var(--a)) translateZ(var(--r)); }
 
@@ -502,7 +555,9 @@
 
   .hero-center { position: relative; z-index: 5; text-align: center; will-change: transform, opacity; }
   .hero-glow {
-    position: absolute; top: 50%; left: 50%;
+    /* Same optical shift as the rings — it is a bloom behind the wordmark, so it
+       has to sit behind the ink rather than behind the box. */
+    position: absolute; top: calc(50% + var(--orbit-optical-shift)); left: 50%;
     transform: translate(-50%, -50%);
     width: 500px; height: 500px;
     background: radial-gradient(circle, rgba(240, 104, 92, 0.12) 0%, rgba(232, 181, 123, 0.06) 40%, transparent 70%);
@@ -513,9 +568,13 @@
 
   .hero-name {
     font-family: var(--cond); font-weight: 700;
-    font-size: clamp(4.5rem, 13vw, 11rem);
+    font-size: var(--hero-fs);
     letter-spacing: -0.04em; line-height: 0.9;
-    margin: 0 0 28px; color: var(--ink);
+    /* No bottom margin. It existed only to space the wordmark from the tagline,
+       and with that gone it was still being counted by the flex centring — which
+       pushed the wordmark half of it (14px) above the centre the orbit rings are
+       drawn around. */
+    margin: 0; color: var(--ink);
     display: flex; justify-content: center;
   }
   .letter { display: inline-block; opacity: 0; transform: translateY(50px) scale(0.7); }
@@ -523,8 +582,6 @@
   .letter.accent { color: transparent; background: linear-gradient(135deg, var(--signal) 0%, var(--gold) 100%); -webkit-background-clip: text; background-clip: text; }
   @keyframes letterIn { to { opacity: 1; transform: translateY(0) scale(1); } }
 
-  .hero-tagline { font-size: clamp(15px, 1.8vw, 19px); line-height: 1.5; color: var(--ink-2); max-width: 38ch; margin: 0 auto; opacity: 0; transform: translateY(16px); }
-  .hero-tagline.animate { animation: fadeUp 1s cubic-bezier(0.2, 0.8, 0.2, 1) forwards; }
   @keyframes fadeUp { to { opacity: 1; transform: translateY(0); } }
 
   .scroll-hint {

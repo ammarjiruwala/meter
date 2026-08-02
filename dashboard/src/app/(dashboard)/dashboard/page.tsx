@@ -15,7 +15,7 @@ import {
   getOutcomeCoverage,
   getLiveLogs,
   getProviderBalances,
-  getSpendSummary,
+  getHeadlineMetrics,
   isLedgerAvailable,
 } from "@/lib/db";
 
@@ -31,7 +31,6 @@ export default async function Home() {
   // of them depends on another.
   const [
     ledgerAvailable,
-    summary,
     spend,
     wallets,
     budgets,
@@ -40,9 +39,9 @@ export default async function Home() {
     liveLogs,
     outcomes,
     outcomeCoverage,
+    headline,
   ] = await Promise.all([
     isLedgerAvailable(),
-    getSpendSummary(),
     getTeamSpend(),
     getProviderBalances(),
     getBudgets(),
@@ -51,17 +50,30 @@ export default async function Home() {
     getLiveLogs(),
     getOutcomeCosts(),
     getOutcomeCoverage(),
+    getHeadlineMetrics(),
   ]);
 
   return (
     <>
       <TopNav breaker={breaker} />
 
-      {/* z-10 puts the content plane above all four fixed background layers. */}
+      {/* z-10 puts the content plane above all three fixed background layers. */}
       <main
         id="top"
-        className="relative z-10 mx-auto w-full max-w-[1360px] px-[28px] pb-[40px] pt-[88px]"
+        className="relative z-10 mx-auto w-full max-w-[1400px] px-[32px] pb-[60px] pt-[100px]"
       >
+        {/* The page title. Condensed and large, with the deployment it is reading
+            from stated underneath — on a screen showing live money, "which
+            database is this" is the first question anyone asks. */}
+        <div className="mb-[32px] flex flex-wrap items-end justify-between gap-[20px]">
+          <div>
+            <h1 className="t-display">Control Room</h1>
+            <div className="t-eyebrow mt-[8px]">
+              Live system status · metered through the proxy
+            </div>
+          </div>
+        </div>
+
         {!ledgerAvailable && (
           <div className="glass mb-[20px] p-[20px]">
             <p className="t-body text-text-primary">
@@ -72,43 +84,41 @@ export default async function Home() {
           </div>
         )}
 
-        {/* Top row: the hero number beside the constraint it runs against.
-            Collapses to one column at 1024px. */}
-        {/* items-start, or the spend card stretches to the height of the budget
-            grid — with five scopes that is three rows of cards and most of the
-            card becomes empty glass. */}
-        <div className="relative mb-[20px] grid grid-cols-1 items-start gap-[20px] lg:grid-cols-[2fr_3fr]">
-          {/* Hero glow — a soft indigo bloom behind the spend card so it reads as
-              emitting light rather than sitting on the canvas. */}
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute -left-[80px] -top-[80px] -z-10 h-[380px] w-[550px]"
-            style={{
-              background:
-                "radial-gradient(ellipse, rgba(99,102,241,0.10) 0%, transparent 65%)",
-            }}
-          />
-          <SpendHero summary={summary} />
-          <TeamBudgetCard scopes={budgets} />
+        {/* The metric row runs full width — it is the summary everything below
+            expands on, and boxing it beside something else would make it look
+            like one of several equal concerns. */}
+        <div className="mb-[24px]">
+          <SpendHero metrics={headline} wallets={wallets} />
         </div>
 
-        {/* Balances and the agent acting on them sit side by side: the panel on the
-            right is what the numbers on the left caused. */}
-        <div className="mb-[20px] grid grid-cols-1 gap-[20px] lg:grid-cols-2">
+        {/* The budget rail takes about half the row rather than all of it — at full
+            width it fitted six cards, which is more of a constraint than anyone
+            reads at a glance, and the scrolling stopped meaning anything. Two in
+            view with a third peeking is enough to say "there are more".
+
+            Balances takes the other half, so the width the rail gave up is used
+            rather than left as dead space beside it. items-start, because these two
+            have genuinely different natural heights. */}
+        <div className="mb-[24px] grid grid-cols-1 items-start gap-[24px] lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <TeamBudgetCard scopes={budgets} />
           <ProviderBalancesCard wallets={wallets} />
+        </div>
+
+        <div className="mb-[24px]">
           <AgentLog initialEvents={treasuryEvents} />
         </div>
 
-        <div className="animate-in delay-5 mb-[20px]">
-          <TeamSpendTable rows={spend} />
-        </div>
-
-        <div className="animate-in delay-6 mb-[20px]">
+        <div className="animate-in delay-5 mb-[24px]">
           <LiveLogsTable initialRows={liveLogs} />
         </div>
 
-        <div className="animate-in delay-6">
-          <CostPerOutcomeTable rows={outcomes} coverage={outcomeCoverage} />
+        <div className="grid grid-cols-1 gap-[24px] xl:grid-cols-2">
+          <div className="animate-in delay-6">
+            <TeamSpendTable rows={spend} />
+          </div>
+          <div className="animate-in delay-6">
+            <CostPerOutcomeTable rows={outcomes} coverage={outcomeCoverage} />
+          </div>
         </div>
       </main>
     </>

@@ -24,6 +24,20 @@ function decimalsFor(abs: number): number {
   return abs >= 1 ? 2 : abs >= 0.01 ? 4 : 6;
 }
 
+/**
+ * Money for a headline card: always cents, always grouped.
+ *
+ * `formatUsd` widens to 4 and 6 decimals under a dollar, which is correct for a
+ * ledger column where a single call really does cost $0.000037 — and wrong at
+ * 32px, where "$0.8375" reads as a precision nobody asked for and breaks the
+ * tabular rhythm across the row. Sub-cent totals round to "$0.00" here, which is
+ * the honest summary of an amount that small.
+ */
+export function formatUsdHeadline(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "—";
+  return usdAt(n, 2);
+}
+
 function usdAt(n: number, decimals: number): string {
   return n.toLocaleString("en-US", {
     style: "currency",

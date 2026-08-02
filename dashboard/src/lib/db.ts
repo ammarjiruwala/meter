@@ -380,40 +380,99 @@ export async function getBudgets(): Promise<BudgetScope[] | null> {
 
   const cutoff = isoSecondsAgo(BUDGET_WINDOW_S);
 
-  // Both statements mirror proxy/db.py's project_window_spend() and window_spend()
-  // verbatim. The card and the 429 a developer just got have to be answering with the
-  // same arithmetic, or the dashboard argues with the proxy about who is over budget.
-  const projectSpend = (projectId: string) =>
-    query<{ spend: number }>(
-      `SELECT COALESCE(SUM(cost_usd), 0) AS spend
-         FROM requests
-        WHERE project_id = $1 AND ts >= $2`,
-      [projectId, cutoff],
-    );
-  const featureSpend = (projectId: string, feature: string) =>
-    query<{ spend: number }>(
-      `SELECT COALESCE(SUM(cost_usd), 0) AS spend
-         FROM requests
-        WHERE project_id = $1 AND feature = $2 AND ts >= $3`,
-      [projectId, feature, cutoff],
-    );
+  /*
+   * Four grouped statements for the whole board, not two per scope.
+   *
+   * This used to run projectSpend + projectMembers per project and featureSpend +
+   * featureMembers per feature, awaited inside a `for` loop — so the round trips
+   * were serial across scopes. With the 19 scopes meter.yaml currently declares
+   * that is 38 sequential trips to a hosted database at ~50ms each, on a page that
+   * also holds one of only four pooled connections for the duration. It was by far
+   * the heaviest thing the dashboard did, and it got worse every time someone added
+   * a ceiling.
+   *
+   * The arithmetic per scope is unchanged and still mirrors proxy/db.py's
+   * project_window_spend() and window_spend() — the card and the 429 a developer
+   * just got have to agree about who is over budget. Only the grouping moved into
+   * the database.
+   */
+  const projectIds = projectCeilings.map((p) => p.project_id);
+  const featureProjectIds = [...new Set(featureCeilings.map((f) => f.project_id))];
+  const featureNames = [...new Set(featureCeilings.map((f) => f.feature))];
 
-  // Actors are ordered by their spend against the scope, so the avatar stack shows
-  // who is actually consuming the budget rather than whoever happens to sort first.
-  const projectMembers = (projectId: string) =>
-    query<{ actor: string }>(
-      `SELECT actor FROM requests
-        WHERE project_id = $1 AND ts >= $2 AND actor IS NOT NULL
-        GROUP BY actor ORDER BY SUM(cost_usd) DESC`,
-      [projectId, cutoff],
-    );
-  const featureMembers = (projectId: string, feature: string) =>
-    query<{ actor: string }>(
-      `SELECT actor FROM requests
-        WHERE project_id = $1 AND feature = $2 AND ts >= $3 AND actor IS NOT NULL
-        GROUP BY actor ORDER BY SUM(cost_usd) DESC`,
-      [projectId, feature, cutoff],
-    );
+  const [projectSpendRows, projectMemberRows, featureSpendRows, featureMemberRows] =
+    await Promise.all([
+      projectIds.length
+        ? query<{ project_id: string; spend: number }>(
+            `SELECT project_id, COALESCE(SUM(cost_usd), 0) AS spend
+               FROM requests
+              WHERE project_id = ANY($1) AND ts >= $2
+              GROUP BY project_id`,
+            [projectIds, cutoff],
+          )
+        : Promise.resolve([]),
+      // Actors ordered by their spend against the scope, so the avatar stack shows
+      // who is actually consuming the budget rather than whoever sorts first.
+      projectIds.length
+        ? query<{ project_id: string; actor: string }>(
+            `SELECT project_id, actor
+               FROM requests
+              WHERE project_id = ANY($1) AND ts >= $2 AND actor IS NOT NULL
+              GROUP BY project_id, actor
+              ORDER BY project_id, SUM(cost_usd) DESC`,
+            [projectIds, cutoff],
+          )
+        : Promise.resolve([]),
+      // Filtering on both lists can match (project, feature) pairs that no ceiling
+      // declares. Harmless — results are read back by exact key below, so an extra
+      // group is simply never looked up.
+      featureCeilings.length
+        ? query<{ project_id: string; feature: string; spend: number }>(
+            `SELECT project_id, feature, COALESCE(SUM(cost_usd), 0) AS spend
+               FROM requests
+              WHERE project_id = ANY($1) AND feature = ANY($2) AND ts >= $3
+              GROUP BY project_id, feature`,
+            [featureProjectIds, featureNames, cutoff],
+          )
+        : Promise.resolve([]),
+      featureCeilings.length
+        ? query<{ project_id: string; feature: string; actor: string }>(
+            `SELECT project_id, feature, actor
+               FROM requests
+              WHERE project_id = ANY($1) AND feature = ANY($2) AND ts >= $3
+                AND actor IS NOT NULL
+              GROUP BY project_id, feature, actor
+              ORDER BY project_id, feature, SUM(cost_usd) DESC`,
+            [featureProjectIds, featureNames, cutoff],
+          )
+        : Promise.resolve([]),
+    ]);
+
+  // ORDER BY above fixes the actor order; these preserve it, because Map keeps
+  // insertion order and the rows arrive already sorted by spend.
+  const key = (p: string, f: string) => `${p} ${f}`;
+
+  const projectSpendBy = new Map(
+    projectSpendRows.map((r) => [r.project_id, num(r.spend)]),
+  );
+  const featureSpendBy = new Map(
+    featureSpendRows.map((r) => [key(r.project_id, r.feature), num(r.spend)]),
+  );
+
+  const projectMembersBy = new Map<string, string[]>();
+  for (const r of projectMemberRows) {
+    const list = projectMembersBy.get(r.project_id);
+    if (list) list.push(r.actor);
+    else projectMembersBy.set(r.project_id, [r.actor]);
+  }
+
+  const featureMembersBy = new Map<string, string[]>();
+  for (const r of featureMemberRows) {
+    const k = key(r.project_id, r.feature);
+    const list = featureMembersBy.get(k);
+    if (list) list.push(r.actor);
+    else featureMembersBy.set(k, [r.actor]);
+  }
 
   // Project order comes from `projects`; a project that only has feature ceilings still
   // has to appear, so it is appended in the order its features were declared.
@@ -422,39 +481,204 @@ export async function getBudgets(): Promise<BudgetScope[] | null> {
     if (!order.includes(f.project_id)) order.push(f.project_id);
   }
 
+  // Assembly is pure bookkeeping now — no awaits in this loop. Order still comes
+  // from meter.yaml (see the sort_order note above) and is never re-sorted.
   const scopes: BudgetScope[] = [];
   for (const projectId of order) {
     const ceiling = projectCeilings.find((p) => p.project_id === projectId);
     if (ceiling) {
-      // Both round trips at once. Serial awaits here cost a network round trip per
-      // scope per card, and a page with six scopes was paying twelve of them in a row.
-      const [spendRows, memberRows] = await Promise.all([
-        projectSpend(projectId),
-        projectMembers(projectId),
-      ]);
       scopes.push({
         project_id: projectId,
         feature: null,
         ceiling_usd: num(ceiling.ceiling_usd_day),
-        spend_usd: num(spendRows[0]?.spend),
-        members: memberRows.map((r) => r.actor),
+        // A scope with no requests in the window has no row in the grouped result;
+        // that is zero spend, not missing data.
+        spend_usd: projectSpendBy.get(projectId) ?? 0,
+        members: projectMembersBy.get(projectId) ?? [],
       });
     }
     for (const f of featureCeilings.filter((x) => x.project_id === projectId)) {
-      const [spendRows, memberRows] = await Promise.all([
-        featureSpend(projectId, f.feature),
-        featureMembers(projectId, f.feature),
-      ]);
+      const k = key(projectId, f.feature);
       scopes.push({
         project_id: projectId,
         feature: f.feature,
         ceiling_usd: num(f.ceiling_usd_day),
-        spend_usd: num(spendRows[0]?.spend),
-        members: memberRows.map((r) => r.actor),
+        spend_usd: featureSpendBy.get(k) ?? 0,
+        members: featureMembersBy.get(k) ?? [],
       });
     }
   }
   return scopes;
+}
+
+// ── Headline metrics ─────────────────────────────────────────────────────────
+
+/**
+ * The Treasurer's own burn window and trigger, mirrored from treasury/config.py
+ * (TREASURER_BURN_WINDOW_S, TREASURER_TOPUP_WHEN_HOURS). Read from the environment
+ * for the same reason BUDGET_WINDOW_S is: if someone retunes the Treasurer, a
+ * dashboard hard-coding the old figures would show a runway the agent disagrees
+ * with, and the panel below it would be topping up for reasons the card denies.
+ */
+const BURN_WINDOW_S = Number(process.env.TREASURER_BURN_WINDOW_S ?? 3_600);
+const RUNWAY_TRIGGER_HOURS = Number(
+  process.env.TREASURER_TOPUP_WHEN_HOURS ?? 0.75,
+);
+
+export type HeadlineMetrics = {
+  /** Spend in the trailing ceiling window, and the window before it. */
+  spend_window_usd: number;
+  spend_prev_window_usd: number;
+  /** Fractional change vs the previous window. null when there is no prior spend
+   *  to compare against — a first-ever window has no percentage, and rendering
+   *  "+100%" for it would invent a trend out of an empty baseline. */
+  spend_delta: number | null;
+  request_count_window: number;
+
+  /** Project-level ceilings only. See the note in getHeadlineMetrics. */
+  budget_ceiling_usd: number | null;
+  budget_spend_usd: number;
+
+  /** Hours until the first wallet reaches zero at the current burn rate.
+   *  null means no measurable burn, which is infinite runway, not zero. */
+  runway_hours: number | null;
+  runway_provider: string | null;
+  runway_trigger_hours: number;
+  burn_usd_per_hour: number;
+};
+
+/**
+ * The four numbers across the top of the page.
+ *
+ * Two things here are easy to get wrong and are done deliberately:
+ *
+ * 1. **The budget total sums project ceilings only.** Feature ceilings sit *inside*
+ *    their project's ceiling — meter.yaml declares a $3.00 project cap and then
+ *    caps individual features within it — so adding all 19 scopes together would
+ *    report a budget several times the real one, and a headroom figure nobody is
+ *    entitled to. Only rows with no feature are counted.
+ * 2. **Runway mirrors treasury/treasurer.py::assess verbatim**: burn is project
+ *    spend over TREASURER_BURN_WINDOW_S divided by that window in hours, and
+ *    runway is balance / burn. The card reports the *minimum* across wallets —
+ *    the one that dies first is the one that needs a decision. A second formula
+ *    here would mean the card and the agent disagree about when to act.
+ */
+export async function getHeadlineMetrics(): Promise<HeadlineMetrics> {
+  const empty: HeadlineMetrics = {
+    spend_window_usd: 0,
+    spend_prev_window_usd: 0,
+    spend_delta: null,
+    request_count_window: 0,
+    budget_ceiling_usd: null,
+    budget_spend_usd: 0,
+    runway_hours: null,
+    runway_provider: null,
+    runway_trigger_hours: RUNWAY_TRIGGER_HOURS,
+    burn_usd_per_hour: 0,
+  };
+  if (!(await tableExists("requests"))) return empty;
+
+  const cutoff = isoSecondsAgo(BUDGET_WINDOW_S);
+  const prevCutoff = isoSecondsAgo(BUDGET_WINDOW_S * 2);
+  const burnCutoff = isoSecondsAgo(BURN_WINDOW_S);
+
+  const [hasProjects, hasWallets] = await Promise.all([
+    tableExists("projects"),
+    tableExists("wallets"),
+  ]);
+
+  const [windowRows, prevRows, ceilingRows, walletRows] = await Promise.all([
+    query<{ spend: number; requests: number }>(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS spend, COUNT(*) AS requests
+         FROM requests WHERE ts >= $1`,
+      [cutoff],
+    ),
+    // The window *before* this one — bounded on both sides, or it would include
+    // the current window too and the delta would always read flat.
+    query<{ spend: number }>(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS spend
+         FROM requests WHERE ts >= $1 AND ts < $2`,
+      [prevCutoff, cutoff],
+    ),
+    hasProjects
+      ? query<{ project_id: string; ceiling_usd_day: number }>(
+          `SELECT id AS project_id, ceiling_usd_day
+             FROM projects WHERE ceiling_usd_day IS NOT NULL`,
+        )
+      : Promise.resolve([]),
+    hasWallets
+      ? query<{ project_id: string; provider: string; balance_usd: number }>(
+          `SELECT project_id, provider, balance_usd FROM wallets`,
+        )
+      : Promise.resolve([]),
+  ]);
+
+  const spend = num(windowRows[0]?.spend);
+  const prevSpend = num(prevRows[0]?.spend);
+
+  // Spend against the capped projects specifically, not all traffic — an uncapped
+  // project's spend is real but is not measured against this ceiling.
+  let budgetSpend = 0;
+  let budgetCeiling: number | null = null;
+  if (ceilingRows.length > 0) {
+    budgetCeiling = ceilingRows.reduce(
+      (sum, r) => sum + num(r.ceiling_usd_day),
+      0,
+    );
+    const ids = ceilingRows.map((r) => r.project_id);
+    const spendRows = await query<{ spend: number }>(
+      `SELECT COALESCE(SUM(cost_usd), 0) AS spend
+         FROM requests WHERE project_id = ANY($1) AND ts >= $2`,
+      [ids, cutoff],
+    );
+    budgetSpend = num(spendRows[0]?.spend);
+  }
+
+  // Runway, per wallet, minimum wins.
+  //
+  // Burn is grouped in one statement rather than queried per wallet. Two wallets in
+  // the same project were asking the same question twice, and the loop awaited
+  // serially — cheap today at one wallet, but it is the shape that turns into a
+  // stall the moment the treasury has a few.
+  const burnBy = new Map<string, number>();
+  if (walletRows.length > 0) {
+    const burnRows = await query<{ project_id: string; spend: number }>(
+      `SELECT project_id, COALESCE(SUM(cost_usd), 0) AS spend
+         FROM requests WHERE project_id = ANY($1) AND ts >= $2
+        GROUP BY project_id`,
+      [[...new Set(walletRows.map((w) => w.project_id))], burnCutoff],
+    );
+    for (const r of burnRows) burnBy.set(r.project_id, num(r.spend));
+  }
+
+  let runwayHours: number | null = null;
+  let runwayProvider: string | null = null;
+  let burnRate = 0;
+  const windowHours = BURN_WINDOW_S / 3600;
+  for (const w of walletRows) {
+    const perHour =
+      windowHours > 0 ? (burnBy.get(w.project_id) ?? 0) / windowHours : 0;
+    if (perHour <= 0) continue; // No burn is infinite runway, not zero.
+    const hours = num(w.balance_usd) / perHour;
+    if (runwayHours === null || hours < runwayHours) {
+      runwayHours = hours;
+      runwayProvider = w.provider;
+      burnRate = perHour;
+    }
+  }
+
+  return {
+    spend_window_usd: spend,
+    spend_prev_window_usd: prevSpend,
+    spend_delta: prevSpend > 0 ? (spend - prevSpend) / prevSpend : null,
+    request_count_window: num(windowRows[0]?.requests),
+    budget_ceiling_usd: budgetCeiling,
+    budget_spend_usd: budgetSpend,
+    runway_hours: runwayHours,
+    runway_provider: runwayProvider,
+    runway_trigger_hours: RUNWAY_TRIGGER_HOURS,
+    burn_usd_per_hour: burnRate,
+  };
 }
 
 // ── Cost per outcome ─────────────────────────────────────────────────────────
