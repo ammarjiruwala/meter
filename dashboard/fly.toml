@@ -1,0 +1,47 @@
+# Meter dashboard — Next.js standalone, a second Fly app.
+#
+# Separate from the backend because they are separate images with separate lifecycles:
+# the dashboard is a stateless reader that can be redeployed mid-demo without touching
+# the process that holds the reservations and the Treasurer loop.
+#
+# Rename `app` before the first deploy — Fly app names are globally unique.
+
+app = "meter-dashboard"
+
+# Same region as the backend and as Supabase (ap-south-1). A page load issues ten
+# queries; they are already parallelised with Promise.all, so the cost is roughly one
+# round trip rather than ten — but one round trip from the wrong continent is still
+# ~50ms on every page, and the live-log poll pays it every 3 seconds.
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+
+  # Unlike the backend, this app CAN safely sleep — it runs no background loops and holds
+  # no in-memory state, so nothing is lost when a machine stops. Kept warm anyway: a cold
+  # start in front of a judge is a bad trade for a few cents, and the whole point of this
+  # screen is that someone is watching it live.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Secrets, set with `fly secrets set -a meter-dashboard`:
+#
+#   DATABASE_URL   Supabase TRANSACTION pooler (port 6543) — NOT the session one the
+#                  backend uses. Next.js server components are many short-lived request
+#                  handlers, which is the shape transaction pooling exists for; direct
+#                  or session connections accumulate until Postgres refuses new ones.
+#                  dashboard/src/lib/db.ts uses no prepared statements, which is the one
+#                  thing transaction pooling cannot support.
+#   DB_SCHEMA      Only if the proxy is writing somewhere other than `public`.
+#
+# The dashboard is READ-ONLY against the ledger. It needs no provider keys, no Prava
+# credentials and no Meter key — do not copy the backend's secrets into it.

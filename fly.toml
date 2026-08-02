@@ -1,0 +1,66 @@
+# Meter backend — the proxy, treasury, mock provider and the background loops.
+#
+# One process, one machine. `uvicorn proxy.app:app` is the whole backend; the Treasurer,
+# the predictor refresh and the soft-budget poll are asyncio tasks inside its lifespan,
+# not separate services.
+#
+# Rename `app` before the first deploy — Fly app names are globally unique.
+
+app = "meter-proxy"
+
+# Mumbai. This is not a preference: the Supabase project is in ap-south-1, and since the
+# Postgres port the proxy's measured overhead is dominated by the round trip to it —
+# p50 +52.7ms from a laptop outside the region, against microseconds for the old local
+# SQLite read. Deploying anywhere else keeps that number. See proxy/README.md.
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+  # ── The two settings that matter most ────────────────────────────────────────
+  # Fly stops idle machines by default. That would stop the Treasurer loop, and a demo
+  # where the agent never woke up because the host scaled to zero is the worst possible
+  # failure of a product whose pitch is "it tops up your provider at 3am".
+  auto_stop_machines = false
+  auto_start_machines = true
+
+  # NEVER raise this. proxy/budget.py serialises concurrent authorizes with an IN-PROCESS
+  # asyncio.Lock (PROPOSALS.md A5). At two machines there are two independent locks, both
+  # see the same headroom, and the daily ceiling silently stops holding — the exact
+  # concurrency hole authorize/capture exists to close. Postgres does not fix this;
+  # Redis does, and it is not built. Scale up only after that lands.
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+# Liveness. `/healthz` touches no provider and no payment rail, so it is safe to poll:
+# it reports pricing version, configured ceilings, held reservations and whether the
+# Treasurer has tripped.
+[[http_service.checks]]
+  interval = "30s"
+  timeout = "5s"
+  grace_period = "20s"
+  method = "GET"
+  path = "/healthz"
+
+# Secrets are NOT here. Set them with `fly secrets set`, which stores them encrypted and
+# injects them at runtime:
+#
+#   DATABASE_URL        Supabase SESSION pooler (this is one long-lived process, so it
+#                       wants session mode, not the transaction pooler the dashboard uses)
+#   METER_KEYS          MUST be overridden. It defaults to `mk_dev_local:demo-project:dev`,
+#                       which is public in this repo — deploying with the default hands
+#                       anyone a working key to a proxy holding your provider credentials.
+#   OPENAI_API_KEY, ANTHROPIC_API_KEY, PRAVA_API_KEY, POKE_API_KEY, POKE_CTO_PHONE
+#   TREASURER_DRY_RUN=true    Keep it. Never flip it on a host nobody is watching.
+#   PRAVA_LIVE_MODE=false     Until the sandbox outage clears.
+#
+# meter.yaml and pricing/ stay baked into the image on purpose: budgets are code and
+# change by pull request (PROPOSALS.md A6), and pricing is versioned by file so a rate
+# change is a new dated file rather than a silent reprice of history.
