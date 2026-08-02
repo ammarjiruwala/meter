@@ -11,3 +11,23 @@ report            /Users/ammar/Desktop/meter-project/meter/data/overnight-report
 [23:12:39] coldstart/split: starting
 [23:12:39] coldstart/split: rc=0
 [23:12:39] coldstart/optimize: starting
+[23:50:47] coldstart/optimize: rc=0
+[23:50:47] coldstart/discover: starting
+[00:29:04] coldstart/discover: rc=0
+[00:29:04] cross-model: starting
+[00:31:13] cross-model: rc=0
+[00:31:13] prequential: starting
+[00:31:14] prequential: rc=0
+[00:31:35] seed: rc=0 ['Start the proxy against this ledger and /healthz will report learned_factors: 32']
+[00:31:35] test_predictor: starting
+[00:31:36] test_predictor: rc=0
+[00:31:36] test_proxy: starting
+[00:31:38] test_proxy: rc=0
+[00:31:38] test_treasury: starting
+[00:32:08] test_treasury: rc=0
+[00:32:08] test_alerts: starting
+[00:32:09] test_alerts: rc=0
+[00:32:09] e2e journey: starting
+[00:32:33] e2e journey: rc=0
+[00:32:33] report -> /Users/ammar/Desktop/meter-project/meter/data/overnight-report.md
+[00:32:33] === done in 80 min ===

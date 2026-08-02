@@ -186,7 +186,9 @@ def main() -> int:
     if results:
         print()
         print(report(results))
-    return 0
+        return 0
+    print("no matched pairs produced — treating as failure", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

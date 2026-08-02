@@ -47,10 +47,17 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.source == "templated":
-        src = REPO / "data" / "templated" / "gpt-4o-mini.jsonl"
-        if not src.exists():
-            sys.exit(f"missing {src} — run: python scripts/templated_probe.py")
-        rows = [json.loads(line) for line in src.read_text().splitlines() if line.strip()]
+        # Every templated file, not just the first probe. Reading one of the three
+        # silently ran this on 200 of 1,224 rows and 5 of 19 features -- and a learning
+        # curve measured on a sixth of the data is not the curve.
+        rows = []
+        for name in ("gpt-4o-mini.jsonl", "gpt-4o-mini-v2.jsonl", "corpus.jsonl"):
+            fp = REPO / "data" / "templated" / name
+            if fp.exists():
+                rows += [json.loads(line) for line in fp.read_text().splitlines()
+                         if line.strip()]
+        if not rows:
+            sys.exit("no templated data — run scripts/corpus_probe.py first")
         if args.exclude_truncated:
             # Two defensible readings. A row that stopped at max_tokens is a LOWER
             # BOUND on natural output length, so fitting a length model on it teaches
