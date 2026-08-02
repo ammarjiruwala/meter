@@ -161,6 +161,26 @@ async def lifespan(app: FastAPI):
         follow_redirects=False,
     )
 
+    # Sweep expired judge credentials on a timer.
+    #
+    # `judge.sessions` holds a judge's Prava merchant key and Linq key in memory, with a
+    # TTL, and that TTL is the whole justification for holding them at all. `create()`
+    # sweeps opportunistically, which covers a busy console -- but a quiet one would leave
+    # the last judge's credentials resident until the process restarted, which on a
+    # free-tier host that stays warm is indefinitely. The promise is only true if
+    # something enforces it when nobody is looking.
+    async def _sweep_judge_credentials() -> None:
+        from judge import sessions as judge_sessions
+
+        while True:
+            await asyncio.sleep(300)
+            try:
+                await asyncio.to_thread(judge_sessions.purge_expired)
+            except Exception:  # noqa: BLE001 — a sweep failure must not kill the loop
+                log.debug("judge credential sweep failed", exc_info=True)
+
+    sweeper = asyncio.create_task(_sweep_judge_credentials())
+
     # Start the Treasurer Agent loop (Phase 3). Watches burn rate, projects runway, and
     # autonomously tops up wallets when balance drops below the threshold. This is "the 3am
     # save" from the pitch narrative — production never dies on a drained wallet.
@@ -212,7 +232,7 @@ async def lifespan(app: FastAPI):
         # Cancel the background loops cleanly on shutdown. The Treasurer owns its own task
         # and cancels it through `stop()`, so it is not in this list.
         await treasurer.stop()
-        for task in (refresh_task, soft_budget_task):
+        for task in (refresh_task, soft_budget_task, sweeper):
             if task is None:
                 continue
             task.cancel()
