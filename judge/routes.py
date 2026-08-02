@@ -19,9 +19,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Body, Header, HTTPException
+from fastapi import APIRouter, Body, Header, HTTPException, Request
 
-from . import ledger, prompts, sessions
+from . import ledger, prompts, run, sessions
 
 log = logging.getLogger("meter.judge.routes")
 
@@ -50,8 +50,13 @@ def _require(token: str | None) -> sessions.Session:
     return session
 
 
-def _public(session: sessions.Session, *, meter_key: str | None = None) -> dict[str, Any]:
-    """What the console is allowed to see. Never includes a stored credential."""
+def _public(session: sessions.Session) -> dict[str, Any]:
+    """What the console is allowed to see. Never includes a credential, including ours.
+
+    The session's Meter key is deliberately absent. It stays server-side and `/judge/run`
+    uses it on the judge's behalf, so the browser holds one opaque session token and
+    nothing that would still work if it leaked into a screenshot or a bug report.
+    """
     held = sessions.secrets_for(session.token)
     body: dict[str, Any] = {
         "token": session.token,
@@ -72,8 +77,6 @@ def _public(session: sessions.Session, *, meter_key: str | None = None) -> dict[
         "has_alerts": bool(held.get("poke_api_key") and held.get("poke_phone")),
         "alert_phone": held.get("poke_phone"),
     }
-    if meter_key is not None:
-        body["meter_key"] = meter_key
     return body
 
 
@@ -95,8 +98,7 @@ async def create_session(body: dict[str, Any] = Body(default_factory=dict)):
         sessions.put_secrets(session.token, secrets)
 
     log.info("judge session %s created for %s", session.project_id, email or "anonymous")
-    # The Meter key is returned exactly once, here, and is not stored by the console.
-    return _public(sessions.resolve(session.token), meter_key=session.meter_key)
+    return _public(sessions.resolve(session.token))
 
 
 @router.get("/session")
@@ -226,3 +228,134 @@ async def judge_outcomes(x_judge_session: str | None = Header(default=None)):
     """Cost per outcome for this session — spend per resolved thing, joined on trace."""
     session = _require(x_judge_session)
     return {"rows": ledger.outcomes(session.project_id)}
+
+
+@router.post("/run")
+async def judge_run(
+    request: Request,
+    body: dict[str, Any] = Body(default_factory=dict),
+    x_judge_session: str | None = Header(default=None),
+):
+    """Run one templated prompt. Act 2 and Act 3 of PITCH.md.
+
+    The prompt is chosen by id, never supplied by the caller: an arbitrary prompt on an
+    unknown feature tag falls through the prediction ladder to the raw heuristic and would
+    make a working product look broken (PITCH.md §3.2).
+    """
+    session = _require(x_judge_session)
+    prompt = prompts.BY_ID.get(str(body.get("prompt_id") or "").strip())
+    if prompt is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown prompt. Choose one of: {', '.join(prompts.BY_ID)}",
+        )
+
+    try:
+        result = await run.one(
+            request.app, session, prompt,
+            trace_id=(body.get("trace_id") or "").strip() or None,
+        )
+    except run.CapReached as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except run.Expired as exc:
+        raise HTTPException(status_code=440, detail=str(exc)) from exc
+
+    # The stats travel with the result so the console renders the call and the running
+    # accuracy from one round trip, rather than showing a number that lags the row above
+    # it by a poll interval.
+    return {
+        "result": result,
+        "stats": ledger.stats(session.project_id),
+        "session": _public(sessions.resolve(session.token)),
+    }
+
+
+@router.post("/runaway")
+async def judge_runaway(
+    request: Request,
+    body: dict[str, Any] = Body(default_factory=dict),
+    x_judge_session: str | None = Header(default=None),
+):
+    """Simulate a runaway agent until the breaker trips, then prove the blast radius.
+
+    Two things have to be on screen at the end and both are returned here: the refusal
+    with *both* detection conditions, and a different feature succeeding immediately
+    afterwards. "Spend over a limit" is a WHERE clause; "over a limit AND several times
+    this tag's own trailing rate" is the part that does not fire on a feature that is
+    merely expensive — and the control call is what shows the throttle is tag-scoped
+    rather than a key-wide cut.
+    """
+    session = _require(x_judge_session)
+    attempts = min(max(int(body.get("attempts") or 6), 1), 10)
+
+    calls: list[dict[str, Any]] = []
+    for _ in range(attempts):
+        try:
+            outcome = await run.one(request.app, session, prompts.RUNAWAY)
+        except run.CapReached as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        except run.Expired as exc:
+            raise HTTPException(status_code=440, detail=str(exc)) from exc
+        calls.append(outcome)
+        if outcome["blocked"]:
+            break
+
+    tripped = bool(calls and calls[-1]["blocked"])
+
+    # The control runs only once the breaker has actually tripped. Running it regardless
+    # would show a green tick that proves nothing, which is worse than showing none.
+    control = None
+    if tripped:
+        try:
+            control = await run.one(request.app, session, prompts.CONTROL)
+        except (run.CapReached, run.Expired):
+            control = None
+
+    return {
+        "calls": calls,
+        "tripped": tripped,
+        "control": control,
+        "control_feature": prompts.CONTROL.feature,
+        "alerted": bool(sessions.alert_target(session.project_id)[0]) and tripped,
+        "reset_with": "POST /judge/breaker/reset",
+        "session": _public(sessions.resolve(session.token)),
+    }
+
+
+@router.post("/breaker/reset")
+async def judge_breaker_reset(
+    body: dict[str, Any] = Body(default_factory=dict),
+    x_judge_session: str | None = Header(default=None),
+):
+    """Close the judge's own breaker. Never leave anyone looking at a red screen.
+
+    Scoped to their project, so a judge cannot reset the team's breaker or anyone
+    else's — the scope is built here rather than taken from the request.
+    """
+    session = _require(x_judge_session)
+    from proxy import breaker as proxy_breaker
+
+    feature = (body.get("feature") or prompts.RUNAWAY.feature).strip()
+    scope = proxy_breaker.scope_for(session.project_id, feature)
+    return proxy_breaker.reset(scope, reset_by="judge-console")
+
+
+@router.post("/annotate")
+async def judge_annotate(
+    body: dict[str, Any] = Body(default_factory=dict),
+    x_judge_session: str | None = Header(default=None),
+):
+    """Attach an outcome to a trace: cost per *resolved thing*, not per call."""
+    session = _require(x_judge_session)
+    trace_id = (body.get("trace_id") or "").strip()
+    if not trace_id:
+        raise HTTPException(status_code=400, detail="trace_id is required")
+
+    from proxy import db as ledger_db
+
+    ledger_db.record_annotation(
+        session.project_id, trace_id,
+        (body.get("outcome") or "resolved").strip(),
+        float(body["value_usd"]) if body.get("value_usd") is not None else None,
+    )
+    return {"ok": True, "outcomes": ledger.outcomes(session.project_id)}

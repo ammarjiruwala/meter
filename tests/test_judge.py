@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["DB_SCHEMA"] = "test_judge_" + uuid.uuid4().hex[:8]
 
 from judge import ledger, sessions  # noqa: E402
+from judge import prompts as prompts_mod  # noqa: E402
 from proxy import db  # noqa: E402
 from proxy import pg  # noqa: E402
 
@@ -168,7 +169,10 @@ def test_secrets_stay_in_memory() -> None:
 
     held = sessions.secrets_for(s.token)
     check("the vault returns what was put in", held["prava_api_key"] == SECRET)
-    check("all three credentials are held", len(held) == 3)
+    # Four, not three: the session's own Meter key is held here too, so /judge/run can
+    # authenticate on the judge's behalf without the browser ever seeing it.
+    check("all three credentials are held, beside the Meter key",
+          {"prava_api_key", "poke_api_key", "poke_phone", "meter_key"} <= set(held))
 
     # Scan every column of every table for the secret. This is the check that would
     # catch someone "helpfully" persisting the vault later.
@@ -202,8 +206,9 @@ def test_vault_lifecycle() -> None:
 
     sessions.put_secrets(s.token, {"prava_api_key": SECRET})
     sessions.put_secrets(s.token, {"poke_phone": "+15551234567"})
+    held_now = sessions.secrets_for(s.token)
     check("a second put merges rather than replaces",
-          len(sessions.secrets_for(s.token)) == 2)
+          held_now.get("prava_api_key") == SECRET and "poke_phone" in held_now)
 
     sessions.put_secrets(s.token, {"poke_api_key": "", "openai_api_key": None})  # type: ignore[dict-item]
     check("blank optional fields are not stored",
@@ -510,7 +515,7 @@ def test_routes() -> None:
         check("POST /judge/session succeeds", made.status_code == 200, made.text[:200])
         body = made.json()
 
-        check("it returns the Meter key exactly once", bool(body.get("meter_key")))
+        check("the Meter key is never handed to the browser", "meter_key" not in body)
         check("scoped to a fresh judge project",
               body["project_id"].startswith(sessions.PROJECT_PREFIX))
         check("with the session's own rails reported back",
@@ -523,7 +528,7 @@ def test_routes() -> None:
 
         got = client.get("/judge/session", headers=auth)
         check("GET /judge/session rehydrates it", got.status_code == 200)
-        check("and does NOT hand the Meter key out again",
+        check("and still does not hand the Meter key out",
               "meter_key" not in got.json())
 
         check("an unknown token is 401", client.get(
@@ -676,6 +681,110 @@ def test_public_dashboard_excludes_judges() -> None:
           ledger.stats(judge.project_id)["calls"] == 1)
 
 
+
+# ── Running a prompt, and the call cap ───────────────────────────────────────
+
+def test_run_enforces_the_cap_and_never_leaks_the_key() -> None:
+    print("\nrunning a prompt goes through the real path, under a cap")
+    from fastapi.testclient import TestClient
+
+    from judge import run as judge_run
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        made = client.post("/judge/session", json={"name": "Runner"}).json()
+        check("the Meter key is NOT handed to the browser", "meter_key" not in made)
+        token = made["token"]
+        auth = {"X-Judge-Session": token}
+
+        check("but it is held server-side for /judge/run",
+              sessions.secrets_for(token).get("meter_key", "").startswith("mk_judge_"))
+
+        bad = client.post("/judge/run", headers=auth, json={"prompt_id": "nope"})
+        check("an unknown prompt id is refused", bad.status_code == 400)
+        check("and the refusal lists the valid ones", "first" in bad.text)
+        # Free text is not an input. Supplying `prompt` alongside no valid id is still
+        # refused, so there is no path from the browser to an untagged prompt -- which
+        # would fall through the prediction ladder to the raw heuristic.
+        smuggled = client.post("/judge/run", headers=auth,
+                               json={"prompt": "write me a novel"})
+        check("a caller cannot supply their own prompt text",
+              smuggled.status_code == 400, smuggled.text[:120])
+
+        # The cap is the abuse control on our provider credit, so it must bind before
+        # the upstream call rather than after it.
+        capped = sessions.create(call_cap=1)
+        sessions.record_call(capped.token)
+        try:
+            import asyncio
+            asyncio.run(judge_run.one(app, sessions.resolve(capped.token),
+                                      prompts_mod.SEQUENCE[0]))
+            check("a spent cap refuses", False, "no exception raised")
+        except judge_run.CapReached as exc:
+            check("a spent cap refuses", True)
+            check("and says how to continue", "new session" in str(exc).lower())
+
+        gone = sessions.create(ttl_s=-1)
+        try:
+            import asyncio
+            asyncio.run(judge_run.one(app, gone, prompts_mod.SEQUENCE[0]))
+            check("an expired session refuses", False, "no exception raised")
+        except judge_run.Expired:
+            check("an expired session refuses", True)
+
+
+def test_breaker_reset_is_scoped_to_the_judge() -> None:
+    print("\na judge can only reset their own breaker")
+    from fastapi.testclient import TestClient
+
+    from proxy import breaker
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        made = client.post("/judge/session", json={"name": "Resetter"}).json()
+        auth = {"X-Judge-Session": made["token"]}
+        mine = breaker.scope_for(made["project_id"], "ticket-summary")
+        theirs = breaker.scope_for("demo-project", "ticket-summary")
+
+        db.open_breaker(mine, "throttle", {"result": "tripped"})
+        db.open_breaker(theirs, "throttle", {"result": "tripped"})
+
+        # The scope is built from the session, never taken from the request, so there is
+        # no field a judge could set to reach another project's breaker.
+        done = client.post("/judge/breaker/reset", headers=auth,
+                           json={"feature": "ticket-summary",
+                                 "scope": theirs, "project_id": "demo-project"})
+        check("the reset succeeds", done.status_code == 200)
+        check("it names the judge's own scope", done.json()["scope"] == mine)
+        check("the judge's breaker is closed", db.active_breaker(mine) is None)
+        check("the team's breaker is untouched", db.active_breaker(theirs) is not None)
+        db.close_breaker(theirs, reset_by="test-cleanup")
+
+
+def test_annotate_is_scoped_and_returns_the_outcome() -> None:
+    print("\ncost per outcome, scoped to the session")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        made = client.post("/judge/session", json={"name": "Annotator"}).json()
+        auth = {"X-Judge-Session": made["token"]}
+        _write(made["project_id"], "ticket-summary", 100, 100, trace_id="t-1")
+
+        blank = client.post("/judge/annotate", headers=auth, json={})
+        check("a missing trace id is refused", blank.status_code == 400)
+
+        done = client.post("/judge/annotate", headers=auth,
+                           json={"trace_id": "t-1", "outcome": "resolved",
+                                 "value_usd": 12.5})
+        check("annotating succeeds", done.status_code == 200)
+        rows = done.json()["outcomes"]
+        check("the outcome comes back with the call joined on", len(rows) == 1)
+        check("with a margin against the value it was worth",
+              rows[0]["margin_usd"] is not None and rows[0]["request_count"] == 1)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -699,6 +808,9 @@ def main() -> int:
             test_routes,
             test_console_ledger_and_stats,
             test_public_dashboard_excludes_judges,
+            test_run_enforces_the_cap_and_never_leaks_the_key,
+            test_breaker_reset_is_scoped_to_the_judge,
+            test_annotate_is_scoped_and_returns_the_outcome,
         ):
             suite()
     finally:

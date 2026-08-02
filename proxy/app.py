@@ -825,7 +825,10 @@ async def _proxy(request: Request, shape: str) -> Response:
     # a leaked hold counts against the ceiling until its TTL reaps it.
     try:
         provider_name = providers.route(model, shape, request.headers.get("x-meter-provider"))
-        provider = providers.providers()[provider_name]
+        provider = providers.with_key(
+            providers.providers()[provider_name],
+            request.headers.get("x-meter-provider-key"),
+        )
         if not provider.api_key:
             await budget.release(reservation_id)
             return _error(

@@ -217,6 +217,12 @@ def create(
          **{(project_id, f): c for f, c in feature_ceilings.items()}}
     )
 
+    # The raw Meter key is held server-side for the life of the session, in the same
+    # in-memory vault as the judge's credentials. The console never receives it: a key in
+    # a browser is a key in a screenshot, and in every error report that browser sends.
+    # `/judge/run` retrieves it here to authenticate the judge's calls on their behalf.
+    put_secrets(token, {"meter_key": raw_key}, ttl_s=ttl_s)
+
     log.info("judge session created: project=%s ttl=%ss cap=%s ceiling=$%s",
              project_id, ttl_s, call_cap, ceiling_usd_day)
     return Session(

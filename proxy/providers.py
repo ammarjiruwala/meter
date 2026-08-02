@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable
 
 from . import config
@@ -124,7 +124,26 @@ def upstream_path(provider_name: str, shape: str) -> str:
 # client<->proxy socket rather than the proxy<->provider one. A blacklist here would
 # leak whatever header nobody thought to add to it.
 _FORWARD_HEADERS = {"content-type", "accept", "user-agent"}
+# `x-meter-*` headers are ours and stop here -- most are attribution, but
+# `x-meter-provider-key` is a caller's own upstream credential and forwarding it as a
+# stray header alongside the substituted Authorization would be a second copy of a secret
+# on the wire for no reason.
 _FORWARD_PREFIXES = ("anthropic-", "openai-", "x-stainless-")
+
+
+def with_key(provider: Provider, api_key: str | None) -> Provider:
+    """A copy of `provider` authenticating with a caller-supplied key.
+
+    Bring-your-own-key, offered to judges in the console so they can spend their own
+    provider credit instead of ours (PITCH.md Act 1). Returns the provider unchanged when
+    no key is given, so the substituted path and the configured path are the same code.
+
+    No escalation: the key belongs to the caller and is used only to reach the provider
+    they were already reaching. It is never logged and never written to the ledger.
+    """
+    if not api_key:
+        return provider
+    return replace(provider, api_key=api_key)
 
 
 def upstream_headers(provider: Provider, client_headers: Iterable[tuple[str, str]]) -> dict[str, str]:
