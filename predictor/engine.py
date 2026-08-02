@@ -247,10 +247,22 @@ class Predictor:
             # ── 2 & 3. EXPLICIT LENGTH, else TASK STACKING ─────────────────
             raw, method, tasks = scope_mod.estimate(payload, model, self._cfg)
 
-        scope_tokens = max(1, int(round(raw)))
-        # Per-bucket scale fitted on held-out data. Applied to the raw scope, so the
-        # ledger's predicted_scope_tokens stays the clean baseline the learner needs.
+        # Per-bucket scale fitted on held-out data.
         raw *= self._factors.get(bucket, 1.0)
+
+        # `scope_tokens` is recorded AFTER the bucket factor, because it is not merely a
+        # diagnostic -- it is the baseline `refresh.py` fits the history factor against,
+        # as `actual / predicted_scope_tokens`. Recording the pre-bucket value made those
+        # two disagree: the factor was fitted against `scope` but applied to
+        # `scope x bucket`, so the prediction came out as `actual x bucket_factor` --
+        # inflated 2.4x to 4.7x depending on the bucket.
+        #
+        # It survived every offline check because those checks reproduced the same
+        # mistake, multiplying scope by the history factor and omitting the bucket term.
+        # Only driving real prompts through the proxy exposed it (median error 6% offline
+        # against 111% live). The invariant to preserve: whatever the history factor
+        # multiplies is exactly what gets written to the ledger.
+        scope_tokens = max(1, int(round(raw)))
 
         # ── 4. SAFETY BUFFER — now applied to the BOUND, not the prediction ─
         # See DEFAULT_BUFFER. The forecast optimises for accuracy; the ceiling
