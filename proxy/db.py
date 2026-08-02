@@ -107,6 +107,37 @@ CREATE TABLE IF NOT EXISTS meter_keys (
     revoked_at  TEXT
 );
 
+-- One row per "Try it yourself" judge session (PITCH.md §2). A judge gets their own
+-- `projects` row and their own `meter_keys` row, exactly like any other tenant, so
+-- `resolve_key` authenticates them through the unchanged path. This table holds only
+-- what a judge session needs *beyond* being a tenant: how long it lives, how much it may
+-- spend, and the demo-scale breaker floor that lets them actually trip it.
+--
+-- Deliberately a separate table rather than columns on `meter_keys`, for three reasons
+-- (PITCH.md §5): `meter_keys` stores a hash precisely so a leaked ledger yields no
+-- working credentials, it sits on the authentication hot path where a judge-console bug
+-- must not reach, and judge rows are ephemeral where key rows are permanent. Drop this
+-- table and the rest of the product is byte-identical.
+--
+-- NO SECRETS HERE. A judge's Prava merchant key, Linq key and phone live in an
+-- in-process TTL vault (`judge/sessions.py`), never in Postgres — which is what the
+-- console promises them, and what keeps encryption-at-rest and key rotation out of
+-- scope. Safe because the backend is pinned to one instance anyway by budget.py's
+-- in-process reservation lock.
+CREATE TABLE IF NOT EXISTS judge_sessions (
+    token              TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL REFERENCES projects(id),
+    key_id             TEXT NOT NULL,
+    display_name       TEXT,
+    email              TEXT,
+    created_at         TEXT NOT NULL,
+    expires_at         TEXT NOT NULL,
+    breaker_floor_usd  double precision,
+    ceiling_usd_day    double precision,
+    call_cap           INTEGER NOT NULL DEFAULT 25,
+    calls_used         INTEGER NOT NULL DEFAULT 0
+);
+
 -- Per-feature daily ceilings, the `features:` block of meter.yaml. Not in
 -- ARCHITECTURE.md §4, which gives ceilings only at project level — but README.md's own
 -- meter.yaml example sets them per feature, and a project-only ceiling cannot express

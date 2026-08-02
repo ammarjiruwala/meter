@@ -1007,3 +1007,52 @@ onboarding flow** if the dashboard calls `/mandates/create` from the browser wit
 the fix is one line plus a decision about who calls it. Not applied unilaterally.
 
 Owner: Shubh (B18's author) + Tanay (the flow). Cheap either way; needs the decision first.
+
+### M8 — judge ceilings cannot live in `projects`, because every boot wipes them · OPEN — found 2026-08-03
+
+`replace_budgets` ([proxy/db.py](proxy/db.py)) begins each boot with
+
+```sql
+DELETE FROM feature_budgets;
+UPDATE projects SET ceiling_usd_day = NULL, sort_order = NULL;
+```
+
+then re-inserts only what `meter.yaml` names. That is correct and deliberate — its
+docstring is explicit that upserting would make deletion impossible, so a ceiling removed
+from the file must stop being enforced.
+
+It also means **a per-judge ceiling written to `projects.ceiling_usd_day` is silently
+erased at the next restart** (PITCH.md §2.3, build item #3). On Render's free tier that is
+not rare: a spin-down kills the process, so the next cold start re-runs `lifespan` →
+`replace_budgets` → the judge's ceilings are gone. A judge returning after fifteen idle
+minutes finds an empty Team Spend card and no ceilings enforced — and nothing anywhere
+reports a problem.
+
+The contradiction is real rather than cosmetic: `meter.yaml` is the source of truth for
+ceilings **reviewed by pull request**, and a judge session is a ceiling created at runtime
+by someone who cannot open a pull request. Both are legitimate; the current model has room
+for only one.
+
+**Three ways out, none applied unilaterally:**
+
+1. **Exempt judge projects from the wipe** — scope the `UPDATE`/`DELETE` with
+   `WHERE id NOT LIKE 'judge-%'`. Smallest diff, and it keeps one storage location. It
+   does put a magic prefix in a budget function, and it quietly means "the file is the
+   source of truth, except for these".
+2. **Hold judge ceilings in `judge_sessions`** (the column already exists, unused for
+   this) and merge at read time in `db.ceiling_spend`. Keeps `replace_budgets` honest and
+   keeps judge data in the judge table, at the cost of two places to look when a ceiling
+   misbehaves.
+3. **Give `projects` an `owner` discriminator** (`file` vs `runtime`) and wipe only
+   `file`. The most correct model and the largest change — it is the general answer to
+   "budgets declared somewhere other than the file", which is also what per-tenant
+   ceilings would need later.
+
+**Recommendation: 2 for now, 3 if runtime budgets outlive the hackathon.** 2 touches no
+existing behaviour at all, which is the property the judge work is being built to
+(PITCH.md §5: drop the judge table and the product is byte-identical). 1 is tempting and
+is the one that will look obvious to whoever hits this next — worth recording that it was
+considered and passed over, because it makes `replace_budgets` mean something subtly
+different from what it says.
+
+Owner: Shubh (`replace_budgets` and the budget model) + Ammar (the judge flow).
