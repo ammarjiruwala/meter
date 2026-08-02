@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sqlite3
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -31,7 +29,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Must be set before proxy.config is imported — it reads the environment once, at import.
-os.environ["METER_DB_PATH"] = os.path.join(tempfile.mkdtemp(), "meter.db")
+# A throwaway Postgres schema per run, dropped at the end. Under SQLite this was a
+# tempfile; against a hosted database the suites would otherwise write into the same
+# tables the demo and the judges are using, and several checks here delete rows.
+os.environ["DB_SCHEMA"] = "test_treasury_" + uuid.uuid4().hex[:8]
 os.environ["PRAVA_LIVE_MODE"] = "False"      # simulated rail, no network
 os.environ["TREASURER_DRY_RUN"] = "false"    # but do move the local balance
 os.environ["TREASURER_ENABLED"] = "false"    # drive ticks by hand, no timer
@@ -104,8 +105,9 @@ def test_schema() -> None:
     """Phase 1: the tables exist from boot, not on first use."""
     print("\nschema — created at boot, because the dashboard reads it directly")
     conn = db.connect()
-    tables = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {r["table_name"] for r in conn.execute(
+        "SELECT table_name FROM information_schema.tables"
+        " WHERE table_schema = current_schema()")}
     for t in ("wallets", "mandates", "treasury_events"):
         check(f"{t} exists", t in tables)
     # The dashboard opens meter.db read-only and queries this directly. If the table
@@ -113,7 +115,9 @@ def test_schema() -> None:
     rows = conn.execute("SELECT provider, balance_usd FROM wallets").fetchall()
     check("the dashboard's wallets query runs on an empty db", isinstance(rows, list))
 
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(mandates)")}
+    cols = {r["column_name"] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = current_schema() AND table_name = 'mandates'")}
     for c in ("project_id", "external_user_id", "remaining_usd", "recurring_frequency",
               "session_id", "renews_at"):
         check(f"mandates.{c} present (migration applied)", c in cols)
@@ -625,49 +629,47 @@ def test_migration_from_old_schema() -> None:
     exact situation produced "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
     constraint" during development.
     """
-    print("\nmigration from an older database")
-    old = sqlite3.connect(os.path.join(tempfile.mkdtemp(), "old.db"))
-    old.row_factory = sqlite3.Row
-    # The shape mandates had before scoping landed: no UNIQUE, none of the new columns.
-    old.execute("""
-        CREATE TABLE mandates (
-            id TEXT PRIMARY KEY, provider TEXT NOT NULL,
-            max_per_txn_usd REAL NOT NULL, max_daily_usd REAL NOT NULL,
-            cooldown_s INTEGER NOT NULL DEFAULT 300,
-            prava_mandate_id TEXT, active INTEGER NOT NULL DEFAULT 1
-        )""")
-    old.execute("INSERT INTO mandates VALUES ('mnd_legacy','openai',1,1,0,'mdt_leg',1)")
-    old.commit()
+    print("\nmigration onto an older database")
+    conn = db.connect()
 
-    before = {r["name"] for r in old.execute("PRAGMA table_info(mandates)")}
-    check("the old table lacks the new columns", "project_id" not in before)
+    def columns() -> set[str]:
+        return {r["column_name"] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'mandates'")}
 
-    old.executescript(db.SCHEMA)          # no-op on the table, but creates the index
-    db._migrate(old)
-    old.commit()
+    # Simulate the older shape in place by removing a column that scoping added, then
+    # re-running the boot path. Building a whole legacy database instead would mean
+    # pointing the pool at a second schema, and `search_path` is pinned per connection
+    # when the pool creates it — so an in-place drop is both simpler and a truer
+    # rehearsal of what a teammate's database actually looks like.
+    conn.execute("ALTER TABLE mandates DROP COLUMN IF EXISTS customer_id")
+    check("the older table lacks the column", "customer_id" not in columns())
 
-    after = {r["name"] for r in old.execute("PRAGMA table_info(mandates)")}
+    db._schema_ready = False              # force the boot path to run again
+    db.connect()
+
+    check("migration adds it back", "customer_id" in columns())
     for col in ("project_id", "external_user_id", "remaining_usd", "session_id",
-                "renews_at", "valid_until", "customer_id"):
-        check(f"migration adds {col}", col in after)
-    check("the legacy row survives",
-          old.execute("SELECT COUNT(*) FROM mandates").fetchone()[0] == 1)
+                "renews_at", "valid_until"):
+        check(f"{col} still present", col in columns())
 
-    idx = {r[1] for r in old.execute("PRAGMA index_list(mandates)")}
-    check("the unique index is applied retroactively",
-          "idx_mandates_prava_id" in idx, str(idx))
-
-    # The upsert needs that index to resolve ON CONFLICT against.
-    old.execute(
-        "INSERT INTO mandates (id, provider, max_per_txn_usd, max_daily_usd,"
-        " cooldown_s, prava_mandate_id, active) VALUES"
-        " ('mnd_x','openai',1,1,0,'mdt_leg',1)"
-        " ON CONFLICT(prava_mandate_id) DO UPDATE SET active = 0")
-    old.commit()
-    check("ON CONFLICT resolves after migration",
-          old.execute("SELECT active FROM mandates WHERE prava_mandate_id='mdt_leg'"
-                      ).fetchone()[0] == 0)
-    old.close()
+    # The upsert needs the unique index to resolve ON CONFLICT against — the exact
+    # failure that produced "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
+    # constraint" during development.
+    db.upsert_mandate("mdt_migrated", "openai", 1.0, 1.0, 0,
+                      recurring_frequency="monthly", status="active",
+                      approved_amount_usd=1.0, remaining_usd=1.0,
+                      project_id="mig", external_user_id_="meter_mig")
+    db.upsert_mandate("mdt_migrated", "openai", 2.0, 2.0, 0,
+                      recurring_frequency="monthly", status="paused",
+                      approved_amount_usd=1.0, remaining_usd=1.0,
+                      project_id="mig", external_user_id_="meter_mig")
+    row = conn.execute(
+        "SELECT status, max_per_txn_usd FROM mandates WHERE prava_mandate_id = ?",
+        ("mdt_migrated",)).fetchone()
+    check("ON CONFLICT resolves after migration", row["status"] == "paused",
+          str(row))
+    check("and updated rather than duplicated", row["max_per_txn_usd"] == 2.0)
 
 
 def test_concurrent_writers() -> None:
@@ -1134,6 +1136,22 @@ def test_prava_backoff() -> None:
 
 
 def main() -> int:
+    global CLIENT
+    try:
+        return _run()
+    finally:
+        # Drop the throwaway schema whether the run passed or failed. A failed run that
+        # leaves its schema behind turns a hosted database into a graveyard of
+        # `test_treasury_*` after a few days.
+        from proxy import config as pconfig
+        from proxy import pg as ppg
+        try:
+            ppg.drop_schema(pconfig.DB_SCHEMA)
+        finally:
+            ppg.close()
+
+
+def _run() -> int:
     global CLIENT
     with TestClient(app) as client:
         CLIENT = client

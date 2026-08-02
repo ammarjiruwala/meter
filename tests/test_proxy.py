@@ -18,12 +18,15 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
-# Point the ledger at a throwaway file BEFORE proxy.config is imported, so a test run can
-# never touch a real meter.db someone has demo data sitting in.
+# Point the ledger at a throwaway Postgres SCHEMA before proxy.config is imported, so a
+# test run can never touch the tables the demo and the judges are using. Under SQLite this
+# was a tempfile; a hosted database needs the schema-level equivalent, and the run drops it
+# at the end.
 _TMP = tempfile.mkdtemp(prefix="meter-selfcheck-")
-os.environ["METER_DB_PATH"] = str(Path(_TMP) / "test.db")
+os.environ["DB_SCHEMA"] = "test_proxy_" + uuid.uuid4().hex[:8]
 os.environ["METER_KEYS"] = "test_key_alpha:proj-alpha:test,test_key_beta:proj-beta:test"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1470,36 +1473,41 @@ def _row_template(request_id: str, project: str) -> dict:
 
 
 def test_ledger_migration() -> None:
-    """An existing meter.db from Phase 1 must gain the new columns, not break on them."""
+    """A ledger from Phase 1 must gain the new columns, not break on them."""
     print("\nledger migration")
-    import sqlite3
+    conn = db.connect()
 
-    legacy = Path(_TMP) / "legacy.db"
-    conn = sqlite3.connect(str(legacy))
-    # The Phase 1 `requests` table, before any prediction column existed.
-    conn.execute(
-        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts TEXT NOT NULL, "
-        "project_id TEXT NOT NULL, provider TEXT NOT NULL, endpoint TEXT NOT NULL)"
-    )
-    conn.execute(
-        "INSERT INTO requests VALUES ('old_1', '2026-01-01T00:00:00.000000+00:00', "
-        "'proj-alpha', 'openai', '/v1/chat/completions')"
-    )
-    conn.commit()
+    def columns() -> set[str]:
+        return {r["column_name"] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'requests'")}
 
-    db._migrate(conn)
-    conn.commit()
-    columns = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    # Simulate the older shape in place by dropping a prediction column, then re-running
+    # the boot path. Building a separate legacy database would mean a second schema, and
+    # `search_path` is pinned per connection when the pool creates it — so an in-place
+    # drop is both simpler and a truer rehearsal of a teammate's actual database.
+    conn.execute("INSERT INTO requests (id, ts, project_id, provider, endpoint)"
+                 " VALUES ('old_1', '2026-01-01T00:00:00.000000+00:00',"
+                 " 'proj-alpha', 'openai', '/v1/chat/completions')"
+                 " ON CONFLICT (id) DO NOTHING")
+    conn.execute("ALTER TABLE requests DROP COLUMN IF EXISTS predicted_cost_usd")
+    check("the older ledger lacks the column", "predicted_cost_usd" not in columns())
+
+    db._schema_ready = False              # force the boot path to run again
+    db.connect()
+
     for table, column, _decl in db._ADDED_COLUMNS:
         if table == "requests":
-            check(f"migration adds requests.{column}", column in columns)
+            check(f"migration adds requests.{column}", column in columns())
     check(
         "the pre-existing row survives the migration",
-        conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1,
+        conn.execute("SELECT COUNT(*) AS n FROM requests WHERE id = 'old_1'"
+                     ).fetchone()["n"] == 1,
     )
     check(
         "and its new columns read as NULL, not as a wrong number",
-        conn.execute("SELECT predicted_cost_usd FROM requests").fetchone()[0] is None,
+        conn.execute("SELECT predicted_cost_usd FROM requests WHERE id = 'old_1'"
+                     ).fetchone()["predicted_cost_usd"] is None,
     )
 
     db._migrate(conn)  # idempotent — a second boot must not fail on duplicate columns
@@ -1635,6 +1643,19 @@ def test_soft_budget() -> None:
 
 
 def main() -> int:
+    try:
+        return _run()
+    finally:
+        # Drop the throwaway schema whether the run passed or failed, or a hosted
+        # database fills up with `test_proxy_*` after a few days.
+        from proxy import pg as _pg
+        try:
+            _pg.drop_schema(config.DB_SCHEMA)
+        finally:
+            _pg.close()
+
+
+def _run() -> int:
     for suite in (
         test_client_request_id,
         test_soft_budget,

@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -54,13 +55,34 @@ def pool() -> ConnectionPool:
                 "DATABASE_URL is not set. The ledger is Postgres now — set it in .env "
                 "(see .env.example) or the app has no database to talk to."
             )
+        # Create the schema once, on a throwaway connection, before the pool opens.
+        # Doing it in `configure` instead means every connection races the others, and
+        # `CREATE SCHEMA IF NOT EXISTS` is not atomic against concurrent creation — it
+        # loses with `duplicate key value violates unique constraint
+        # "pg_namespace_nspname_index"`, which the pool then treats as a failed
+        # connection.
+        with psycopg.connect(config.DATABASE_URL) as setup:
+            setup.execute(f'CREATE SCHEMA IF NOT EXISTS "{config.DB_SCHEMA}"')
+            setup.commit()
+
         _pool = ConnectionPool(
             config.DATABASE_URL,
             min_size=config.DB_POOL_MIN,
             max_size=config.DB_POOL_MAX,
             # dict rows so `row["cost_usd"]` keeps working exactly as it did against
             # sqlite3.Row. Every call site reads columns by name.
-            kwargs={"row_factory": dict_row},
+            # `prepare_threshold=None` disables server-side prepared statements, for two
+            # independent reasons:
+            #
+            # 1. `_migrate` runs `ALTER TABLE ... ADD COLUMN` at boot, and any cached plan
+            #    built before it fails afterwards with "cached plan must not change result
+            #    type" — a real error we hit, not a hypothetical.
+            # 2. Supabase's transaction pooler cannot support prepared statements at all,
+            #    and the dashboard has to use that pooler on Vercel.
+            #
+            # The cost is negligible here: a round trip to the database is ~28 ms, which
+            # dwarfs whatever re-planning saves.
+            kwargs={"row_factory": dict_row, "prepare_threshold": None},
             configure=_configure,
             open=True,
         )
@@ -70,7 +92,8 @@ def pool() -> ConnectionPool:
 
 
 def _configure(conn) -> None:
-    """Pin every pooled connection to the configured schema.
+    """Pin every pooled connection to the configured schema. The schema itself is
+    created once in `pool()` — see the note there on why not here.
 
     This is what replaced pointing the tests at a throwaway file. Against SQLite each
     test run got its own database for free by setting `METER_DB_PATH` to a tempfile;
@@ -80,8 +103,13 @@ def _configure(conn) -> None:
 
     `DB_SCHEMA` defaults to `public`, so normal runs are unaffected.
     """
-    conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{config.DB_SCHEMA}"')
     conn.execute(f'SET search_path TO "{config.DB_SCHEMA}"')
+    # The pool discards any connection its configure callback leaves inside a
+    # transaction ("connection left in status INTRANS"), and it does so quietly — the
+    # symptom is every connection being thrown away and `getconn` timing out, which
+    # reads like an unreachable database rather than a callback bug. `SET` is
+    # session-scoped, so it survives the commit.
+    conn.commit()
 
 
 def drop_schema(name: str) -> None:
@@ -148,11 +176,87 @@ def fetchall(sql: str, params: tuple | list = ()) -> list[dict[str, Any]]:
         return conn.execute(q(sql), tuple(params)).fetchall()
 
 
+class _Cursor:
+    """What ``conn.execute(...)`` returns: already-executed, ready to be read.
+
+    sqlite3 returns a cursor you then call ``.fetchone()`` on; psycopg's pooled
+    connection is only valid inside a ``with`` block. This runs the statement eagerly,
+    keeps the rows, and hands back the same three attributes the call sites use.
+    """
+
+    __slots__ = ("_rows", "rowcount", "lastrowid")
+
+    def __init__(self, rows: list[dict[str, Any]], rowcount: int,
+                 lastrowid: int | None):
+        self._rows = rows
+        self.rowcount = rowcount
+        self.lastrowid = lastrowid
+
+    def fetchone(self) -> dict[str, Any] | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return self._rows
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _Connection:
+    """A SQLite-shaped facade over the pool.
+
+    This exists to keep the migration reviewable. ``proxy/db.py`` and
+    ``treasury/db.py`` are ~1,000 lines of ``conn = connect()`` / ``conn.execute(...)``
+    / ``conn.commit()``, and rewriting every one of them to borrow from a pool would be a
+    diff nobody can review against a teammate who is editing the same files today — and
+    every rewritten statement is a chance to transpose a parameter.
+
+    So the statements stay exactly as they are and this adapts underneath. Two behaviours
+    differ, both deliberately:
+
+    * ``commit()`` is a no-op. Each statement is its own transaction, which is what the
+      SQLite code did in practice anyway — every write in both modules is a single
+      statement, and the modules document that no transaction is held open across a
+      network call.
+    * ``lastrowid`` is only populated when the statement carries its own ``RETURNING
+      id``. Postgres has no implicit equivalent, so the two call sites that need a
+      generated id ask for it explicitly.
+
+    Not idiomatic, and not meant to be permanent — flattening the call sites onto
+    `execute`/`fetchone`/`fetchall` is a follow-up once the port is proven.
+    """
+
+    def execute(self, sql: str, params: tuple | list = ()) -> _Cursor:
+        with pool().connection() as conn:
+            cur = conn.execute(q(sql), tuple(params))
+            rows = cur.fetchall() if cur.description else []
+            last = None
+            if rows and "id" in rows[0] and "RETURNING" in sql.upper():
+                last = rows[0]["id"]
+            return _Cursor(rows, cur.rowcount, last)
+
+    def executescript(self, sql: str) -> None:
+        executescript(sql)
+
+    def commit(self) -> None:
+        """No-op: every statement above already committed."""
+
+    def close(self) -> None:
+        """No-op: connections belong to the pool, not to callers."""
+
+
+CONNECTION = _Connection()
+
+
 def table_exists(name: str) -> bool:
     """Whether a table is present. Replaces the `sqlite_master` lookups."""
     row = fetchone(
         "SELECT 1 AS present FROM information_schema.tables"
-        " WHERE table_schema = 'public' AND table_name = ?",
+        # `current_schema()`, not a hardcoded 'public' — the connection's search_path is
+        # pinned to DB_SCHEMA, and a test run uses a throwaway one. Hardcoding 'public'
+        # made these report "absent" in any other schema, which silently skipped the
+        # whole migration rather than failing.
+        " WHERE table_schema = current_schema() AND table_name = ?",
         (name,),
     )
     return row is not None
@@ -162,7 +266,7 @@ def column_exists(table: str, column: str) -> bool:
     """Whether a column is present. Replaces `PRAGMA table_info`."""
     row = fetchone(
         "SELECT 1 AS present FROM information_schema.columns"
-        " WHERE table_schema = 'public' AND table_name = ? AND column_name = ?",
+        " WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
         (table, column),
     )
     return row is not None

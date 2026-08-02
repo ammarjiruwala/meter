@@ -43,7 +43,7 @@ from treasury import prava as treasury_prava
 from treasury import routes as treasury_routes
 from treasury import treasurer
 
-from . import breaker, budget, config, db, providers
+from . import breaker, budget, config, db, pg, providers
 from .pricing import Usage, estimate_from_bytes, price
 
 # Optional at import time on purpose. `predictor` pulls in tiktoken and numpy, and a
@@ -220,6 +220,10 @@ async def lifespan(app: FastAPI):
         if _capture_tasks:
             await asyncio.wait(set(_capture_tasks), timeout=5.0)
         await app.state.http.aclose()
+        # Close the Postgres pool last: the capture tasks above may still be writing
+        # ledger rows, and a closed pool would drop exactly the rows written during
+        # shutdown — the ones you most want after a crash.
+        pg.close()
 
 
 async def _soft_budget_loop() -> None:
