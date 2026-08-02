@@ -99,6 +99,25 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
+*   **Judge experience: PLANNED, NOT BUILT** — [PITCH.md](PITCH.md) (Ammar, 2026-08-03) is
+    the agreed design for asynchronous judging: a public dashboard anyone can read, plus an
+    opt-in **"Try it yourself"** session scoped to `judge-<nonce>` with the judge's own
+    Prava merchant key, Linq key and phone. Prompts are **templated and not editable** —
+    accuracy is keyed on `(project, feature)`, so free text falls to the raw heuristic
+    (~65–80% error against ~10%) and would make a working product look broken.
+    **Two organizer confirmations it rests on (2026-08-03): every judge has their own Prava
+    *merchant* key** — which closes the gap where a judge could not see their own charge in
+    their own wallet (EXPERIENCE #44), because they become the merchant — **and a judge's
+    Linq key can message their own phone.**
+    Four backend pieces do not exist yet and each blocks an act: **per-project breaker
+    floor** (`BREAKER_WINDOW_USD` is process-global, so the $20 deployed floor is
+    unreachable by hand and cannot be lowered per judge), **DB-backed session meter keys**
+    (`METER_KEYS` is env-only), **per-project ceilings** (`meter.yaml` names `demo-project`
+    alone, so a judge's Team Spend card renders nothing), and **per-call Prava auth**
+    (`treasury/prava.py` builds `HEADERS` at module import, so one key is fixed per
+    process). `TREASURER_ENABLED` must stay **off** for judge sessions — a background loop
+    was caught charging a shared wallet every 30s (EXPERIENCE #43).
+
 *   **Deployment: LIVE** (Ammar, 2026-08-02). Backend **https://meter-proxy.onrender.com**
     (Render free, Singapore, Docker), dashboard **https://meter-three-beta.vercel.app**,
     ledger on **Supabase** ap-south-1. **Render, not Fly.io** — Fly now requires a card and
