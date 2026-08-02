@@ -302,14 +302,16 @@ export function Home() {
             <div className="overview-layout">
               <div className="overview-text">
                 <p className="section-label reveal">What Meter is</p>
+                {/* The <em> is the gradient half of the heading (.overview h2 em),
+                    so the emphasis has to sit on a whole sentence rather than a
+                    fragment — the colour break reads as the second beat. */}
                 <h2 className="reveal d1">
-                  A treasury agent that <em>happens to make charts.</em>
+                  Your AI spend has a treasurer. <em>It never sleeps.</em>
                 </h2>
                 <p className="lede reveal d2">
-                  Every observability tool shows you the graph. Meter pays the
-                  bill. It sits in the request path, sees every AI call your
-                  company makes, and quietly does the work no dashboard has ever
-                  done.
+                  Meter predicts inference costs before they happen, enforces
+                  budgets per feature, and autonomously tops up provider credits
+                  — so you don&apos;t have to worry about running out at 3am.
                 </p>
                 <div className="live-badge reveal d3">
                   <span className="live-dot" />
