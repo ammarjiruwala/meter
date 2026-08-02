@@ -27,8 +27,11 @@ if [ $# -lt 2 ]; then
   echo "usage: $0 <feature-tag> \"<prompt>\"" >&2
   echo >&2
   echo "Feature tags with learned history:" >&2
-  sqlite3 meter.db "SELECT DISTINCT feature FROM requests WHERE id LIKE 'seed_%' ORDER BY 1;" 2>/dev/null \
-    | sed 's/^/  /' >&2
+  python3 -c "
+import sys; sys.path.insert(0, '.')
+from proxy import pg
+for r in pg.fetchall(\"SELECT DISTINCT feature FROM requests WHERE feature IS NOT NULL ORDER BY 1\"):
+    print('  ' + r['feature'])" 2>/dev/null >&2
   exit 2
 fi
 
@@ -68,7 +71,7 @@ RESP=$(curl -s "${URL}/v1/chat/completions" \
   -d "$BODY")
 
 python3 - "$RESP" "$TAG" "$MAXTOK" <<'PY'
-import json, sqlite3, sys, textwrap
+import json, sys, textwrap
 
 resp, tag, maxtok = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
@@ -82,12 +85,13 @@ usage = d["usage"]
 print("\n" + textwrap.shorten(d["choices"][0]["message"]["content"], 300))
 print()
 
-conn = sqlite3.connect("meter.db")
-row = conn.execute(
+sys.path.insert(0, ".")
+from proxy import pg
+r = pg.fetchone(
     "SELECT predicted_output_tokens, output_tokens, predicted_cost_usd, cost_usd, "
-    "history_factor FROM requests WHERE id NOT LIKE 'seed_%' ORDER BY ts DESC LIMIT 1"
-).fetchone()
-conn.close()
+    "history_factor FROM requests WHERE id NOT LIKE 'seed_%%' ORDER BY ts DESC LIMIT 1")
+row = (None if r is None else (r["predicted_output_tokens"], r["output_tokens"],
+                               r["predicted_cost_usd"], r["cost_usd"], r["history_factor"]))
 
 print(f"  feature tag     {tag}")
 print(f"  input tokens    {usage['prompt_tokens']}")

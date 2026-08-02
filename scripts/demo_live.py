@@ -30,7 +30,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -170,7 +169,7 @@ def main() -> int:
     ap.add_argument("--url", default=None, help="hit a running proxy instead of in-process")
     ap.add_argument("--freeform", action="store_true",
                     help="hand-written phrasings instead of template fillings")
-    ap.add_argument("--db", default=None)
+    ap.add_argument("--db", default=None, help="ignored; kept so old commands still run")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -186,8 +185,9 @@ def main() -> int:
     if not plan:
         sys.exit("no prompts built — check --tags")
 
-    db = args.db or tempfile.mktemp(suffix=".db")
-    os.environ["METER_DB_PATH"] = db
+    # The ledger is a shared Postgres database now; there is no per-run file to point
+    # at. --db is accepted and ignored so older invocations do not break.
+    db = args.db or "(postgres)"
 
     if args.dry_run:
         for rec in plan:
@@ -199,28 +199,26 @@ def main() -> int:
 
     # Seed so the per-feature factors exist. Without history every prediction is the
     # raw heuristic and the exercise measures the wrong thing.
-    subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py"), "--db", db],
+    subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py")],
                    capture_output=True, check=False)
 
     from predictor.refresh import refresh_now
-    refresh_now(db)
+    refresh_now()
 
     print(f"sending {len(plan)} prompts through the proxy", end="", flush=True)
     key, project = meter_key()
     print(f"using meter key {key!r} (project {project})")
     results = asyncio.run(run(plan, args.url, args.model, key))
 
-    # Read the proxy's own numbers back out of the ledger.
-    import sqlite3
-
+    # Read the proxy's own numbers back out of the ledger. Postgres now, so the
+    # placeholder is %s rather than ? and rows already come back as dicts.
     import numpy as np
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    led = {r["trace_id"]: dict(r) for r in conn.execute(
+
+    from proxy import pg
+    led = {r["trace_id"]: r for r in pg.fetchall(
         "SELECT trace_id, feature, predicted_output_tokens, output_tokens, "
         "history_factor, cost_usd, predicted_cost_usd FROM requests "
-        "WHERE id NOT LIKE 'seed_%'")}
-    conn.close()
+        "WHERE id NOT LIKE 'seed_%%' AND trace_id IS NOT NULL")}
     for i, rec in enumerate(results, 1):
         row = led.get(f"demo-{i}")
         if row:

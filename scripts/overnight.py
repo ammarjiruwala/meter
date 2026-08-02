@@ -218,9 +218,8 @@ def stage_verify() -> dict:
 
 
 def stage_seed() -> dict:
-    db = str(REPO / "meter.db")
-    proc = subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py"),
-                           "--db", db], capture_output=True, text=True)
+    proc = subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py")],
+                          capture_output=True, text=True)
     tail = proc.stdout.strip().splitlines()[-1:] if proc.stdout else []
     log(f"seed: rc={proc.returncode} {tail}")
     return {"returncode": proc.returncode, "stdout": proc.stdout[-2000:]}
