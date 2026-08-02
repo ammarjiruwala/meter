@@ -24,6 +24,7 @@ Owner: Tanay (Frontend & DX).
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import Any
@@ -56,6 +57,35 @@ def reset_cooldown() -> None:
         _last_sent.clear()
 
 
+def _money(value: float) -> str:
+    """Format a dollar amount so it is never misleadingly zero.
+
+    Two decimals is right for production money and wrong for this product's demo scale.
+    WALKTHROUGH §6 tells you to restart with `BREAKER_WINDOW_USD=0.0001` — because real
+    templated traffic is far too cheap to trip a $20 floor — and the resulting alert then
+    read:
+
+        $0.00 in 5 min against a $0.00 floor
+
+    Both numbers were real ($0.0001 each) and both rounded away, so the message's only
+    two quantitative claims became "nothing happened, against a threshold of nothing".
+    That is the text on the phone held up as evidence the system alerts a human, produced
+    by following the guide exactly.
+
+    So: keep two decimals once there are dollars to show, and widen below that until the
+    figure is actually visible.
+    """
+    if value >= 1 or value == 0:
+        return f"${value:,.2f}"
+    # Enough places to show two significant figures, capped so it stays readable, then
+    # trimmed of trailing zeros so $0.0001 does not print as $0.00010.
+    places = min(max(2, -int(math.floor(math.log10(abs(value)))) + 1), 6)
+    text = f"{value:,.{places}f}".rstrip("0")
+    if len(text.split(".")[1]) < 2:          # never fewer than two decimals
+        text = f"{value:,.2f}"
+    return f"${text}"
+
+
 def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:
     """The message body.
 
@@ -81,7 +111,7 @@ def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:
             if isinstance(window_s, (int, float))
             else "the window"
         )
-        lines.append(f"${spend:,.2f} in {window} against a ${floor:,.2f} floor")
+        lines.append(f"{_money(spend)} in {window} against a {_money(floor)} floor")
 
     ratio = metric.get("burst_ratio")
     if isinstance(ratio, (int, float)):
@@ -212,7 +242,7 @@ def compose_budget(scope: str, spend_usd: float, ceiling_usd: float) -> str:
     return "\n".join(
         [
             f"⚠️ Meter: {scope} is at {pct:.0f}% of its daily ceiling",
-            f"${spend_usd:,.2f} of ${ceiling_usd:,.2f} — ${remaining:,.2f} left",
+            f"{_money(spend_usd)} of {_money(ceiling_usd)} — {_money(remaining)} left",
             "Requests will be refused with 429 when it is reached.",
         ]
     )

@@ -1387,6 +1387,75 @@ happens on stage or at a booth, and they cannot be guessed.
 
 ---
 
+#### 45. One charge per cycle: settled, with evidence — **`JUDGE` · CONFIRMED, NOT A DEFECT**
+
+The repo contradicted itself, so this was tested rather than argued.
+
+`treasury/db.py` said a second charge in a cycle is declined by Visa. The mandate-scoping
+plan said the opposite — *"Monthly mandates carry `renewsAt` — the pool renews per cycle,
+so the earlier 'one charge per cycle' worry was unfounded."* Both authors had looked at
+real data and reached opposite conclusions.
+
+**Three independent confirmations now agree it is real, and it is Prava's rule, not ours:**
+
+1. **The docs, twice.** `concepts/mandates.md` and `concepts/guardrails.md` both list
+   Frequency as *"`one_time`, or recurring `weekly`/`monthly`/`yearly` — **one charge per
+   cycle**, always locked to a single merchant."* `mandates.md` adds that scheduled
+   auto-charging is *"coming next; for now the agent still initiates each charge within
+   the cycle."*
+2. **Visa, directly.** A deliberate $1 test charge against a mandate with $12 of headroom
+   and one completed charge returned HTTP 200 with `status: failed`:
+   `Visa did not return COMPLETED (status DECLINED): Purchase already made in the current
+   payment cycle for transaction: tli_01KZ1NZAA731…`. No money moved; `remaining` and
+   `spent` were unchanged.
+3. **Our filter already implemented it correctly** — `remaining_usd >= approved_amount_usd`.
+
+**The nuance that produced the disagreement.** A *reported* charge consumes the cycle; a
+*minted credential* does not. Mandates on this account carry three `$2.00` charges each
+still sitting at `awaiting_result` — charged, never settled, cycle never locked. Those
+look like repeat purchases and are not. Skipping the report is not a workaround: an
+unsettled charge is precisely what Prava's go-live checklist calls an unverified
+integration.
+
+**Judge relevance:** each judge gets **one top-up per mandate per month**. That is a
+platform constraint with no code fix, so it belongs in the UI copy:
+
+> *Each mandate allows one purchase per monthly cycle. To top up again, create another
+> mandate.*
+
+Recorded in `treasury/db.py` beside the filter so the next person does not re-derive it
+from partial evidence a third time.
+
+## Fixed on demo eve — 2026-08-02
+
+Everything actionable from the run above was fixed the same night. Test totals went
+**601 → 646** checks.
+
+| # | What | Where |
+| --- | --- | --- |
+| 38 | JSON body on a money route returned 200 and did nothing | `treasury/routes.py` — now 415 |
+| 39 | Selection preferred the mandates that cannot mint credentials | `treasury/db.py`, `treasury/config.py` |
+| 40 | One stuck row permanently disabled every top-up | `treasury/db.py` |
+| 41 | Cooldown renewed itself — a livelock in the payment path | `treasury/db.py` |
+| 28 | A learned factor could silently vanish for ten minutes | `predictor/refresh.py` |
+| 14 | A new project inherited no learned history at all | `predictor/engine.py`, `refresh.py` |
+| 35 | Breaker alert rendered demo-scale money as `$0.00` | `alerts/poke.py` |
+| 23 | Boot log named a SQLite file that does not exist | `proxy/app.py` |
+| 8, 12, 18, 19, 20, 21, 26, 31, 33 | Guide defects — free-tier claim, missing shell prerequisite, `curl` alias, BOM on piped output, wrong dashboard URL, renamed cards, silent `try.sh`, PowerShell env syntax, pacing contradiction | `WALKTHROUGH.md` |
+
+**Still open, deliberately** — these are decisions rather than defects:
+
+* **#43** — another machine's Treasurer is acting on `demo-project`'s wallet. Not fixable
+  in our code; it needs one designated Treasurer host. **Team decision before the demo.**
+* **#44** — a judge cannot see their own charge in their own Prava wallet, because we
+  built the merchant integration rather than the agent-linking flow. Either say so on
+  stage, or build linking after the hackathon.
+* **#36** — the seeded history is timestamped over a trailing 6h window, and the budget
+  card measures a trailing 24h. **Re-run `python scripts/seed_demo.py` on demo morning**
+  or the Team Spend card will read near zero as the seed ages out.
+* **#29, #37** — per-feature error ranges are narrower than run-to-run variance; the
+  `meter.yaml` mapping trap is documented but untested.
+
 ## What this says about judge onboarding
 
 _To be written once the run is complete. The questions it needs to answer:_

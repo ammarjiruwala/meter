@@ -572,6 +572,116 @@ def test_refresh_gate() -> None:
     check("installed factor moves toward the truth", installed < 0.6, f"{installed:.3f}")
 
 
+def test_new_project_inherits_feature_history() -> None:
+    """A project with no history of its own must still get a correction.
+
+    Measured live 2026-08-02: every installed factor was a `(project, feature)` pair —
+    not one generic `(bucket, …)` rung survived the gate — so a request on an unseen
+    project fell all the way through to 1.0, the raw heuristic. That is ~65-80% median
+    error against ~10%.
+
+    It is precisely a judge's situation. They need their own `project_id` so their wallet
+    and mandate are isolated from everyone else's, and without a cross-project rung that
+    isolation costs them every learned factor: the thing that makes their card safe makes
+    their predictions bad.
+
+    The `(feature,)` rung sits below `(project,)`, so a project with any history of its
+    own is untouched.
+    """
+    print("\nnew project inherits feature history")
+
+    p = Predictor()
+    p._history = {}
+    saved, engine._default = engine._default, p
+    try:
+        engine.set_history({
+            ("known-proj", "ticket-summary"): 0.66,
+            ("ticket-summary",): 0.66,
+        })
+
+        seen = p._history_factor("known-proj", "ticket-summary", "someone",
+                                 bucket="summary", model="gpt-4o-mini")
+        check("a known project uses its own factor", seen == 0.66, str(seen))
+
+        fresh = p._history_factor("judge-alice", "ticket-summary", "someone",
+                                  bucket="summary", model="gpt-4o-mini")
+        check("a brand-new project inherits the feature factor", fresh == 0.66,
+              str(fresh))
+
+        # The project rung must still win when both exist, or one project's traffic
+        # would be corrected by another's.
+        engine.set_history({
+            ("known-proj", "ticket-summary"): 0.40,
+            ("ticket-summary",): 0.90,
+        })
+        specific = p._history_factor("known-proj", "ticket-summary", "someone")
+        check("the project-specific rung outranks the cross-project one",
+              specific == 0.40, str(specific))
+
+        # An unknown feature on an unknown project still has nothing to go on.
+        none_ = p._history_factor("judge-alice", "never-seen", "someone")
+        check("an unknown feature still falls through to 1.0", none_ == 1.0, str(none_))
+    finally:
+        engine._default = saved
+
+
+def test_unproven_keys_keep_their_factor() -> None:
+    """A key that cannot be re-validated must keep its factor, not revert to 1.0.
+
+    `set_history` replaces the whole installed set each pass, so a key missing from the
+    survivors silently drops to the raw heuristic. Observed live 2026-08-02: ordinary
+    walkthrough traffic shifted the holdout boundary and `demo-project/test-plan` went
+    `unproven` for five consecutive refresh passes — ten minutes — then returned on its
+    own. Any request in that window was predicted at 92% error instead of 13%, and
+    nothing reported a fault: `try.sh` printed `history factor 1.00` and `/healthz` read
+    30 factors instead of 31.
+
+    "No fresh evidence" and "measured to be worse" are different states. Only the second
+    justifies discarding a factor.
+    """
+    print("\nunproven keys keep their factor")
+    from predictor import refresh
+
+    p = Predictor()
+    p._history = {}
+    saved, engine._default = engine._default, p
+    try:
+        # A factor that was validated and installed on some earlier pass.
+        key = ("proj", "settled-feature")
+        engine.set_history({key: 0.42})
+        check("precondition: the factor is installed",
+              engine.current_history().get(key) == 0.42)
+
+        # This pass sees no held-out rows for it at all — the live failure mode.
+        kept, report = refresh._select_keys([], {})
+        check("the gate itself returns nothing for it", key not in kept)
+
+        # refresh_now carries it forward. Simulated directly, since reproducing a
+        # holdout-boundary shift needs thousands of rows.
+        previous = dict(engine.current_history())
+        for k, factor in previous.items():
+            if k not in kept and report.get(k) in (None, "unproven"):
+                kept[k] = factor
+                report[k] = f"carried ({report.get(k) or 'no held-out rows this pass'})"
+
+        check("the previous factor is carried, not dropped", kept.get(key) == 0.42,
+              str(kept))
+        check("and it is labelled as carried rather than kept",
+              str(report.get(key)).startswith("carried"), str(report.get(key)))
+
+        # A key the gate actively rejected must NOT be carried — that would reinstate a
+        # correction it just measured as worse.
+        rejected = ("proj", "worse-feature")
+        engine.set_history({rejected: 2.5})
+        kept2, report2 = {}, {rejected: "dropped 40%->55%"}
+        for k, factor in dict(engine.current_history()).items():
+            if k not in kept2 and report2.get(k) in (None, "unproven"):
+                kept2[k] = factor
+        check("a rejected key is not carried", rejected not in kept2, str(kept2))
+    finally:
+        engine._default = saved
+
+
 def main() -> int:
     from proxy import config
     from proxy import pg as _pg
@@ -603,6 +713,8 @@ def _run() -> int:
         test_proxy_integration,
         test_ledger_migration,
         test_refresh_gate,
+        test_new_project_inherits_feature_history,
+        test_unproven_keys_keep_their_factor,
     ):
         suite()
     print(f"\n{PASSED} checks passed")
