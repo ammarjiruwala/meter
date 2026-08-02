@@ -300,7 +300,10 @@ async def judge_runaway(
     rather than a key-wide cut.
     """
     session = _require(x_judge_session)
-    attempts = min(max(int(body.get("attempts") or 6), 1), 10)
+    # Headroom over the ~3 calls the floor needs, so a cheaper-than-usual response
+    # cannot leave the act finishing without a trip -- the one outcome that makes a
+    # working breaker look broken.
+    attempts = min(max(int(body.get("attempts") or 8), 1), 12)
 
     calls: list[dict[str, Any]] = []
     for _ in range(attempts):

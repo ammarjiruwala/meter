@@ -185,6 +185,11 @@ export function Home() {
             <a href="#usage" className="glass-pill" onClick={jump("usage")}>
               How to use
             </a>
+            {/* Full page load into the predictor explainer, which has its own root
+                layout — same reason as the dashboard link below: no stylesheet crosses. */}
+            <Link href="/how-it-works" className="glass-pill">
+              How prediction works
+            </Link>
             {/* Next turns this into a full page load by itself — the dashboard is a
                 separate root layout — which is what we want: no stylesheet crosses. */}
             <Link href="/dashboard" className="glass-cta">

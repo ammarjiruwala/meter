@@ -743,6 +743,16 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
             keys, `POST /v1/chat/completions`, `meter.yaml` ceilings and `POST /v1/annotate` all
             work and are verified, which is unusual for a hackathon landing page.
 
+    *   **`/how-it-works` — the predictor explainer: SHIPPED** (Shubh, 2026-08-03).
+        `dashboard/src/app/(predictor)/` + `dashboard/src/components/predictor/PredictorPage.tsx`,
+        reached from a pill in the homepage nav. A scroll-driven walkthrough of *why* pre-flight
+        cost prediction is the novel part — the argument the homepage does not have room for.
+        **Its own route group with its own root layout and `predictor.css`**, so no stylesheet
+        crosses into the homepage or the dashboard; the nav link is a full page load for the
+        same reason the `/dashboard` link is. Adds two dependencies used nowhere else, `gsap`
+        and `lenis`; both animation paths are skipped under `prefers-reduced-motion`. The page
+        is static-prerendered and reads no data — nothing here touches the ledger.
+
 *   **Alerts (Poke / Linq): WORKING, VERIFIED LIVE.** A real iMessage was delivered end to end
     through the shipping code path on 2026-08-01 (Linq returned `202 Accepted`). `alerts/` — a sibling
     package to `treasury` and `predictor`. `proxy.breaker.notify()` still logs unconditionally
