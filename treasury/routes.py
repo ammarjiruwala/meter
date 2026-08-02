@@ -309,7 +309,8 @@ async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
     return synced
 
 
-@router.post("/mandates/create", dependencies=[Depends(_no_body)])
+@router.post("/mandates/create",
+             dependencies=[Depends(_authed_key), Depends(_no_body)])
 async def create_mandate(
     project_id: str = "demo-project",
     amount_usd: float | None = None,
@@ -400,7 +401,8 @@ async def mandate_status(project_id: str = "demo-project",
     }
 
 
-@router.post("/mandates/sync", dependencies=[Depends(_no_body)])
+@router.post("/mandates/sync",
+             dependencies=[Depends(_authed_key), Depends(_no_body)])
 async def sync_mandates(project_id: str = "demo-project",
                         external_user_id: str | None = None):
     """Refresh this project's mandates from Prava.

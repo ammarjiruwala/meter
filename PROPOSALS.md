@@ -1088,3 +1088,20 @@ The rule this establishes, stated so the next person does not have to infer it:
 one for a tenant that did not exist when it was written.** `budget.register_ceilings` only
 ever adds, so a runtime caller can never widen or remove a ceiling that was reviewed in a
 pull request.
+
+**RESOLVED 2026-08-03 (Ammar): both routes now require a Meter key.**
+
+The objection that stopped this being applied when it was filed — that it would break the
+self-serve onboarding flow if a browser called `/mandates/create` without a key — no longer
+holds. The judge console does not call these over HTTP at all: `judge/routes.py` imports
+`create_mandate` and `sync_mandates` and calls them as Python functions, inside
+`prava.use_api_key(the judge's own merchant key)`. FastAPI dependencies do not apply to a
+direct call, so the console path is unaffected and the HTTP surface is closed.
+
+Nothing documented breaks either: SETUP.md §8 already sends
+`Authorization: Bearer mk_dev_local` on both commands.
+
+What this actually shuts is the reason M7 was filed — an unauthenticated caller on a public
+URL exhausting the sandbox `/v1/sessions` allowance the Treasurer depends on, and filling
+`mandates` with pending rows. That matters more now than when it was written, because the
+console drives this route and the deployment is public.

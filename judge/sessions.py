@@ -69,6 +69,26 @@ DEFAULT_CALL_CAP = 25
 # than letting a judge discover staged state we did not mention (PITCH.md §2.1).
 WALLET_SEED_USD = 0.05
 
+# Abuse control on session creation.
+#
+# `POST /judge/session` is unauthenticated -- it has to be, since a judge arrives with
+# nothing -- and every session it mints grants `DEFAULT_CALL_CAP` calls against whichever
+# provider key is in play, which is ours unless the judge brought their own. The
+# per-session cap bounds one judge; these bound everyone.
+#
+# Deliberately generous. A real judging round is dozens of sessions, not thousands, so
+# these are sized to stop a script rather than to ration honest use.
+MAX_LIVE_SESSIONS = 250
+MAX_SESSIONS_PER_IP_PER_HOUR = 8
+
+
+class TooManySessions(Exception):
+    """Session creation refused by an abuse limit. Carries a message for the caller."""
+
+
+# client ip -> [monotonic timestamps of recent creations]
+_recent_by_ip: dict[str, list[float]] = {}
+
 # The feature tags the console offers, each with its own ceiling.
 #
 # They exist so the Team Spend card has something to render — `meter.yaml` names only
@@ -148,10 +168,43 @@ def _row_to_session(row: Any, meter_key: str | None = None) -> Session:
     )
 
 
+def _check_limits(client_ip: str | None) -> None:
+    """Refuse a new session if either abuse limit is reached.
+
+    Counted over *live* sessions rather than all of them: expired rows stay as the audit
+    record of who ran what, and letting them count towards the cap would mean the console
+    stops working permanently a few hundred judges in.
+    """
+    now = time.monotonic()
+    if client_ip:
+        with _lock:
+            seen = [t for t in _recent_by_ip.get(client_ip, []) if now - t < 3600]
+            if len(seen) >= MAX_SESSIONS_PER_IP_PER_HOUR:
+                raise TooManySessions(
+                    "That is a lot of sessions from one place in an hour. If you are "
+                    "genuinely evaluating this, email us and we will lift it — the limit "
+                    "is there because each session can spend our provider credit."
+                )
+            seen.append(now)
+            _recent_by_ip[client_ip] = seen
+
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT count(*) AS n FROM judge_sessions WHERE expires_at > ?",
+        (datetime.now(timezone.utc).isoformat(),),
+    ).fetchone()
+    if row is not None and int(dict(row)["n"]) >= MAX_LIVE_SESSIONS:
+        raise TooManySessions(
+            "Too many sessions are open right now. Sessions expire on their own — "
+            "try again shortly."
+        )
+
+
 def create(
     display_name: str | None = None,
     email: str | None = None,
     *,
+    client_ip: str | None = None,
     ttl_s: int = SESSION_TTL_S,
     breaker_floor_usd: float = DEFAULT_BREAKER_FLOOR_USD,
     ceiling_usd_day: float = DEFAULT_CEILING_USD_DAY,
@@ -173,6 +226,11 @@ def create(
     `judge_sessions` is what the console reports back; `projects` is what enforces it.
     """
     from proxy import budget
+
+    _check_limits(client_ip)
+    # Sweeping here rather than only on a timer means the vault cannot grow unbounded
+    # under exactly the traffic that fills it.
+    purge_expired()
 
     conn = db.connect()
     feature_ceilings = (

@@ -889,6 +889,89 @@ def test_our_mandate_cannot_be_charged_by_a_judge() -> None:
           != tdb.wallet_id_for("demo-project", "openai"))
 
 
+
+# ── Abuse limits and credential hygiene ──────────────────────────────────────
+
+def test_session_creation_is_rate_limited() -> None:
+    print("\nsession creation is bounded, because the route cannot be authenticated")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    per_ip = sessions.MAX_SESSIONS_PER_IP_PER_HOUR
+    sessions._recent_by_ip.clear()
+
+    with TestClient(app) as client:
+        codes = [client.post("/judge/session", json={"name": f"n{i}"}).status_code
+                 for i in range(per_ip + 2)]
+        check(f"the first {per_ip} from one address succeed",
+              codes[:per_ip] == [200] * per_ip, str(codes))
+        check("and the rest are refused with 429",
+              set(codes[per_ip:]) == {429}, str(codes))
+
+        refused = client.post("/judge/session", json={"name": "over"})
+        check("the refusal explains itself rather than just failing",
+              "provider credit" in refused.text, refused.text[:160])
+
+    sessions._recent_by_ip.clear()
+    check("clearing the window lets a genuine judge back in",
+          sessions.create(client_ip="1.2.3.4") is not None)
+
+    # Expired sessions must not count towards the live cap, or the console would stop
+    # working permanently a few hundred judges in.
+    before = sessions.create(ttl_s=-1)
+    check("an expired session still exists as an audit record",
+          sessions.resolve(before.token) is not None)
+    check("but does not block new ones",
+          sessions.create(client_ip="5.6.7.8") is not None)
+
+
+def test_credentials_do_not_outlive_their_ttl() -> None:
+    print("\nthe credential vault is actually swept, not just sweepable")
+    stale = sessions.create()
+    sessions.put_secrets(stale.token, {"prava_api_key": SECRET}, ttl_s=0)
+    time.sleep(0.01)
+    check("the secret is still resident before a sweep",
+          stale.token in sessions._vault)
+
+    # `create()` sweeps, so the vault cannot grow under the traffic that fills it.
+    sessions._recent_by_ip.clear()
+    sessions.create(client_ip="9.9.9.9")
+    check("creating a session sweeps expired credentials",
+          stale.token not in sessions._vault)
+
+    # And the proxy runs the same sweep on a timer, for a console nobody is using.
+    import inspect
+
+    from proxy import app as proxy_app
+    src = inspect.getsource(proxy_app.lifespan)
+    check("the proxy sweeps on a timer too", "purge_expired" in src)
+    check("and cancels the sweeper on shutdown", "sweeper" in src)
+
+
+def test_mandate_routes_require_a_key() -> None:
+    """PROPOSALS.md M7: an open /mandates/create burns the Prava allowance."""
+    print("\nthe mandate routes are no longer unauthenticated")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        for path in ("/mandates/create", "/mandates/sync"):
+            bare = client.post(path)
+            check(f"POST {path} without a key is refused",
+                  bare.status_code in (401, 403), f"got {bare.status_code}")
+
+    # The console is unaffected: it calls these as functions, not over HTTP, so the
+    # dependency never runs. Verified by import rather than by a live Prava call.
+    from judge import routes as judge_routes
+    src = __import__("inspect").getsource(judge_routes)
+    check("the console imports create_mandate directly",
+          "from treasury.routes import create_mandate" in src)
+    check("and sync_mandates directly",
+          "from treasury.routes import sync_mandates" in src)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -918,6 +1001,9 @@ def main() -> int:
             test_the_treasurer_loop_never_touches_a_judge_wallet,
             test_treasury_act_is_scoped_and_defaults_dry,
             test_our_mandate_cannot_be_charged_by_a_judge,
+            test_session_creation_is_rate_limited,
+            test_credentials_do_not_outlive_their_ttl,
+            test_mandate_routes_require_a_key,
         ):
             suite()
     finally:

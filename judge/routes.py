@@ -84,7 +84,10 @@ def _public(session: sessions.Session) -> dict[str, Any]:
 
 
 @router.post("/session")
-async def create_session(body: dict[str, Any] = Body(default_factory=dict)):
+async def create_session(
+    request: Request,
+    body: dict[str, Any] = Body(default_factory=dict),
+):
     """Provision a judge their own isolated tenant. Act 1 of PITCH.md.
 
     Name and email are the only fields asked for up front. Everything else — provider
@@ -95,7 +98,15 @@ async def create_session(body: dict[str, Any] = Body(default_factory=dict)):
     display_name = (body.get("display_name") or body.get("name") or "").strip() or None
     email = (body.get("email") or "").strip() or None
 
-    session = sessions.create(display_name=display_name, email=email)
+    # This route is unauthenticated by necessity -- a judge arrives with nothing -- so the
+    # abuse limits are what stand between it and our provider credit.
+    try:
+        session = sessions.create(
+            display_name=display_name, email=email,
+            client_ip=request.client.host if request.client else None,
+        )
+    except sessions.TooManySessions as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     secrets = {f: str(body[f]).strip() for f in SECRET_FIELDS if body.get(f)}
     if secrets:
         sessions.put_secrets(session.token, secrets)
