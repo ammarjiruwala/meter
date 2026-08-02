@@ -114,7 +114,42 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     fix the in-process reservation lock, so `min_machines_running = 1` and no autoscaling.
     **For the demo, deploy nothing** — a Cloudflare Tunnel over localhost needs no migration.
 
-*   **Last updated:** 2026-08-02 — **Post-Postgres overhead investigated; one round trip removed
+*   **Last updated:** 2026-08-02 — **Full post-Postgres audit (Shubh).** Boot, every route,
+    both images, the dashboard, all suites and soaks, and config-vs-docs drift. Everything
+    passes: 249/131/182/46, e2e 21/21, both soaks, negative control still fails as designed,
+    both Docker images build and serve.
+    *   ✅ **Fixed: the boot log lied.** It printed `ledger ready at meter.db` — a local file
+        that does not exist — because it still read `config.DB_PATH` after the port. On a
+        deployed proxy that sends whoever is debugging it looking for a file. Now
+        `db.ledger_target()`, which prints `host:port/database (schema X)` with credentials
+        stripped, since a boot line is exactly what gets pasted into a chat.
+    *   ✅ **Fixed: `.env.example` was missing 14 config vars**, including the entire Treasurer
+        tuning set (`TREASURER_ENABLED`, `TOPUP_WHEN_HOURS`, `MIN_BALANCE_USD`,
+        `BURN_WINDOW_S`, `TARGET_HOURS`, `MIN_TOPUP_USD`), all five `MANDATE_*` and both
+        `PREDICT_REFRESH_*`. Undiscoverable config on a deployment nobody can tune.
+    *   ✅ **Fixed: two stale docstrings** — `treasury/db.py` still claimed `busy_timeout` was
+        set (contradicting its own `connect()` note), and the marketing page still explained
+        itself by a `meter.db`-on-local-disk constraint that no longer exists. Both now say
+        what is true *and* what stayed true for a different reason.
+    *   ⚠ **`PRAVA_LIVE_MODE=false` does not stop calls to Prava** — `PROPOSALS.md` **M6**,
+        open. It gates `charge_mandate`, `report_charge` and `verify_credentials`, but **not**
+        `list_mandates` or `create_mandate_session`. Observed live: with the flag off, both
+        went out and returned 401, and `/mandates` answered 503. **So §6a's own
+        "demo runs on `PRAVA_LIVE_MODE=False` until the outage clears" does not achieve what
+        it says.** Worse, the ungated `POST /v1/sessions` is the one endpoint Prava documents
+        a `429 TRIES_EXHAUSTED` throttle on. Not fixed unilaterally: simulating a mandate list
+        risks showing mandates that do not exist, mid-demo.
+    *   ⚠ **`POST /mandates/create` and `/mandates/sync` take unauthenticated writes** —
+        `PROPOSALS.md` **M7**, open. Verified 200 with no key. B18 authenticated the money
+        moves and these move none, but they *spend a metered third-party quota* — the same
+        `POST /v1/sessions` above — so an unauthenticated caller can exhaust the allowance the
+        Treasurer depends on. One-line fix, but it breaks Tanay's "Connect your card" flow if
+        the browser calls it keyless, so it needs that decision first.
+    *   **Not a bug, recorded so nobody re-chases it:** `app.routes` reports 11 entries for a
+        21-route app because this FastAPI version keeps each `include_router` as one opaque
+        `_IncludedRouter`. The treasury surface is fine. Use `/openapi.json`.
+
+*   Prior entry — **Post-Postgres overhead investigated; one round trip removed
     (Shubh, answering Shivam's handoff).** The 52.7 ms figure is real but it is the **best case**,
     and the framing "essentially all of it is one network round trip" holds only for the config it
     was measured in. `bench_overhead.py` hardcoded `BREAKER_ENABLED=false` and defaults to no
