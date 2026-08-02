@@ -57,11 +57,23 @@ export default async function Home() {
     <>
       <TopNav breaker={breaker} />
 
-      {/* z-10 puts the content plane above all four fixed background layers. */}
+      {/* z-10 puts the content plane above all three fixed background layers. */}
       <main
         id="top"
-        className="relative z-10 mx-auto w-full max-w-[1360px] px-[28px] pb-[40px] pt-[88px]"
+        className="relative z-10 mx-auto w-full max-w-[1400px] px-[32px] pb-[60px] pt-[100px]"
       >
+        {/* The page title. Condensed and large, with the deployment it is reading
+            from stated underneath — on a screen showing live money, "which
+            database is this" is the first question anyone asks. */}
+        <div className="mb-[32px] flex flex-wrap items-end justify-between gap-[20px]">
+          <div>
+            <h1 className="t-display">Control Room</h1>
+            <div className="t-eyebrow mt-[8px]">
+              Live system status · metered through the proxy
+            </div>
+          </div>
+        </div>
+
         {!ledgerAvailable && (
           <div className="glass mb-[20px] p-[20px]">
             <p className="t-body text-text-primary">
@@ -72,43 +84,42 @@ export default async function Home() {
           </div>
         )}
 
-        {/* Top row: the hero number beside the constraint it runs against.
-            Collapses to one column at 1024px. */}
-        {/* items-start, or the spend card stretches to the height of the budget
-            grid — with five scopes that is three rows of cards and most of the
-            card becomes empty glass. */}
-        <div className="relative mb-[20px] grid grid-cols-1 items-start gap-[20px] lg:grid-cols-[2fr_3fr]">
-          {/* Hero glow — a soft indigo bloom behind the spend card so it reads as
-              emitting light rather than sitting on the canvas. */}
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute -left-[80px] -top-[80px] -z-10 h-[380px] w-[550px]"
-            style={{
-              background:
-                "radial-gradient(ellipse, rgba(99,102,241,0.10) 0%, transparent 65%)",
-            }}
-          />
+        {/* The metric row runs full width — it is the summary everything below
+            expands on, and boxing it beside something else would make it look
+            like one of several equal concerns. */}
+        <div className="mb-[24px]">
           <SpendHero summary={summary} />
+        </div>
+
+        {/* Budgets are next, as a carousel: the constraint the numbers above are
+            measured against, on one row instead of a three-row grid. */}
+        <div className="mb-[24px]">
           <TeamBudgetCard scopes={budgets} />
         </div>
 
         {/* Balances and the agent acting on them sit side by side: the panel on the
-            right is what the numbers on the left caused. */}
-        <div className="mb-[20px] grid grid-cols-1 gap-[20px] lg:grid-cols-2">
+            right is what the numbers on the left caused.
+
+            items-start, not stretch. The agent feed is a fixed-height terminal;
+            balances is one row per wallet. Stretching them to match put ~200px of
+            empty panel under a single wallet, which reads as a card that failed to
+            load rather than one with little to say. */}
+        <div className="mb-[24px] grid grid-cols-1 items-start gap-[24px] lg:grid-cols-2">
           <ProviderBalancesCard wallets={wallets} />
           <AgentLog initialEvents={treasuryEvents} />
         </div>
 
-        <div className="animate-in delay-5 mb-[20px]">
-          <TeamSpendTable rows={spend} />
-        </div>
-
-        <div className="animate-in delay-6 mb-[20px]">
+        <div className="animate-in delay-5 mb-[24px]">
           <LiveLogsTable initialRows={liveLogs} />
         </div>
 
-        <div className="animate-in delay-6">
-          <CostPerOutcomeTable rows={outcomes} coverage={outcomeCoverage} />
+        <div className="grid grid-cols-1 gap-[24px] xl:grid-cols-2">
+          <div className="animate-in delay-6">
+            <TeamSpendTable rows={spend} />
+          </div>
+          <div className="animate-in delay-6">
+            <CostPerOutcomeTable rows={outcomes} coverage={outcomeCoverage} />
+          </div>
         </div>
       </main>
     </>

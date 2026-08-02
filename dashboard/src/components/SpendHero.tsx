@@ -8,78 +8,92 @@ function compact(n: number): string {
 }
 
 /**
- * The spend card. Total metered spend is the reason the product exists, so it is
- * the largest thing on the page — 52px, and the only element with a text gradient.
+ * The metric row.
  *
- * The gradient is white-to-grey rather than coloured on purpose: colour on this
- * page is reserved for state, and a coloured hero would outrank the status ramp
- * sitting a few pixels below it.
+ * Four cards rather than one hero slab. The previous version put total spend at
+ * 52px with a gradient text fill and demoted everything else to pills beneath it;
+ * the design's idiom is a row of equal cards, and it happens to be the better
+ * information design too — requests, tokens and actors are the denominators that
+ * make the spend figure mean anything, and they were being whispered.
+ *
+ * Spend still leads: it is first, and the only card carrying an accent rule.
  */
 export function SpendHero({ summary }: { summary: SpendSummary }) {
   return (
-    <div className="glass animate-in delay-1 relative overflow-hidden p-[28px]">
-      {/* 3px gradient rule along the top edge — the card's only chromatic accent. */}
-      <span
-        aria-hidden="true"
-        className="absolute left-0 top-0 h-[3px] w-full"
-        style={{
-          background:
-            "linear-gradient(90deg, var(--color-accent), rgba(139,92,246,0.6), transparent)",
-        }}
+    <div className="grid grid-cols-2 gap-[16px] lg:grid-cols-4">
+      <MetricCard
+        label="Total Metered Spend"
+        value={formatUsd(summary.total_cost_usd)}
+        sub={summary.last_ts ? `Last call ${relativeTime(summary.last_ts)}` : undefined}
+        accent
+        delay="delay-1"
       />
-
-      <div className="t-eyebrow mb-[12px]">Total Metered Spend</div>
-      <div className="t-display t-num mb-[20px]">
-        {formatUsd(summary.total_cost_usd)}
-      </div>
-
-      <div className="flex flex-wrap gap-[8px]">
-        <Pill live>
-          <span className="t-num text-text-primary">
-            {summary.request_count.toLocaleString("en-US")}
-          </span>{" "}
-          requests
-        </Pill>
-        <Pill>
-          <span className="t-num text-text-primary">
-            {compact(summary.token_count)}
-          </span>{" "}
-          tokens
-        </Pill>
-        <Pill>
-          <span className="t-num text-text-primary">{summary.actor_count}</span>{" "}
-          actors
-        </Pill>
-        <Pill>
-          <span className="t-num text-text-primary">
-            {summary.provider_count}
-          </span>{" "}
-          providers
-        </Pill>
-      </div>
-
-      {summary.last_ts && (
-        <p className="t-caption mt-[16px] text-text-tertiary">
-          Last call {relativeTime(summary.last_ts)}
-        </p>
-      )}
+      <MetricCard
+        label="Requests"
+        value={summary.request_count.toLocaleString("en-US")}
+        sub="Metered through the proxy"
+        live
+        delay="delay-2"
+      />
+      <MetricCard
+        label="Tokens"
+        value={compact(summary.token_count)}
+        sub="Input and output combined"
+        delay="delay-3"
+      />
+      <MetricCard
+        label="Actors"
+        value={summary.actor_count.toLocaleString("en-US")}
+        sub={`Across ${summary.provider_count} provider${
+          summary.provider_count === 1 ? "" : "s"
+        }`}
+        delay="delay-4"
+      />
     </div>
   );
 }
 
-function Pill({
-  children,
+function MetricCard({
+  label,
+  value,
+  sub,
+  accent = false,
   live = false,
+  delay,
 }: {
-  children: React.ReactNode;
+  label: string;
+  value: string;
+  sub?: string;
+  /** The lead card. One per row, or the emphasis means nothing. */
+  accent?: boolean;
   live?: boolean;
+  delay: string;
 }) {
   return (
-    <span className="flex items-center gap-[6px] rounded-[8px] border border-border-subtle bg-white/[0.03] px-[12px] py-[5px] text-[12px] font-medium text-text-secondary">
-      {live && (
-        <span className="live-dot h-[5px] w-[5px]" aria-hidden="true" />
+    <div className={`glass panel animate-in ${delay} p-[20px]`}>
+      {accent && (
+        <span
+          aria-hidden="true"
+          className="absolute left-0 top-0 h-[2px] w-full"
+          style={{
+            background:
+              "linear-gradient(90deg, var(--color-accent), rgba(240,104,92,0.3), transparent)",
+          }}
+        />
       )}
-      {children}
-    </span>
+
+      <div className="mb-[12px] flex items-center justify-between gap-[8px] text-[12px] font-medium text-text-tertiary">
+        {label}
+        {live && <span className="live-dot h-[5px] w-[5px]" aria-hidden="true" />}
+      </div>
+
+      <div className="t-metric text-text-primary">{value}</div>
+
+      {sub && (
+        <div className="t-num mt-[8px] text-[12px] text-text-tertiary">
+          {sub}
+        </div>
+      )}
+    </div>
   );
 }

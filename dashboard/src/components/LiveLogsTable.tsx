@@ -4,13 +4,7 @@ import { useEffect, useState } from "react";
 import type { LiveLogRow } from "@/lib/db";
 import { usdColumnFormatter, providerLabel, relativeTime } from "@/lib/format";
 import { StatusBadge, toneForStatus } from "@/components/ui/primitives";
-import {
-  Cell,
-  DataTable,
-  IdentityCell,
-  Row,
-  TableHeader,
-} from "@/components/ui/DataTable";
+import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -51,18 +45,10 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
 
   return (
     <section id="logs" className="scroll-mt-[90px]">
-      <TableHeader
-        title="Live Requests"
-        meta={
-          <span className="flex items-center gap-[6px]">
-            <span className="live-dot h-[5px] w-[5px]" aria-hidden="true" />
-            Last {rows.length} requests · polling every{" "}
-            {POLL_INTERVAL_MS / 1000}s
-          </span>
-        }
-      />
-
       <DataTable
+        title="Request Ledger"
+        tag="Live"
+        live
         columns={[
           { label: "Member" },
           { label: "Model" },
@@ -101,14 +87,19 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
           </Row>
         ))}
         footnote={
-          unpredicted > 0 ? (
-            <>
-              {unpredicted} of {rows.length} rows carry no forecast. Prediction
-              needs an exact token count, and Anthropic does not use a tiktoken
-              vocabulary — the predictor declines rather than approximating
-              ~10–20% wrong.
-            </>
-          ) : undefined
+          <>
+            Last {rows.length} requests · polling every{" "}
+            {POLL_INTERVAL_MS / 1000}s
+            {unpredicted > 0 && (
+              <>
+                {" · "}
+                {unpredicted} of {rows.length} rows carry no forecast: prediction
+                needs an exact token count, and Anthropic does not use a tiktoken
+                vocabulary — the predictor declines rather than approximating
+                ~10–20% wrong.
+              </>
+            )}
+          </>
         }
       />
     </section>

@@ -2,21 +2,35 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { TreasuryEvent } from "@/lib/db";
-import { Panel, PanelTitle } from "@/components/ui/primitives";
+import { Panel } from "@/components/ui/primitives";
 
 const POLL_INTERVAL_MS = 3000;
 
 type Tone = "muted" | "action" | "success" | "warning" | "danger";
 
-const TONE_CLASS: Record<Tone, string> = {
-  muted: "text-text-secondary",
-  action: "text-accent-light",
-  success: "text-status-good",
-  warning: "text-status-warn",
-  danger: "text-status-bad",
+/**
+ * Chip colour per tone.
+ *
+ * `action` is deliberately the NEUTRAL chip, not a signal colour. It carries the
+ * dry-run outcome, and any of mint/gold/signal there would read as a verdict on a
+ * top-up that never moved money. Neutral is the honest answer: something happened,
+ * and it was neither success nor failure.
+ */
+const CHIP_CLASS: Record<Tone, string> = {
+  muted: "log-action",
+  action: "log-action",
+  success: "log-action log-action-success",
+  warning: "log-action log-action-warning",
+  danger: "log-action log-action-error",
 };
 
-type Line = { key: string; time: string; text: string; tone: Tone };
+type Line = {
+  key: string;
+  time: string;
+  verb: string;
+  text: string;
+  tone: Tone;
+};
 
 /**
  * Local wall-clock time, not UTC.
@@ -50,34 +64,38 @@ function money(n: number | undefined | null): string {
  * never happened, in front of the people judging whether the payment works. It gets
  * its own wording and the accent colour, never the success green.
  */
-function outcome(e: TreasuryEvent): { text: string; tone: Tone } {
+function outcome(e: TreasuryEvent): { verb: string; text: string; tone: Tone } {
   switch (e.status) {
     case "settled":
       return {
-        text: `✓ Top-up settled — ${money(e.amount_usd)} charged${
+        verb: "SETTLED",
+        text: `${money(e.amount_usd)} charged${
           e.prava_txn_id ? ` · txn ${e.prava_txn_id}` : ""
         }`,
         tone: "success",
       };
     case "dry_run":
       return {
-        text: `◦ Dry run — rehearsed ${money(e.amount_usd)}, no money moved (TREASURER_DRY_RUN)`,
+        verb: "DRY_RUN",
+        text: `Rehearsed ${money(e.amount_usd)}, no money moved (TREASURER_DRY_RUN)`,
         tone: "action",
       };
     case "refused":
       return {
-        text: `⊘ Refused — ${e.error ?? "no reason recorded"}`,
+        verb: "REFUSED",
+        text: e.error ?? "no reason recorded",
         tone: "warning",
       };
     case "failed":
       return {
-        text: `✗ Failed — ${e.error ?? "no detail recorded"}`,
+        verb: "FAILED",
+        text: e.error ?? "no detail recorded",
         tone: "danger",
       };
     case "pending":
-      return { text: "… awaiting Prava", tone: "action" };
+      return { verb: "PENDING", text: "awaiting Prava", tone: "action" };
     default:
-      return { text: `· ${e.status}`, tone: "muted" };
+      return { verb: e.status.toUpperCase(), text: "", tone: "muted" };
   }
 }
 
@@ -98,14 +116,16 @@ function linesFor(e: TreasuryEvent): Line[] {
     lines.push({
       key: `${e.id}-detect`,
       time: clock(e.created_at),
-      text: `⚠ ${where} runway ${d.runway_hours.toFixed(2)}h — under ${d.threshold_hours ?? "?"}h threshold`,
+      verb: "RUNWAY",
+      text: `${where} runway ${d.runway_hours.toFixed(2)}h — under ${d.threshold_hours ?? "?"}h threshold`,
       tone: "warning",
     });
   } else if (d?.trigger === "floor") {
     lines.push({
       key: `${e.id}-detect`,
       time: clock(e.created_at),
-      text: `⚠ ${where} balance ${money(d.balance_usd)} — under ${money(d.floor_usd)} floor`,
+      verb: "FLOOR",
+      text: `${where} balance ${money(d.balance_usd)} — under ${money(d.floor_usd)} floor`,
       tone: "warning",
     });
   }
@@ -113,7 +133,8 @@ function linesFor(e: TreasuryEvent): Line[] {
   lines.push({
     key: `${e.id}-request`,
     time: clock(e.created_at),
-    text: `Requesting ${money(e.amount_usd)} for ${where}${
+    verb: "REQUEST",
+    text: `${money(e.amount_usd)} for ${where}${
       e.mandate_id ? ` against mandate ${e.mandate_id}` : ""
     }`,
     tone: "action",
@@ -123,6 +144,7 @@ function linesFor(e: TreasuryEvent): Line[] {
   lines.push({
     key: `${e.id}-outcome`,
     time: clock(e.settled_at ?? e.created_at),
+    verb: o.verb,
     text: o.text,
     tone: o.tone,
   });
@@ -167,9 +189,13 @@ export function AgentLog({ initialEvents }: { initialEvents: TreasuryEvent[] }) 
 
   return (
     <section id="agent" className="scroll-mt-[90px]">
-      <Panel className="animate-in delay-4 p-[22px]">
-        <PanelTitle live={events.length > 0}>Treasurer Agent</PanelTitle>
-
+      <Panel
+        className="animate-in delay-4"
+        title="Treasurer Agent"
+        tag={events.length > 0 ? "Streaming" : "Idle"}
+        live={events.length > 0}
+        bodyClassName="p-[20px]"
+      >
         {lines.length === 0 ? (
           // No fabricated heartbeat. If the loop has not acted there is genuinely
           // nothing to show, and saying so is more convincing than a fake feed.
@@ -182,17 +208,22 @@ export function AgentLog({ initialEvents }: { initialEvents: TreasuryEvent[] }) 
         ) : (
           <div
             ref={scroller}
-            className="max-h-[200px] overflow-y-auto font-mono text-[11.5px] leading-[1.7]"
+            className="flex max-h-[260px] flex-col gap-[12px] overflow-y-auto text-[13px] leading-[1.4]"
           >
             {lines.map((line) => (
-              <div key={line.key} className="flex gap-[8px] py-[2px]">
+              <div key={line.key} className="flex gap-[14px]">
                 <span
-                  className="t-num shrink-0 text-text-tertiary"
+                  className="t-num shrink-0 pt-[2px] font-mono text-[11px] text-text-tertiary"
                   suppressHydrationWarning
                 >
                   {line.time}
                 </span>
-                <span className={TONE_CLASS[line.tone]}>{line.text}</span>
+                <div className="flex-1 text-text-secondary">
+                  <span className={`${CHIP_CLASS[line.tone]} mr-[6px]`}>
+                    {line.verb}
+                  </span>
+                  {line.text}
+                </div>
               </div>
             ))}
           </div>

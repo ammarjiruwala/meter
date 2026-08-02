@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
+import { Panel } from "@/components/ui/primitives";
 
 export type Column = {
   label: string;
@@ -8,7 +9,11 @@ export type Column = {
   className?: string;
 };
 
-/** Section header — title on the left, a count or window label on the right. */
+/**
+ * Standalone section header, for surfaces that are not tables.
+ * Tables pass `title`/`tag` to DataTable instead, which puts the header inside the
+ * panel where the design wants it.
+ */
 export function TableHeader({
   title,
   meta,
@@ -34,12 +39,20 @@ export function DataTable({
   columns,
   rows,
   empty,
+  title,
+  tag,
+  live = false,
   collapseAfter = 8,
   footnote,
 }: {
   columns: Column[];
   rows: ReactNode[];
   empty: ReactNode;
+  /** Panel header title. Omit for a bare table with no header bar. */
+  title?: ReactNode;
+  /** The mono chip on the right of the header. */
+  tag?: ReactNode;
+  live?: boolean;
   /**
    * Rows beyond this hide behind a control. Live Logs fetches 50, which at this row
    * height would be most of the page. Below the threshold no control renders at
@@ -56,19 +69,19 @@ export function DataTable({
 
   return (
     <>
-      <div className="glass overflow-hidden">
+      <Panel title={title} tag={tag} live={live} className="overflow-hidden">
         {rows.length === 0 ? (
           <div className="p-[20px]">{empty}</div>
         ) : (
           <>
             <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
+              <table className="w-full border-collapse text-[13px]">
                 <thead>
-                  <tr className="border-b border-border-subtle bg-white/[0.01] text-left">
+                  <tr className="text-left">
                     {columns.map((col, i) => (
                       <th
                         key={col.label || i}
-                        className={`t-th px-[16px] py-[12px] text-text-tertiary ${
+                        className={`t-th border-b border-border-subtle px-[20px] py-[12px] text-text-tertiary ${
                           col.align === "right" ? "text-right" : ""
                         } ${col.className ?? ""}`}
                       >
@@ -86,7 +99,7 @@ export function DataTable({
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
                 aria-expanded={expanded}
-                className="t-cell w-full border-t border-border-subtle px-[16px] py-[12px] text-center text-text-secondary transition-colors hover:bg-white/[0.02] hover:text-text-primary"
+                className="t-cell w-full border-t border-border-subtle px-[20px] py-[12px] text-center text-text-secondary transition-colors hover:bg-white/[0.02] hover:text-text-primary"
               >
                 {expanded ? "Show less" : `Show all ${rows.length}`}
                 {!expanded && hidden > 0 && (
@@ -96,7 +109,7 @@ export function DataTable({
             )}
           </>
         )}
-      </div>
+      </Panel>
 
       {footnote && (
         <div className="t-caption mt-[12px] text-text-tertiary">{footnote}</div>
@@ -113,10 +126,10 @@ export function Row({ children }: { children: ReactNode }) {
   );
 }
 
-const PAD = "px-[16px] py-[11px] align-middle";
+const PAD = "px-[20px] py-[12px] align-middle";
 
 /**
- * The two-line cell: a bold identifier over a muted qualifier.
+ * The two-line cell: a bold identifier over a muted mono qualifier.
  *
  * It retires a column rather than decorating one. Model rides under the actor,
  * provider under the model, feature under the member — each was a column of its
@@ -125,15 +138,22 @@ const PAD = "px-[16px] py-[11px] align-middle";
 export function IdentityCell({
   primary,
   secondary,
+  alert = false,
 }: {
   primary: ReactNode;
   secondary?: ReactNode;
+  /** Puts the qualifier in signal red — for a row that needs attention. */
+  alert?: boolean;
 }) {
   return (
     <td className={PAD}>
       <div className="t-cell-primary text-text-primary">{primary}</div>
       {secondary !== undefined && secondary !== null && (
-        <div className="t-cell-secondary mt-[2px] text-text-tertiary">
+        <div
+          className={`t-cell-secondary mt-[2px] ${
+            alert ? "text-status-bad" : "text-text-tertiary"
+          }`}
+        >
           {secondary}
         </div>
       )}

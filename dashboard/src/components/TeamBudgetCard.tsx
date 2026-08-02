@@ -1,3 +1,6 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { BudgetScope } from "@/lib/db";
 import { usdCeilingFormatter, usdColumnFormatter } from "@/lib/format";
 
@@ -81,22 +84,21 @@ function BudgetCard({
   return (
     <div className={`budget-card animate-in ${variant} ${delay}`}>
       <div className="relative z-[1] mb-[14px] flex items-start justify-between gap-[12px]">
-        <div className="min-w-0">
-          <div className="truncate text-[15px] font-semibold tracking-[-0.02em] text-white">
+        <div className="min-w-0 pl-[8px]">
+          <div className="truncate text-[14px] font-semibold tracking-[-0.01em] text-text-primary">
             {isProject ? scope.project_id : scope.feature}
           </div>
-          {/* Alpha levels on these cards are set by contrast, not taste: over the
-              five card gradients, white at 35% measures 3.1:1 and at 45% about
-              4.2:1 — both under the floor. 60% clears 6.2:1 on every variant and
-              still reads a clear step under the white title. */}
-          <div className="truncate text-[12px] text-white/60">
+          {/* The cards are near-transparent now rather than five opaque gradients,
+              so these run on the shared ink ramp instead of white-at-alpha — one
+              measured token beats five surface-specific guesses. */}
+          <div className="truncate font-mono text-[11px] text-text-tertiary">
             {isProject ? "Project ceiling" : scope.project_id}
           </div>
         </div>
         <span className={band.badge}>{(used * 100).toFixed(0)}%</span>
       </div>
 
-      <div className="relative z-[1] mb-[14px]">
+      <div className="relative z-[1] mb-[14px] pl-[8px]">
         <div className="progress-track mb-[8px]">
           {/* Bar length caps at the ceiling; the badge percentage does not, so an
               overspend still reads as the number it is. */}
@@ -105,16 +107,16 @@ function BudgetCard({
             style={{ width: `${Math.min(100, used * 100)}%` }}
           />
         </div>
-        <div className="t-num flex justify-between text-[12px] text-white/60">
+        <div className="t-num flex justify-between text-[12px] text-text-secondary">
           <span>
             {usd.spend(scope.spend_usd)} of {usd.ceiling(scope.ceiling_usd)}
           </span>
-          <span className="font-semibold text-white/75">Rolling 24h</span>
+          <span className="text-text-tertiary">Rolling 24h</span>
         </div>
       </div>
 
-      <div className="relative z-[1] flex items-center justify-between gap-[12px]">
-        <div className="flex items-center gap-[4px] text-[11px] text-white/55">
+      <div className="relative z-[1] flex items-center justify-between gap-[12px] pl-[8px]">
+        <div className="flex items-center gap-[4px] text-[11px] text-text-tertiary">
           <span
             className="t-num"
             style={
@@ -128,7 +130,7 @@ function BudgetCard({
           </span>
           {scope.members.length > 0 && (
             <>
-              <span className="h-[4px] w-[4px] rounded-full bg-white/25" />
+              <span className="h-[3px] w-[3px] rounded-full bg-text-tertiary/50" />
               <span>
                 {scope.members.length} member
                 {scope.members.length === 1 ? "" : "s"}
@@ -152,8 +154,8 @@ function BudgetCard({
           ))}
           {extra > 0 && (
             <span
-              className="avatar text-white/70"
-              style={{ background: "rgba(255,255,255,0.08)" }}
+              className="avatar text-text-secondary"
+              style={{ background: "rgba(234,234,236,0.08)" }}
               title={scope.members.slice(4).join(", ")}
             >
               +{extra}
@@ -203,22 +205,146 @@ export function TeamBudgetCard({ scopes }: { scopes: BudgetScope[] | null }) {
   };
 
   return (
-    // Scopes stay in meter.yaml order and are never re-sorted, including by how
-    // close to the ceiling they are — cards must not reshuffle under someone
-    // watching them during a live demo.
-    <div
-      id="budget"
-      className="grid grid-cols-1 gap-[14px] sm:grid-cols-2"
-    >
-      {scopes.map((scope, i) => (
-        <BudgetCard
-          key={`${scope.project_id}:${scope.feature ?? "*"}`}
-          scope={scope}
-          variant={VARIANTS[i % VARIANTS.length]}
-          usd={usd}
-          delay={`delay-${Math.min(6, i + 2)}`}
-        />
-      ))}
+    <div id="budget">
+      <BudgetRail count={scopes.length}>
+        {/* Scopes stay in meter.yaml order and are never re-sorted, including by
+            how close to the ceiling they are — cards must not reshuffle under
+            someone watching them during a live demo. The rail preserves that
+            order exactly; it only changes how many are on screen at once. */}
+        {scopes.map((scope, i) => (
+          <BudgetCard
+            key={`${scope.project_id}:${scope.feature ?? "*"}`}
+            scope={scope}
+            variant={VARIANTS[i % VARIANTS.length]}
+            usd={usd}
+            delay={`delay-${Math.min(6, i + 2)}`}
+          />
+        ))}
+      </BudgetRail>
     </div>
+  );
+}
+
+/**
+ * The carousel.
+ *
+ * CSS scroll-snap rather than a JS slideshow: native momentum on trackpad and
+ * touch, no timers to fall out of sync, and it degrades to an ordinary scroller if
+ * the script never runs. The arrows page by the visible width and disable at each
+ * end, so there is never an active-looking control that does nothing.
+ *
+ * It does NOT auto-advance. These are spend ceilings; a card sliding away while
+ * someone reads it is the wrong behaviour for financial data, and during a live
+ * demo it would move under the presenter.
+ */
+function BudgetRail({
+  children,
+  count,
+}: {
+  children: React.ReactNode;
+  count: number;
+}) {
+  const rail = useRef<HTMLDivElement>(null);
+  const [atStart, setAtStart] = useState(true);
+  const [atEnd, setAtEnd] = useState(true);
+
+  const sync = useCallback(() => {
+    const el = rail.current;
+    if (!el) return;
+    // 1px of slack: fractional scroll widths mean scrollLeft rarely lands exactly
+    // on the maximum, which would leave the right arrow enabled at the end.
+    setAtStart(el.scrollLeft <= 1);
+    setAtEnd(el.scrollLeft >= el.scrollWidth - el.clientWidth - 1);
+  }, []);
+
+  useEffect(() => {
+    const el = rail.current;
+    if (!el) return;
+    sync();
+    // Resize matters as much as scroll: widen the window until every card fits and
+    // both arrows must go away on their own.
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    el.addEventListener("scroll", sync, { passive: true });
+    return () => {
+      ro.disconnect();
+      el.removeEventListener("scroll", sync);
+    };
+  }, [sync, count]);
+
+  const page = (dir: 1 | -1) => {
+    const el = rail.current;
+    if (!el) return;
+    // Page by just under a full width so the card at the edge stays partly visible
+    // — it is the cue that there is more, and jumping a clean viewport hides it.
+    el.scrollBy({ left: dir * el.clientWidth * 0.85, behavior: "smooth" });
+  };
+
+  const scrollable = !(atStart && atEnd);
+
+  return (
+    <>
+      <div className="mb-[10px] flex items-center justify-between gap-[16px]">
+        <h2 className="t-section">Team Budget</h2>
+        <div className="flex items-center gap-[8px]">
+          <span className="t-caption text-text-tertiary">
+            {count} scope{count === 1 ? "" : "s"} · meter.yaml order
+          </span>
+          {/* The controls appear only when there is somewhere to go. */}
+          {scrollable && (
+            <div className="flex items-center gap-[4px]">
+              <button
+                type="button"
+                className="rail-arrow"
+                onClick={() => page(-1)}
+                disabled={atStart}
+                aria-label="Previous budget scopes"
+              >
+                <Chevron dir="left" />
+              </button>
+              <button
+                type="button"
+                className="rail-arrow"
+                onClick={() => page(1)}
+                disabled={atEnd}
+                aria-label="Next budget scopes"
+              >
+                <Chevron dir="right" />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* tabIndex + a role make the rail reachable and pannable by keyboard, which
+          a plain overflow container is not in every browser. */}
+      <div
+        ref={rail}
+        className="budget-rail"
+        tabIndex={0}
+        role="group"
+        aria-label="Budget scopes"
+      >
+        {children}
+      </div>
+    </>
+  );
+}
+
+function Chevron({ dir }: { dir: "left" | "right" }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points={dir === "left" ? "15 18 9 12 15 6" : "9 18 15 12 9 6"} />
+    </svg>
   );
 }

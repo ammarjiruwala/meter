@@ -1,19 +1,54 @@
 import type { ReactNode } from "react";
 
-/** Glass panel — semi-transparent so the mesh gradient reads faintly through it. */
+/**
+ * A panel: a dark surface with a hairline rule and a header bar.
+ *
+ * The header is part of the primitive rather than something each caller lays out,
+ * because the design's whole panel idiom is the divided header — title left, a
+ * small uppercase mono tag right, a rule between it and the body. Five panels each
+ * building that by hand is five chances for it to drift.
+ */
 export function Panel({
   children,
+  title,
+  tag,
+  live = false,
+  bodyClassName = "",
   className = "",
 }: {
   children: ReactNode;
+  /** Omit for a bare surface with no header bar. */
+  title?: ReactNode;
+  /** The mono chip on the right — a window ("Today"), a count, a state. */
+  tag?: ReactNode;
+  /** Renders the tag with a pulsing mint dot. Reserved for genuinely live feeds. */
+  live?: boolean;
+  bodyClassName?: string;
   className?: string;
 }) {
-  return <div className={`glass ${className}`}>{children}</div>;
+  return (
+    <div className={`glass panel flex flex-col ${className}`}>
+      {title !== undefined && (
+        <div className="panel-header">
+          <div className="t-panel-title">{title}</div>
+          {tag !== undefined && (
+            <div className={`panel-tag ${live ? "panel-tag-live" : ""}`}>
+              {tag}
+            </div>
+          )}
+        </div>
+      )}
+      <div className={bodyClassName}>{children}</div>
+    </div>
+  );
 }
 
 export const Card = Panel;
 
-/** Panel heading, with an optional pulsing live dot. */
+/**
+ * Standalone panel heading, for the surfaces that are not full panels.
+ * Kept for callers that lay out their own header.
+ */
 export function PanelTitle({
   children,
   live = false,
@@ -38,10 +73,9 @@ export type BadgeTone =
   | "emphasis";
 
 // Filled tints. Every fill/text pair is measured against the 4.5:1 floor for small
-// text — an earlier tinted attempt put a hue on its own 20% tint and landed at
-// 3.49:1. The badge always contains its own label (an HTTP code, a state word), so
-// meaning never rests on hue alone, which matters most for the green/amber pair
-// that collapses under protanopia.
+// text. The badge always contains its own label (an HTTP code, a state word), so
+// meaning never rests on hue alone — which matters most for the mint/gold pair,
+// the one that collapses first under protanopia.
 const TONES: Record<BadgeTone, string> = {
   neutral: "badge-outline",
   good: "badge-good",
