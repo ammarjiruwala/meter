@@ -494,6 +494,88 @@ def test_alerts_reach_the_judge_not_the_on_call_phone() -> None:
           "supplied phone number" in bad_reason, bad_reason)
 
 
+# ── The console's API ────────────────────────────────────────────────────────
+
+def test_routes() -> None:
+    print("\nthe judge console's API")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        made = client.post("/judge/session", json={
+            "name": "Judge Ada", "email": "ada@example.com",
+            "prava_api_key": SECRET, "poke_phone": "+15550003333",
+        })
+        check("POST /judge/session succeeds", made.status_code == 200, made.text[:200])
+        body = made.json()
+
+        check("it returns the Meter key exactly once", bool(body.get("meter_key")))
+        check("scoped to a fresh judge project",
+              body["project_id"].startswith(sessions.PROJECT_PREFIX))
+        check("with the session's own rails reported back",
+              body["breaker_floor_usd"] is not None and body["call_cap"] > 0)
+        check("credentials are acknowledged as booleans, never echoed",
+              body["has_prava_key"] is True and SECRET not in made.text)
+
+        token = body["token"]
+        auth = {"X-Judge-Session": token}
+
+        got = client.get("/judge/session", headers=auth)
+        check("GET /judge/session rehydrates it", got.status_code == 200)
+        check("and does NOT hand the Meter key out again",
+              "meter_key" not in got.json())
+
+        check("an unknown token is 401", client.get(
+            "/judge/session", headers={"X-Judge-Session": "js_nope"}).status_code == 401)
+        check("a missing token is 401",
+              client.get("/judge/session").status_code == 401)
+
+        # Expiry is told apart from absence: "start again" and "that never existed" are
+        # different messages to put in front of someone who walked away for an hour.
+        dead = sessions.create(ttl_s=-1)
+        expired = client.get("/judge/session",
+                             headers={"X-Judge-Session": dead.token})
+        check("an expired session is 440, not 401", expired.status_code == 440)
+        check("and says so in words", "expired" in expired.text.lower())
+
+        patched = client.patch("/judge/session", headers=auth,
+                               json={"poke_api_key": "linq_key_here"})
+        check("PATCH attaches a credential", patched.status_code == 200)
+        check("and merges rather than replacing",
+              patched.json()["has_prava_key"] and patched.json()["has_alerts"])
+        check("unknown fields are ignored, not rejected",
+              client.patch("/judge/session", headers=auth,
+                           json={"future_field": "x"}).status_code == 200)
+
+        listed = client.get("/judge/prompts")
+        check("GET /judge/prompts lists the sequence", listed.status_code == 200)
+        seq = listed.json()
+        check("three opening prompts", len(seq["sequence"]) == 3)
+        check("the model is stated explicitly", seq["model"] == "gpt-4o-mini")
+        check("prompts are declared non-editable", seq["editable"] is False)
+        check("and the reason ships with them", "65-80%" in seq["why_not_editable"])
+        check("the control prompt is a different feature from the runaway",
+              seq["control"]["feature"] != seq["runaway"]["feature"])
+        check("the opening three avoid the tags that read badly",
+              {p["feature"] for p in seq["sequence"]}.isdisjoint(
+                  {"commit-message", "ticket-classify", "test-plan"}))
+
+        # A judge who skipped Linq must get a usable message, not a stack trace.
+        bare = client.post("/judge/session", json={"name": "No Alerts"}).json()
+        no_alerts = client.post("/judge/alert-test",
+                                headers={"X-Judge-Session": bare["token"]})
+        check("alert-test refuses cleanly without Linq details",
+              no_alerts.status_code == 400)
+        check("and offers the fallback", "skip alerts" in no_alerts.text)
+
+        ended = client.delete("/judge/session", headers=auth)
+        check("DELETE clears the credentials", ended.status_code == 200)
+        check("the vault is empty afterwards", sessions.secrets_for(token) == {})
+        check("but the session row survives as an audit record",
+              sessions.resolve(token) is not None)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -514,6 +596,7 @@ def main() -> int:
             test_a_boot_does_not_wipe_judge_ceilings,
             test_prava_key_is_per_task_not_per_process,
             test_alerts_reach_the_judge_not_the_on_call_phone,
+            test_routes,
         ):
             suite()
     finally:

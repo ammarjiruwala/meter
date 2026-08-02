@@ -164,6 +164,22 @@ def _post(body: str, api_key: str | None = None,
         )
 
 
+def dispatch(body: str, api_key: str | None = None,
+             recipient: str | None = None, name: str = "poke-message") -> None:
+    """Send an arbitrary message on the same fire-and-forget path as an alert.
+
+    Exists for the judge console's "send a test message" step, which has to prove the
+    channel works *before* the breaker act depends on it — Linq's sandbox drops messages
+    to a recipient who has not texted the sending line first, silently, with error 2008.
+    Finding that out at the moment the breaker trips reads as the product being broken.
+
+    Same guarantees as everything else here: daemon thread, never blocks, never raises.
+    """
+    threading.Thread(
+        target=_post, args=(body, api_key, recipient), name=name, daemon=True
+    ).start()
+
+
 def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any],
                        api_key: str | None = None,
                        recipient: str | None = None) -> bool:

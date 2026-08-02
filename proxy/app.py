@@ -290,6 +290,14 @@ app = FastAPI(
 app.include_router(treasury_routes.router)
 app.include_router(mock_provider.router)
 
+# The judge console's own surface (`/judge/*`), mounted for the same reason and kept off
+# `/v1` for the same reason. Imported here rather than at module top so the dependency
+# stays one-directional: `judge/` reads `proxy/`, never the reverse, and this mount is
+# the single seam — the same exception `treasury` gets above.
+from judge import routes as judge_routes  # noqa: E402
+
+app.include_router(judge_routes.router)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Auth and attribution
