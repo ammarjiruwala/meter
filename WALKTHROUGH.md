@@ -101,9 +101,15 @@ Two processes, two terminals. Both stay running for the rest of this guide.
 
 ```bash
 # terminal 1 — the proxy (this is the whole backend: proxy + treasury + mock provider)
-source .venv/bin/activate
+source .venv/bin/activate          # EVERY new terminal needs this
 python -m uvicorn proxy.app:app --port 8080
 ```
+
+> Forgetting `source .venv/bin/activate` is the most common stumble here, because a
+> restart or a new tab does not inherit it and the error names the system Python rather
+> than the missing step: `No module named uvicorn`. If you would rather not think about
+> it, call the interpreter directly instead — `.venv/bin/python -m uvicorn proxy.app:app
+> --port 8080` works from a plain shell.
 
 ```bash
 # terminal 2 — the dashboard
@@ -526,7 +532,7 @@ and `GET /mandates` was answering a **500** with all 601 of them passing.
 | Every prediction has `history factor 1.00` | No learned factor for that tag. Either it is a new feature (needs ~20 calls) or the ledger is unseeded. |
 | `Unknown Meter key` | The key in your request is not in `METER_KEYS`. It is `mk_dev_local` by default, **not** `mk_demo`. |
 | Prediction is wildly wrong, tiny input tokens | You sent an empty prompt. `try.sh` refuses these; a hand-written `curl` will not. |
-| `ModuleNotFoundError: psycopg` | Running system `python3` instead of `.venv/bin/python`. |
+| `No module named uvicorn` / `No module named psycopg` | The virtualenv is not active. Every new terminal needs `source .venv/bin/activate` first — a restart or a fresh tab does not inherit it. Or skip activation and call `.venv/bin/python -m uvicorn ...` directly. |
 | Breaker will not trip | Threshold is $20 by default. Restart with `BREAKER_WINDOW_USD=0.0001`. |
 | Breaker will not clear | 120s cooldown, and recovery is lazy — send a request to that feature to trigger the re-check. |
 | iMessage never arrives | `POKE_API_KEY`/`POKE_CTO_PHONE` unset, or the Linq sandbox rule (§6). |
