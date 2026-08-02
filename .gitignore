@@ -27,3 +27,4 @@ meter.db-shm
 
 # The dashboard's own DATABASE_URL. Same secret as the root .env, different pooler port.
 dashboard/.env.local
+DEPLOY-SECRETS.local.txt
