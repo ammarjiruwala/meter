@@ -11,7 +11,10 @@ const nextConfig: NextConfig = {
   // image copies them in explicitly — miss that and the app boots and serves unstyled
   // HTML with no assets, which looks like a CSS bug rather than a packaging one. And it
   // reads `PORT` / `HOSTNAME` from the environment, which is how it binds 0.0.0.0.
-  output: "standalone",
+  // Only when building the container. Vercel builds and serves Next itself and wants the
+  // default output; forcing `standalone` there is at best redundant. Set DOCKER_BUILD=1
+  // (the Dockerfile does) to get the self-contained server instead.
+  output: process.env.DOCKER_BUILD ? "standalone" : undefined,
 };
 
 export default nextConfig;
