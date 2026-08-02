@@ -12,6 +12,14 @@
 
 set -euo pipefail
 
+# The ledger is Postgres now, so the reporting step imports psycopg -- which lives in
+# the virtualenv, not in the system python3 this script used to call. Prefer the venv
+# interpreter and fall back only if it is absent.
+PY="${METER_PYTHON:-}"
+if [ -z "$PY" ]; then
+  if [ -x .venv/bin/python ]; then PY=".venv/bin/python"; else PY="python3"; fi
+fi
+
 PORT="${METER_PORT:-8080}"
 URL="http://localhost:${PORT}"
 KEY="${METER_KEY:-$(grep '^METER_KEYS' .env 2>/dev/null | cut -d= -f2 | cut -d, -f1 | cut -d: -f1)}"
@@ -27,7 +35,7 @@ if [ $# -lt 2 ]; then
   echo "usage: $0 <feature-tag> \"<prompt>\"" >&2
   echo >&2
   echo "Feature tags with learned history:" >&2
-  python3 -c "
+  "$PY" -c "
 import sys; sys.path.insert(0, '.')
 from proxy import pg
 for r in pg.fetchall(\"SELECT DISTINCT feature FROM requests WHERE feature IS NOT NULL ORDER BY 1\"):
@@ -58,7 +66,7 @@ fi
 # instead of guessing.
 MAXTOK="${METER_MAX_TOKENS:-1500}"
 
-BODY=$(python3 -c '
+BODY=$("$PY" -c '
 import json, sys
 print(json.dumps({"model": "gpt-4o-mini", "max_tokens": int(sys.argv[2]),
                   "messages": [{"role": "user", "content": sys.argv[1]}]}))' "$PROMPT" "$MAXTOK")
@@ -70,7 +78,7 @@ RESP=$(curl -s "${URL}/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d "$BODY")
 
-python3 - "$RESP" "$TAG" "$MAXTOK" <<'PY'
+"$PY" - "$RESP" "$TAG" "$MAXTOK" <<'PYEOF'
 import json, sys, textwrap
 
 resp, tag, maxtok = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -113,4 +121,4 @@ if tag in capped:
     print("        Re-run with METER_MAX_TOKENS=400 to compare like with like.")
 print(f"  history factor  {factor:.2f}" + ("   <- 1.00 means NO learned history for this tag"
                                            if abs((factor or 1) - 1) < 1e-9 else ""))
-PY
+PYEOF
