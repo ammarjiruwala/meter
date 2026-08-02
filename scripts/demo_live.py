@@ -85,7 +85,7 @@ def build_prompts(tags: list[str], n: int, freeform: bool) -> list[dict]:
         if freeform and tag in FREEFORM:
             for i, text in enumerate(FREEFORM[tag][:n]):
                 out.append({"feature": tag, "prompt": text, "max_tokens": 1500,
-                            "project": "api-prod", "actor": "judge", "kind": "freeform"})
+                            "actor": "judge", "kind": "freeform"})
             continue
         if tag in corpus_probe.TAGS:
             recs = corpus_probe.build(tag, FRESH_OFFSET + n, 0)[FRESH_OFFSET:]
@@ -101,7 +101,7 @@ def build_prompts(tags: list[str], n: int, freeform: bool) -> list[dict]:
                     continue
                 slots = templated_probe._slots(FRESH_OFFSET + n)[FRESH_OFFSET:]
                 for s in slots[:n]:
-                    out.append({"project": project, "feature": feature, "actor": "judge",
+                    out.append({"feature": feature, "actor": "judge",
                                 "prompt": tmpl.format(**s), "max_tokens": maxtok,
                                 "kind": "fresh-slot"})
     return out
@@ -202,25 +202,32 @@ def main() -> int:
     subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py"), "--db", db],
                    capture_output=True, check=False)
 
-    from predictor import predict
     from predictor.refresh import refresh_now
     refresh_now(db)
-
-    for rec in plan:
-        p = predict([{"role": "user", "content": rec["prompt"]}], args.model,
-                    max_tokens=rec.get("max_tokens"),
-                    project=rec.get("project"), feature=rec["feature"],
-                    actor=rec.get("actor"))
-        rec["predicted"] = p.predicted_output_tokens
-        rec["factor"] = p.history_factor
 
     print(f"sending {len(plan)} prompts through the proxy", end="", flush=True)
     key, project = meter_key()
     print(f"using meter key {key!r} (project {project})")
     results = asyncio.run(run(plan, args.url, args.model, key))
 
+    # Read the proxy's own numbers back out of the ledger.
+    import sqlite3
+
     import numpy as np
-    ok = [r for r in results if r.get("actual")]
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    led = {r["trace_id"]: dict(r) for r in conn.execute(
+        "SELECT trace_id, feature, predicted_output_tokens, output_tokens, "
+        "history_factor, cost_usd, predicted_cost_usd FROM requests "
+        "WHERE id NOT LIKE 'seed_%'")}
+    conn.close()
+    for i, rec in enumerate(results, 1):
+        row = led.get(f"demo-{i}")
+        if row:
+            rec["predicted"] = row["predicted_output_tokens"]
+            rec["actual"] = row["output_tokens"]
+            rec["factor"] = row["history_factor"] or 1.0
+    ok = [r for r in results if r.get("actual") and r.get("predicted")]
     print(f"\n{'feature':<24}{'pred':>7}{'actual':>8}{'error':>9}{'factor':>9}  {'kind'}")
     print("-" * 70)
     for r in results:
