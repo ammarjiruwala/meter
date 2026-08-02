@@ -1,12 +1,13 @@
-"""Phase 1 ledger: a local SQLite file.
+"""The ledger: schema and queries, on Postgres.
 
-Why SQLite and not the Postgres that ARCHITECTURE.md §4 specifies: the proxy has to be
-independently runnable on hour one, before Shivam's schema exists, and a hackathon proxy
-that cannot start without a database container is a proxy nobody on the team can iterate
-on. Every column name below is copied verbatim from ARCHITECTURE.md §4, so migrating to
-Postgres is a schema swap rather than a rewrite of every call site.
+Every statement here goes through ``proxy/pg.py`` — one pool, per-statement autocommit,
+``?`` placeholders rewritten to ``%s`` on the way to the driver. That rewrite is why the
+SQL below is byte-identical to the SQLite version this file started as: the port was a
+change of execution layer, not fifty rewritten statements, and fifty hand-rewritten
+statements is fifty chances to transpose a parameter.
 
-Deliberate divergences from the target schema, each flagged where it occurs:
+Column names are copied verbatim from ARCHITECTURE.md §4. Deliberate divergences from
+that schema, each flagged where it occurs:
 
 * ``overhead_ms`` is an addition, not a divergence — see the note on the column. So are
   the four prediction columns, for the same reason: ARCHITECTURE.md §2 step 3 requires an
@@ -15,19 +16,31 @@ Deliberate divergences from the target schema, each flagged where it occurs:
 * ``annotations`` carries a ``project_id`` that ARCHITECTURE.md §4 does not list. Without
   it any key could annotate any other project's traces, since a trace id is a
   caller-supplied string.
-* Timestamps are ISO-8601 UTC strings rather than ``timestamptz``. They compare
-  lexicographically in the correct order, which is what makes the rolling-window queries
-  below work without a date function, and they port to ``timestamptz`` by a cast.
+* Timestamps are ISO-8601 UTC strings rather than ``timestamptz``, and money is
+  ``double precision`` rather than ``numeric``. Both are ported like for like from the
+  SQLite schema rather than upgraded. The strings compare lexicographically in the
+  correct order, which is what makes the rolling-window queries below work without a date
+  function — and it is also what the dashboard's cutoff format depends on, so changing
+  either type changes comparison semantics in two places at once. Open follow-ups, not
+  oversights.
 
-``reservation_id`` is no longer NULL: reservations are now held in-process
+``reservation_id`` is no longer NULL: reservations are held in-process
 (``proxy/budget.py``) rather than in the Redis that ARCHITECTURE.md §2 specifies, per the
 decision recorded in PROPOSALS.md A5.
 
-Concurrency: one process-wide connection in WAL mode behind a lock. Callers from async
-code must go through ``asyncio.to_thread`` so a slow disk write never blocks the event
-loop that is simultaneously pumping SSE bytes to a client.
+Concurrency: the pool hands each caller its own connection and MVCC handles concurrent
+readers and writers, so there is nothing to serialise here. Callers from async code must
+still go through ``asyncio.to_thread`` — more so than before, in fact. A round trip to a
+hosted database is tens of milliseconds where a local SQLite read was microseconds, so
+one unwrapped call blocks the event loop that is simultaneously pumping SSE bytes to a
+client for far longer than it used to.
 
-Owner: Shubh (Proxy & Infra).
+Multi-statement writes need ``pg.transaction()``. A bare ``BEGIN`` is silently useless:
+every other statement borrows its own pooled connection, so the transaction opens on a
+connection that goes straight back to the pool while the rest of the block runs outside
+it. ``replace_budgets`` is the only caller that needs one.
+
+Owner: Shubh (Proxy & Infra). Ported to Postgres by Shivam.
 """
 
 from __future__ import annotations
