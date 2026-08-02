@@ -278,6 +278,21 @@ export function JudgeConsole({ session }: { session: ServerSession }) {
 
 /* ── The answer ─────────────────────────────────────────────────────────────── */
 
+/**
+ * How much of an answer to show before folding it.
+ *
+ * The response is the least interesting thing on this half of the screen — the judge is
+ * here to see the *cost* of it, not to read a pull request description. Left unbounded,
+ * `pr-description` returns 400 tokens of prose and pushes the accuracy panel beneath it
+ * off the bottom of the viewport, so the one number the page exists to show is the one
+ * thing you have to scroll for.
+ *
+ * Character count rather than measuring the rendered height: it needs no ref, no
+ * ResizeObserver and no state written from an effect, and being approximate costs nothing
+ * when the only decision is whether to offer a toggle.
+ */
+const ANSWER_FOLD_CHARS = 420;
+
 function Answer({
   stage,
   result,
@@ -285,6 +300,10 @@ function Answer({
   stage: string | null;
   result: { prompt: JudgePrompt; run: RunResult } | null;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const answer = result?.run.answer ?? "";
+  const foldable = answer.length > ANSWER_FOLD_CHARS;
+
   return (
     <Panel title="Response" tag={result ? result.prompt.feature : "waiting"}>
       <div className="p-[20px]">
@@ -307,12 +326,42 @@ function Answer({
               detail={result.run.reason ?? "The circuit breaker refused this call."}
             />
           ) : (
-            <p
-              className="t-body whitespace-pre-wrap"
-              style={{ color: "var(--color-text-secondary)" }}
-            >
-              {result.run.answer}
-            </p>
+            <>
+              <div className="relative">
+                <p
+                  className="t-body overflow-hidden whitespace-pre-wrap"
+                  style={{
+                    color: "var(--color-text-secondary)",
+                    maxHeight: foldable && !expanded ? "184px" : undefined,
+                  }}
+                >
+                  {answer}
+                </p>
+                {foldable && !expanded && (
+                  // Fades into the panel rather than cutting mid-line, so it reads as
+                  // folded rather than truncated.
+                  <div
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-0 bottom-0 h-[56px]"
+                    style={{
+                      background:
+                        "linear-gradient(to bottom, transparent, var(--color-surface-1))",
+                    }}
+                  />
+                )}
+              </div>
+              {foldable && (
+                <button
+                  className="mt-[10px] text-[12px] underline"
+                  style={{ color: "var(--color-text-tertiary)" }}
+                  onClick={() => setExpanded((v) => !v)}
+                >
+                  {expanded
+                    ? "Show less"
+                    : `Read the full response (${answer.length.toLocaleString()} characters)`}
+                </button>
+              )}
+            </>
           )
         ) : (
           <p className="text-[13px]" style={{ color: "var(--color-text-tertiary)" }}>
