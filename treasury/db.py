@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from proxy import pg
+
+from . import config
 
 # Was a reentrant lock guarding one shared SQLite connection, because using a single
 # `sqlite3.Connection` from two threads at once is API misuse rather than mere
@@ -473,7 +476,20 @@ def chargeable_mandate(project_id: str, provider: str,
       enforces. Checking it here turns a Prava decline into a local refusal with a
       reason, which is the difference between a diagnosable demo and a mystery.
 
-    Ordered by remaining headroom so the mandate most able to absorb the charge wins.
+    **Ordering is a third safety property, not a tie-break.** It used to be remaining
+    headroom alone — "the mandate most able to absorb the charge wins" — which is right in
+    the abstract and wrong here. On this sandbox a mandate approved above
+    ``MANDATE_MINTABLE_MAX_USD`` is approved and ``active`` but cannot mint credentials:
+    every charge returns "Visa 400 — Fetching cryptogram failed". Sorting by headroom put
+    those *first*, so the selector reliably chose the mandates that cannot work over the
+    ones that can. Observed live: a $500 mandate carrying ``last_charge_status='declined'``
+    was picked ahead of four healthy $50 mandates with full headroom.
+
+    So the order is now: mintable size first, then mandates whose last charge did not
+    decline, then headroom. Both new keys **deprioritise rather than exclude** — a large
+    mandate is genuinely chargeable on a production account, and a previous decline may
+    have been transient, so refusing the only mandate available would turn a probable
+    failure into a certain one.
     """
     sql = ("SELECT * FROM mandates"
            " WHERE project_id = ? AND provider = ? AND active = 1"
@@ -492,7 +508,20 @@ def chargeable_mandate(project_id: str, provider: str,
         # rather than excluding a mandate that may be perfectly good.
         sql += " AND (remaining_usd IS NULL OR remaining_usd >= ?)"
         params.append(min_remaining_usd)
-    sql += " ORDER BY COALESCE(remaining_usd, approved_amount_usd) DESC LIMIT 1"
+    sql += (
+        " ORDER BY"
+        # 1. Can this mandate actually mint credentials? Unknown amount sorts with the
+        #    usable ones — never seen it fail, so do not assume the worst.
+        "   CASE WHEN approved_amount_usd IS NULL OR approved_amount_usd <= ?"
+        "        THEN 0 ELSE 1 END,"
+        # 2. Did the last attempt on it decline? Weaker signal than size, because a
+        #    decline can be transient, so it breaks ties rather than leading.
+        "   CASE WHEN last_charge_status = 'declined' THEN 1 ELSE 0 END,"
+        # 3. Only then, the mandate most able to absorb the charge.
+        "   COALESCE(remaining_usd, approved_amount_usd) DESC"
+        " LIMIT 1"
+    )
+    params.append(config.MANDATE_MINTABLE_MAX_USD)
 
     row = _fetchone(sql, tuple(params))
     return dict(row) if row else None
@@ -512,6 +541,22 @@ def open_event(
     ARCHITECTURE.md §5: the row is written *before* Prava is called, and its id is the
     key sent to Prava. A crash between here and the charge leaves a `pending` row to
     reconcile rather than a charge nobody recorded.
+
+    The key cannot be known until the row exists, so it is written in two steps, and the
+    step-one placeholder must be **unique per row**. `idempotency_key` is UNIQUE *and*
+    NOT NULL, so neither `''` nor NULL is available: `''` permits exactly one row to hold
+    it, and NULL is rejected outright.
+
+    With `''` — the original implementation — a row whose UPDATE never landed sat in the
+    table blocking **every subsequent top-up, permanently**. Not hypothetical: one
+    dry-run row kept `''` on 2026-08-02 and the next real charge died on `duplicate key
+    value violates unique constraint "treasury_events_idempotency_key_key"`. One stuck
+    row took the entire payment path down, and nothing would have recovered it but a
+    manual DELETE.
+
+    A random placeholder cannot collide, so the same stuck row is now inert. It is
+    overwritten with `tev_{id}` immediately below; the `pending_` prefix only ever
+    survives on a row whose UPDATE failed, which makes those rows easy to find.
     """
     conn = connect()
     with _lock:
@@ -522,16 +567,25 @@ def open_event(
             # RETURNING id: Postgres has no `lastrowid`, and this id is load-bearing —
             # it becomes the Prava idempotency key, so a retry of the same decision
             # dedupes instead of charging twice.
-            " VALUES (?, ?, ?, 'pending', '', ?, ?) RETURNING id",
+            " VALUES (?, ?, ?, 'pending', ?, ?, ?) RETURNING id",
             (
                 wallet_id,
                 mandate_id,
                 amount_usd,
+                f"pending_{uuid.uuid4().hex}",
                 json.dumps(decision_inputs) if decision_inputs else None,
                 now_iso(),
             ),
         )
         event_id = cur.lastrowid
+        if event_id is None:
+            # No id means no idempotency key, and an unkeyed charge cannot be deduped on
+            # retry — which is the one failure that ends the autonomous-payments pitch.
+            # Refuse to proceed rather than send Prava a reference of "tev_None".
+            raise RuntimeError(
+                "treasury_events INSERT returned no id; refusing to charge without an "
+                "idempotency key"
+            )
         # The key is derived from the row id, so it is stable across retries of the same
         # decision and distinct across different ones.
         key = f"tev_{event_id}"
@@ -616,10 +670,23 @@ def seconds_since_last_attempt(wallet_id: str) -> float | None:
     """Age of the most recent attempt, or ``None`` if there has never been one.
 
     Backs the cooldown. Deliberately counts *attempts* rather than successes — a failing
-    charge retried in a tight loop is the case the cooldown most needs to stop.
+    charge retried in a tight loop is the case the cooldown most needs to stop, so
+    ``failed`` and ``pending`` both count.
+
+    **Locally refused attempts are excluded, and that exclusion is load-bearing.** Every
+    refusal writes its own audit row, so counting them made the cooldown self-renewing:
+    the cooldown check refuses, the refusal writes an event, and the next check measures
+    from *that* row. Observed live on 2026-08-02 — two consecutive attempts returned
+    ``wait_s`` of 279.7 then 298.4, the deadline moving further away each time. Once a
+    wallet entered cooldown it could never leave it, and the only symptom was a Treasurer
+    that had quietly stopped topping up forever.
+
+    ``dry_run`` is excluded for the same reason: it stops before the charge, so no card
+    was touched and there is nothing to cool down from.
     """
     row = _fetchone(
         "SELECT created_at FROM treasury_events WHERE wallet_id = ?"
+        "   AND status NOT IN ('refused', 'dry_run')"
         " ORDER BY created_at DESC LIMIT 1",
         (wallet_id,),
     )

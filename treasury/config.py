@@ -111,6 +111,19 @@ MANDATE_MERCHANT_COUNTRY = _str("MANDATE_MERCHANT_COUNTRY", "US")
 # on stage having "worked" in setup.
 MANDATE_DEFAULT_AMOUNT_USD = _float("MANDATE_DEFAULT_AMOUNT_USD", 50.0)
 
+# The same observed limit, applied at *selection* time rather than creation time.
+#
+# Creating mandates at $50 is not enough on its own: larger ones already exist on the
+# account, and `chargeable_mandate` used to order purely by remaining headroom — "the
+# mandate most able to absorb the charge wins". On this sandbox that reliably picked the
+# $500 mandates, which are exactly the ones that cannot mint credentials, ahead of the
+# $50 ones that work. The selector preferred the broken mandates by construction.
+#
+# Mandates above this are DEPRIORITISED, never excluded. A $500 mandate is genuinely
+# chargeable on a production account, and refusing to use the only mandate available
+# would turn a probable failure into a certain one.
+MANDATE_MINTABLE_MAX_USD = _float("MANDATE_MINTABLE_MAX_USD", 50.0)
+
 # Where Prava returns the owner after they approve. Must be https, and without it a
 # hosted approval has nowhere to send them — they just stall on Prava's page. Point it
 # at the dashboard once it is deployed; empty means no redirect is requested.

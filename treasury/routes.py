@@ -74,6 +74,41 @@ async def _authed_key(request: Request) -> dict:
     return key
 
 
+async def _no_body(request: Request) -> None:
+    """Reject a request body on routes that take query parameters.
+
+    Every POST below binds bare scalar defaults, which FastAPI reads as *query*
+    parameters. With no body model declared it never reads the body at all — so a JSON
+    body is not rejected, it is invisible. Measured:
+
+        POST /wallets/seed  {"balance_usd": 99.00, "reset": true}
+        -> HTTP 200, balance_usd 0.05, updated_at unchanged
+
+    The caller asked to set $99, was told it worked, and nothing was written. That is the
+    worst shape a money endpoint can have: no error to log, no error to search for, and a
+    success code.
+
+    It matters beyond a shell gotcha because sending JSON is the default thing a browser
+    frontend does, and `/mandates/create` is the route a judge drives to add their own
+    card. A "Connect your card" button posting JSON would return 200 and do nothing, on
+    every click, forever.
+
+    Fixing it by accepting JSON instead was the other option, and was not taken: every
+    existing caller — the walkthrough, `scripts/`, and 182 treasury self-checks — passes
+    query parameters, so switching the contract would break all of them to fix a caller
+    that does not exist yet. Making the mistake loud costs nothing and cannot regress.
+    """
+    if await request.body():
+        raise HTTPException(
+            415,
+            detail=(
+                "This route takes query parameters, not a request body. "
+                "Retry with ?name=value in the URL — e.g. "
+                "POST /wallets/seed?project_id=demo-project&balance_usd=0.05"
+            ),
+        )
+
+
 # ── Wallets ──────────────────────────────────────────────────────────────────
 
 
@@ -83,7 +118,7 @@ def wallets():
     return db.list_wallets()
 
 
-@router.post("/wallets/seed", dependencies=[Depends(_authed_key)])
+@router.post("/wallets/seed", dependencies=[Depends(_authed_key), Depends(_no_body)])
 def seed_wallet(
     project_id: str = "demo-project",
     provider: str = "openai",
@@ -105,7 +140,7 @@ def seed_wallet(
 # ── Top-up ───────────────────────────────────────────────────────────────────
 
 
-@router.post("/topup", dependencies=[Depends(_authed_key)])
+@router.post("/topup", dependencies=[Depends(_authed_key), Depends(_no_body)])
 async def topup(
     project_id: str = "demo-project", provider: str | None = None, amount_usd: float = 50.00
 ):
@@ -129,7 +164,7 @@ def treasury_assess(project_id: str = "demo-project", provider: str | None = Non
     return treasurer.assess(project_id, provider)
 
 
-@router.post("/treasury/tick")
+@router.post("/treasury/tick", dependencies=[Depends(_no_body)])
 async def treasury_tick():
     """Run one pass of the Treasurer immediately, across every wallet.
 
@@ -274,7 +309,7 @@ async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
     return synced
 
 
-@router.post("/mandates/create")
+@router.post("/mandates/create", dependencies=[Depends(_no_body)])
 async def create_mandate(
     project_id: str = "demo-project",
     amount_usd: float | None = None,
@@ -365,7 +400,7 @@ async def mandate_status(project_id: str = "demo-project",
     }
 
 
-@router.post("/mandates/sync")
+@router.post("/mandates/sync", dependencies=[Depends(_no_body)])
 async def sync_mandates(project_id: str = "demo-project",
                         external_user_id: str | None = None):
     """Refresh this project's mandates from Prava.
@@ -396,12 +431,12 @@ def chargeable(project_id: str = "demo-project", amount_usd: float | None = None
     return db.chargeable_mandate(project_id, config.TREASURER_PROVIDER, amount_usd)
 
 
-@router.post("/charge", dependencies=[Depends(_authed_key)])
+@router.post("/charge", dependencies=[Depends(_authed_key), Depends(_no_body)])
 async def charge(amount: float = 2.00):
     return await charge_mandate(amount, f"api_{uuid.uuid4().hex[:8]}")
 
 
-@router.post("/report", dependencies=[Depends(_authed_key)])
+@router.post("/report", dependencies=[Depends(_authed_key), Depends(_no_body)])
 async def report(transaction_id: str, approved: bool = True):
     """Settle a charge. `transactionId` comes from the /charge response.
 
@@ -414,7 +449,7 @@ async def report(transaction_id: str, approved: bool = True):
     return await report_charge(transaction_id, approved)
 
 
-@router.post("/charge-refusal", dependencies=[Depends(_authed_key)])
+@router.post("/charge-refusal", dependencies=[Depends(_authed_key), Depends(_no_body)])
 async def charge_refusal():
     """Over the cap. Visa declines. This is the demo beat."""
     return await charge_mandate(999.00, f"refuse_{uuid.uuid4().hex[:8]}")
