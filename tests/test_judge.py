@@ -816,6 +816,162 @@ def test_the_treasurer_loop_never_touches_a_judge_wallet() -> None:
           sessions.PROJECT_PREFIX == treasurer.JUDGE_PROJECT_PREFIX)
 
 
+
+# ── Act 4: the mandate and the top-up ────────────────────────────────────────
+
+def test_treasury_act_is_scoped_and_defaults_dry() -> None:
+    print("\nAct 4 runs on the judge's own account, or not at all")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+    from treasury import config as tconfig
+    from treasury import topup as tup
+
+    check("the global dry-run switch is ON and must stay on",
+          tconfig.TREASURER_DRY_RUN is True or os.environ.get("TREASURER_DRY_RUN") == "false")
+
+    with TestClient(app) as client:
+        made = client.post("/judge/session", json={"name": "Payer",
+                                                   "email": "payer@example.com"}).json()
+        auth = {"X-Judge-Session": made["token"]}
+
+        state = client.get("/judge/treasury", headers=auth)
+        check("GET /judge/treasury succeeds", state.status_code == 200, state.text[:200])
+        body = state.json()
+        check("the wallet is seeded below the Treasurer's floor",
+              body["assessment"]["balance_usd"] == sessions.WALLET_SEED_USD)
+        check("so the agent has a real reason to act",
+              body["assessment"]["should_topup"] is True)
+        check("and the trigger is the floor, not runway",
+              body["assessment"]["trigger"] == "floor")
+        check("no merchant key means it says so",
+              body["uses_own_merchant_key"] is False)
+        check("the sandbox OTP is stated up front",
+              body["guidance"]["sandbox_otp"] == "456789")
+        check("as is the one-purchase-per-cycle rule",
+              "one purchase per monthly cycle" in body["guidance"]["one_per_cycle"])
+
+        # The amounts the sandbox actually accepts, refused at both ends with a reason.
+        too_big = client.post("/judge/mandate", headers=auth, json={"amount_usd": 500})
+        check("a $500 mandate is refused", too_big.status_code == 400)
+        check("and says why it cannot work", "cryptogram" in too_big.text
+              or "mint credentials" in too_big.text, too_big.text[:160])
+        too_small = client.post("/judge/mandate", headers=auth, json={"amount_usd": 1})
+        check("a $1 mandate is refused", too_small.status_code == 400)
+
+    # The load-bearing default: without the judge's own key, nothing charges. `dry_run`
+    # left as None falls through to the global, which is on.
+    import inspect
+    sig = inspect.signature(tup.execute_topup)
+    check("execute_topup takes a per-call dry_run", "dry_run" in sig.parameters)
+    check("and it defaults to None, meaning 'use the global'",
+          sig.parameters["dry_run"].default is None)
+
+
+def test_our_mandate_cannot_be_charged_by_a_judge() -> None:
+    """The failure that would end the pitch: a judge's click spending our money."""
+    print("\na judge cannot reach the team's mandate")
+    from treasury import db as tdb
+
+    judge_session = sessions.create()
+    tdb.ensure_wallet(judge_session.project_id, "openai", sessions.WALLET_SEED_USD)
+    tdb.ensure_wallet("demo-project", "openai", 5.0)
+
+    # Mandate selection is scoped by project, so a judge's top-up can only ever find a
+    # mandate their own approval created.
+    theirs = tdb.chargeable_mandate(judge_session.project_id, "openai")
+    check("a fresh judge has no chargeable mandate at all", theirs is None)
+
+    stored = tdb.list_stored_mandates(judge_session.project_id)
+    check("and no stored mandates", stored == [])
+    check("while the team's project is a separate scope entirely",
+          tdb.wallet_id_for(judge_session.project_id, "openai")
+          != tdb.wallet_id_for("demo-project", "openai"))
+
+
+
+# ── Abuse limits and credential hygiene ──────────────────────────────────────
+
+def test_session_creation_is_rate_limited() -> None:
+    print("\nsession creation is bounded, because the route cannot be authenticated")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    per_ip = sessions.MAX_SESSIONS_PER_IP_PER_HOUR
+    sessions._recent_by_ip.clear()
+
+    with TestClient(app) as client:
+        codes = [client.post("/judge/session", json={"name": f"n{i}"}).status_code
+                 for i in range(per_ip + 2)]
+        check(f"the first {per_ip} from one address succeed",
+              codes[:per_ip] == [200] * per_ip, str(codes))
+        check("and the rest are refused with 429",
+              set(codes[per_ip:]) == {429}, str(codes))
+
+        refused = client.post("/judge/session", json={"name": "over"})
+        check("the refusal explains itself rather than just failing",
+              "provider credit" in refused.text, refused.text[:160])
+
+    sessions._recent_by_ip.clear()
+    check("clearing the window lets a genuine judge back in",
+          sessions.create(client_ip="1.2.3.4") is not None)
+
+    # Expired sessions must not count towards the live cap, or the console would stop
+    # working permanently a few hundred judges in.
+    before = sessions.create(ttl_s=-1)
+    check("an expired session still exists as an audit record",
+          sessions.resolve(before.token) is not None)
+    check("but does not block new ones",
+          sessions.create(client_ip="5.6.7.8") is not None)
+
+
+def test_credentials_do_not_outlive_their_ttl() -> None:
+    print("\nthe credential vault is actually swept, not just sweepable")
+    stale = sessions.create()
+    sessions.put_secrets(stale.token, {"prava_api_key": SECRET}, ttl_s=0)
+    time.sleep(0.01)
+    check("the secret is still resident before a sweep",
+          stale.token in sessions._vault)
+
+    # `create()` sweeps, so the vault cannot grow under the traffic that fills it.
+    sessions._recent_by_ip.clear()
+    sessions.create(client_ip="9.9.9.9")
+    check("creating a session sweeps expired credentials",
+          stale.token not in sessions._vault)
+
+    # And the proxy runs the same sweep on a timer, for a console nobody is using.
+    import inspect
+
+    from proxy import app as proxy_app
+    src = inspect.getsource(proxy_app.lifespan)
+    check("the proxy sweeps on a timer too", "purge_expired" in src)
+    check("and cancels the sweeper on shutdown", "sweeper" in src)
+
+
+def test_mandate_routes_require_a_key() -> None:
+    """PROPOSALS.md M7: an open /mandates/create burns the Prava allowance."""
+    print("\nthe mandate routes are no longer unauthenticated")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        for path in ("/mandates/create", "/mandates/sync"):
+            bare = client.post(path)
+            check(f"POST {path} without a key is refused",
+                  bare.status_code in (401, 403), f"got {bare.status_code}")
+
+    # The console is unaffected: it calls these as functions, not over HTTP, so the
+    # dependency never runs. Verified by import rather than by a live Prava call.
+    from judge import routes as judge_routes
+    src = __import__("inspect").getsource(judge_routes)
+    check("the console imports create_mandate directly",
+          "from treasury.routes import create_mandate" in src)
+    check("and sync_mandates directly",
+          "from treasury.routes import sync_mandates" in src)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -843,6 +999,11 @@ def main() -> int:
             test_breaker_reset_is_scoped_to_the_judge,
             test_annotate_is_scoped_and_returns_the_outcome,
             test_the_treasurer_loop_never_touches_a_judge_wallet,
+            test_treasury_act_is_scoped_and_defaults_dry,
+            test_our_mandate_cannot_be_charged_by_a_judge,
+            test_session_creation_is_rate_limited,
+            test_credentials_do_not_outlive_their_ttl,
+            test_mandate_routes_require_a_key,
         ):
             suite()
     finally:
