@@ -54,7 +54,7 @@ def load_baseline() -> list[dict]:
     for name in SOURCES:
         p = REPO / "data" / "templated" / name
         if p.exists():
-            rows += [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+            rows += [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
     return [r for r in rows
             if r.get("input_tokens", 0) <= MAX_INPUT_TOKENS and r.get("output_tokens")]
 
@@ -152,7 +152,6 @@ def main() -> int:
     if not plan:
         sys.exit("no low-input baseline rows found — run the corpus probe first")
 
-    import numpy as np
     est_in = sum(r["input_tokens"] for r in plan)
     est_out = sum(r.get("max_tokens") or 1024 for r in plan)
     # claude-haiku-4-5: $1/M input, $5/M output.

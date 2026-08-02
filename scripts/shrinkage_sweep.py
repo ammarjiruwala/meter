@@ -45,7 +45,7 @@ def load() -> list[dict]:
     for name in SOURCES:
         p = REPO / "data" / "templated" / name
         if p.exists():
-            rows += [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+            rows += [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
     rows = [r for r in rows if r.get("output_tokens") and "holdout" in r]
     if not rows:
         sys.exit("no held-out rows — run scripts/corpus_probe.py first")
