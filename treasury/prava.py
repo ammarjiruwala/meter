@@ -47,6 +47,45 @@ _TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 _TIMEOUT_READ = httpx.Timeout(8.0, connect=5.0)
 
 
+# Rate limiting (PROPOSALS.md C3). Prava documents no RPM/RPS figure for any endpoint and
+# no `Retry-After` header, so there is no published number to honour — only a `429
+# TRIES_EXHAUSTED` on `POST /v1/sessions`. That absence is the reason for the split below
+# rather than an argument against handling it: an undocumented limit is one you discover
+# during the demo.
+#
+# Reads are retried with backoff because a GET has no side effect, so the worst case of a
+# retry is a wasted second. Writes are NEVER retried here. A charge that came back 429 is
+# a definite refusal, but "definite" is a claim about *this* response, and the safe way to
+# resume a charge is `topup`'s pending-event path with its original idempotency key — not
+# a second POST from inside the transport helper, which would be a second charge attempt
+# wearing the same clothes.
+_READ_RETRIES = 2
+_BACKOFF_BASE_S = 1.0
+_BACKOFF_MAX_S = 8.0
+
+# The one documented throttle. Treated as a trip rather than a blip: it means an allowance
+# is *spent*, not that we arrived too fast, so retrying sooner cannot help and only burns
+# whatever budget the sandbox is metering.
+_EXHAUSTED_CODE = "TRIES_EXHAUSTED"
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Honour `Retry-After` if it appears, even though Prava documents none.
+
+    Accepts the delay-seconds form only. The HTTP-date form is legal but nothing observed
+    on this sandbox emits it, and mis-parsing a date into a multi-hour sleep would wedge
+    the Treasurer far worse than ignoring the header.
+    """
+    raw = (response.headers.get("retry-after") or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    return max(0.0, min(seconds, _BACKOFF_MAX_S))
+
+
 async def _request(method: str, path: str, json_body: dict | None = None,
                    timeout: httpx.Timeout | None = None) -> dict:
     """Every Prava call goes through here, and none of them raise.
@@ -65,20 +104,42 @@ async def _request(method: str, path: str, json_body: dict | None = None,
     moment things go wrong.
     """
     url = f"{config.PRAVA_API_BASE}{path}"
-    try:
-        async with httpx.AsyncClient(timeout=timeout or _TIMEOUT) as client:
-            r = await client.request(method, url, headers=HEADERS, json=json_body)
-    except httpx.TimeoutException as exc:
-        log.warning("prava timeout on %s %s: %s", method, path, exc)
-        return {"_ok": False, "_transport": True, "_error": "timeout",
-                "_detail": str(exc)}
-    except httpx.RequestError as exc:
-        log.warning("prava unreachable on %s %s: %s", method, path, exc)
-        return {"_ok": False, "_transport": True, "_error": "unreachable",
-                "_detail": str(exc)}
+    retries = _READ_RETRIES if method.upper() == "GET" else 0
+    attempt = 0
+
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=timeout or _TIMEOUT) as client:
+                r = await client.request(method, url, headers=HEADERS, json=json_body)
+        except httpx.TimeoutException as exc:
+            log.warning("prava timeout on %s %s: %s", method, path, exc)
+            return {"_ok": False, "_transport": True, "_error": "timeout",
+                    "_detail": str(exc)}
+        except httpx.RequestError as exc:
+            log.warning("prava unreachable on %s %s: %s", method, path, exc)
+            return {"_ok": False, "_transport": True, "_error": "unreachable",
+                    "_detail": str(exc)}
+
+        if r.status_code != 429 or attempt >= retries:
+            break
+
+        # A retryable 429 on a read. Exhaustion is never retryable, whatever the method:
+        # the allowance is spent, so sleeping longer does not refill it.
+        if _EXHAUSTED_CODE in r.text:
+            break
+        delay = _retry_after_seconds(r) or min(
+            _BACKOFF_BASE_S * (2 ** attempt), _BACKOFF_MAX_S
+        )
+        attempt += 1
+        log.warning("prava 429 on %s %s — backing off %.1fs (attempt %d/%d)",
+                    method, path, delay, attempt, retries)
+        await asyncio.sleep(delay)
 
     meta = {"_http_status": r.status_code,
             "_response_id": r.headers.get("x-response-id")}
+    if r.status_code == 429:
+        meta["_rate_limited"] = True
+        meta["_retry_after_s"] = _retry_after_seconds(r)
 
     try:
         body = r.json()
@@ -97,8 +158,18 @@ async def _request(method: str, path: str, json_body: dict | None = None,
     if not body["_ok"]:
         err = body.get("error") or {}
         body.setdefault("_error", err.get("code") or f"http_{r.status_code}")
-        log.warning("prava %s %s -> HTTP %s %s (response-id %s)", method, path,
-                    r.status_code, body["_error"], meta["_response_id"])
+        # The allowance is spent, not merely hit too fast. Callers must stop rather than
+        # retry, so this is flagged separately from an ordinary rate limit (C3).
+        if body.get("_error") == _EXHAUSTED_CODE or _EXHAUSTED_CODE in str(err):
+            body["_exhausted"] = True
+            log.error(
+                "PRAVA ALLOWANCE EXHAUSTED on %s %s (response-id %s) — this is a trip, "
+                "not a blip: retrying sooner cannot refill it.",
+                method, path, meta["_response_id"],
+            )
+        else:
+            log.warning("prava %s %s -> HTTP %s %s (response-id %s)", method, path,
+                        r.status_code, body["_error"], meta["_response_id"])
     return body
 
 

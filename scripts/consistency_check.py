@@ -24,9 +24,7 @@ one ships.
 from __future__ import annotations
 
 import json
-import sqlite3
 import sys
-import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -36,6 +34,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from scripts._scratch import scratch_ledger              # noqa: E402
 from scripts.accuracy_report import stats, show          # noqa: E402
 
 FOLDS = 5
@@ -76,33 +75,32 @@ def live_loop(rows: list[dict]) -> dict:
     """
     from predictor import Predictor, engine, refresh
 
-    db = tempfile.mktemp(suffix=".db")
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE requests (id TEXT, ts TEXT, project_id TEXT, actor TEXT, "
-                 "feature TEXT, bucket TEXT, model TEXT, output_tokens INTEGER, "
-                 "predicted_scope_tokens INTEGER)")
-    base = datetime.now(timezone.utc) - timedelta(hours=3)
-    # Interleaved, because real traffic interleaves features and the gate's holdout is
-    # temporal -- writing template-by-template would put whole features in the holdout
-    # that the fit half never saw.
-    order = list(range(len(rows)))
-    np.random.default_rng(0).shuffle(order)
-    for n, i in enumerate(order):
-        r = rows[i]
-        conn.execute("INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?)",
-                     (uuid.uuid4().hex, (base + timedelta(seconds=n * 5)).isoformat(),
-                      r["project"], r["actor"], r["feature"], r["bucket"], r["model"],
-                      r["output_tokens"], r["predicted_scope_tokens"]))
-    conn.commit()
-    conn.close()
+    with scratch_ledger("consistency") as conn:
+        base = datetime.now(timezone.utc) - timedelta(hours=3)
+        # Interleaved, because real traffic interleaves features and the gate's holdout
+        # is temporal -- writing template-by-template would put whole features in the
+        # holdout that the fit half never saw.
+        order = list(range(len(rows)))
+        np.random.default_rng(0).shuffle(order)
+        for n, i in enumerate(order):
+            r = rows[i]
+            conn.execute(
+                "INSERT INTO requests (id, ts, project_id, actor, feature, bucket, "
+                "model, provider, endpoint, output_tokens, predicted_scope_tokens) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (uuid.uuid4().hex, (base + timedelta(seconds=n * 5)).isoformat(),
+                 r["project"], r["actor"], r["feature"], r["bucket"], r["model"],
+                 "openai", "/v1/chat/completions",
+                 r["output_tokens"], r["predicted_scope_tokens"]))
+        conn.commit()
 
-    p = Predictor()
-    p._history = {}
-    saved, engine._default = engine._default, p
-    try:
-        summary = refresh.refresh_now(db)
-    finally:
-        engine._default = saved
+        p = Predictor()
+        p._history = {}
+        saved, engine._default = engine._default, p
+        try:
+            summary = refresh.refresh_now()
+        finally:
+            engine._default = saved
     return {"summary": summary, "history": dict(p._history)}
 
 

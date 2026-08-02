@@ -14,8 +14,16 @@ Owner: Ammar (Predictive AI).
 
 from __future__ import annotations
 
+import os
 import sys
+import uuid
 from pathlib import Path
+
+# Point the ledger at a throwaway Postgres SCHEMA before proxy.config is imported, so a
+# test run can never touch the tables the demo and the judges are using. Under SQLite this
+# was a tempfile; a hosted database needs the schema-level equivalent, and the run drops it
+# at the end. Two suites below write to `requests` and one of them clears it.
+os.environ["DB_SCHEMA"] = "test_predictor_" + uuid.uuid4().hex[:8]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -420,9 +428,6 @@ def test_priors() -> None:
 def test_proxy_integration() -> None:
     """The ESTIMATE seam in proxy/app.py, which must never fail a request."""
     print("\nproxy integration")
-    import os
-    import tempfile
-    os.environ.setdefault("METER_DB_PATH", str(Path(tempfile.mkdtemp()) / "t.db"))
     from proxy.app import _predict
 
     r = _predict({"messages": [{"role": "user", "content": "Write a Python function."}]},
@@ -464,47 +469,48 @@ def test_ledger_migration() -> None:
     it is the priced history ARCHITECTURE.md §9 calls the part that does not port.
     """
     print("\nledger migration")
-    import os
-    import sqlite3
-    import tempfile
-
-    path = Path(tempfile.mkdtemp()) / "old.db"
-    conn = sqlite3.connect(str(path))
-    # The real pre-prediction schema, so the other indexes in SCHEMA resolve too.
-    conn.executescript(
-        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts TEXT NOT NULL, "
-        "project_id TEXT NOT NULL, environment TEXT, actor TEXT, feature TEXT, "
-        "trace_id TEXT, provider TEXT NOT NULL, model TEXT, endpoint TEXT NOT NULL, "
-        "input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, "
-        "cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0, "
-        "pricing_version TEXT, cost_usd REAL DEFAULT 0, latency_ms REAL, ttft_ms REAL, "
-        "overhead_ms REAL, status INTEGER, is_stream INTEGER DEFAULT 0, "
-        "estimated INTEGER DEFAULT 0, prompt_hash TEXT, reservation_id TEXT);"
-        "INSERT INTO requests (id,ts,project_id,provider,endpoint,cost_usd) "
-        "VALUES ('old','2026-01-01','p','openai','/v1/chat',0.5);"
-    )
-    conn.commit()
-    conn.close()
-
-    os.environ["METER_DB_PATH"] = str(path)
-    import importlib
-
-    from proxy import config as cfg
-    importlib.reload(cfg)
     from proxy import db as dbmod
-    importlib.reload(dbmod)
+
+    conn = dbmod.connect()
+
+    def columns() -> set[str]:
+        return {r["column_name"] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'requests'")}
+
+    conn.execute(
+        "INSERT INTO requests (id, ts, project_id, provider, endpoint, cost_usd)"
+        " VALUES ('old', '2026-01-01T00:00:00.000000+00:00', 'p', 'openai',"
+        " '/v1/chat', 0.5) ON CONFLICT (id) DO NOTHING")
+
+    # Drop the prediction columns to recreate the pre-prediction shape in place, then
+    # re-run the boot path. The bucket index goes with them, which is the point: the
+    # first version of this crashed because SCHEMA created an index on `bucket` while
+    # CREATE TABLE IF NOT EXISTS no-opped on the existing table, so the index referenced
+    # a column that did not exist yet.
+    conn.execute("DROP INDEX IF EXISTS idx_requests_bucket")
+    for col in ("predicted_output_tokens", "predicted_cost_usd", "bucket",
+                "prediction_method"):
+        conn.execute(f"ALTER TABLE requests DROP COLUMN IF EXISTS {col}")
+    check("the older ledger lacks the prediction columns", "bucket" not in columns())
+
+    dbmod._schema_ready = False
     dbmod.connect()
 
-    check2 = sqlite3.connect(str(path))
-    cols = {r[1] for r in check2.execute("PRAGMA table_info(requests)")}
-    for col in ("predicted_output_tokens", "predicted_cost_usd", "bucket", "prediction_method"):
+    cols = columns()
+    for col in ("predicted_output_tokens", "predicted_cost_usd", "bucket",
+                "prediction_method"):
         check(f"migration added {col}", col in cols)
-    rows = check2.execute("SELECT id, cost_usd FROM requests").fetchall()
-    check("historical rows survive", rows == [("old", 0.5)], f"got {rows}")
-    idx = [r[0] for r in check2.execute(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_requests_bucket'")]
-    check("bucket index created after the column", idx == ["idx_requests_bucket"])
-    check2.close()
+
+    row = conn.execute("SELECT id, cost_usd FROM requests WHERE id = 'old'").fetchone()
+    check("historical rows survive", row is not None and row["cost_usd"] == 0.5,
+          f"got {row}")
+
+    idx = conn.execute(
+        "SELECT indexname FROM pg_indexes"
+        " WHERE schemaname = current_schema() AND indexname = 'idx_requests_bucket'"
+    ).fetchall()
+    check("bucket index created after the column", len(idx) == 1)
 
 
 def test_refresh_gate() -> None:
@@ -513,28 +519,30 @@ def test_refresh_gate() -> None:
     Both properties here were live bugs. The loop was wired into the proxy, ran on a
     timer, logged a verdict every pass — and installed nothing, ever.
     """
-    import sqlite3
-    import tempfile
     import uuid
     from datetime import datetime, timedelta, timezone
 
     print("\nrefresh gate")
-    db = tempfile.mktemp(suffix=".db")
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE requests (id TEXT, ts TEXT, project_id TEXT, actor TEXT, "
-                 "feature TEXT, bucket TEXT, model TEXT, output_tokens INTEGER, "
-                 "predicted_scope_tokens INTEGER)")
+    from proxy import db as dbmod
+
+    conn = dbmod.connect()
+    # The throwaway schema this run owns is the fixture. Clearing `requests` first so the
+    # rows the earlier suites left behind cannot dilute the two keys under test.
+    conn.execute("DELETE FROM requests")
+
     base = datetime.now(timezone.utc) - timedelta(hours=1)
     # "good": actual is consistently 1/4 of scope, so a 0.25 factor is right and holds
     # up out of sample. "noisy": actual alternates wildly, so no single factor helps.
     for i in range(80):
         for feat, actual in (("good", 100), ("noisy", 40 if i % 2 else 800)):
-            conn.execute("INSERT INTO requests VALUES (?,?,?,?,?,?,?,?,?)",
-                         (uuid.uuid4().hex,
-                          (base + timedelta(seconds=i * 10)).isoformat(),
-                          "proj", "actor", feat, "default", "gpt-4o", actual, 400))
-    conn.commit()
-    conn.close()
+            conn.execute(
+                "INSERT INTO requests (id, ts, project_id, actor, feature, bucket, model,"
+                " provider, endpoint, output_tokens, predicted_scope_tokens)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (uuid.uuid4().hex,
+                 (base + timedelta(seconds=i * 10)).isoformat(),
+                 "proj", "actor", feat, "default", "gpt-4o",
+                 "openai", "/v1/chat/completions", actual, 400))
 
     from predictor import refresh
 
@@ -542,7 +550,7 @@ def test_refresh_gate() -> None:
     p._history = {}
     saved, engine._default = engine._default, p
     try:
-        summary = refresh.refresh_now(db)
+        summary = refresh.refresh_now()
     finally:
         engine._default = saved
 
@@ -565,6 +573,20 @@ def test_refresh_gate() -> None:
 
 
 def main() -> int:
+    from proxy import config
+    from proxy import pg as _pg
+    try:
+        return _run()
+    finally:
+        # Drop the throwaway schema whether the run passed or failed. Leaving them behind
+        # accumulates dead schemas in a database three other people share.
+        try:
+            _pg.drop_schema(config.DB_SCHEMA)
+        finally:
+            _pg.close()
+
+
+def _run() -> int:
     for suite in (
         test_determinism,
         test_input_counting,

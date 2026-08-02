@@ -21,8 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import sqlite3
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -33,11 +31,14 @@ import numpy as np
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from scripts._scratch import scratch_ledger              # noqa: E402
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--batch", type=int, default=40)
-    ap.add_argument("--db", default="/tmp/meter-prequential.db")
+    ap.add_argument("--keep", action="store_true",
+                    help="leave the throwaway schema behind so it can be inspected")
     ap.add_argument("--source", choices=("wildchat", "templated"), default="wildchat",
                     help="wildchat = synthetic attribution over unrelated prompts; "
                          "templated = real (project, feature) from the probe run")
@@ -75,18 +76,24 @@ def main() -> int:
         src = REPO / "data" / "wildchat" / "train.jsonl"
         rows = [json.loads(line) for line in src.read_text().splitlines() if line.strip()]
 
-    db = Path(args.db)
-    if db.exists():
-        db.unlink()
-    os.environ["METER_DB_PATH"] = str(db)
-    os.environ.setdefault("METER_KEYS", "preq:proj-preq:dev")
-    import importlib
-    from proxy import config as cfg
-    importlib.reload(cfg)
-    from proxy import db as dbmod
-    importlib.reload(dbmod)
-    dbmod.connect()
+    with scratch_ledger("prequential", keep=args.keep) as conn:
+        curve = run(args, rows, conn)
 
+    if len(curve) >= 4:
+        first = np.mean([c[1] for c in curve[: max(2, len(curve) // 3)]])
+        last = np.mean([c[1] for c in curve[-max(2, len(curve) // 3):]])
+        print(f"\n  first third  median {first:.1f}%")
+        print(f"  last third   median {last:.1f}%")
+        delta = first - last
+        verdict = ("LEARNING — error fell as the loop saw more traffic" if delta > 2
+                   else "FLAT — the loop runs but is not adding accuracy" if delta > -2
+                   else "HARMFUL — the loop is making predictions worse")
+        print(f"  change       {delta:+.1f} points  ->  {verdict}")
+    return 0
+
+
+def run(args, rows: list[dict], conn) -> list[tuple]:
+    """The test-then-train loop itself, against an already-created scratch ledger."""
     from predictor import Predictor, buckets
     from predictor.scope import _text_of
     from scripts.replay_to_ledger import synthetic_attribution
@@ -105,7 +112,6 @@ def main() -> int:
             return r["project"], r["feature"], r["actor"]
         return synthetic_attribution(r["prompt"], bucket, idx)
 
-    conn = sqlite3.connect(str(db))
     base_ts = datetime.now(timezone.utc) - timedelta(days=1)
     curve = []
 
@@ -154,7 +160,7 @@ def main() -> int:
         _saved = _eng._default
         _eng._default = pred                      # gate against THIS predictor's state
         try:
-            summary = _refresh.refresh_now(str(db))
+            summary = _refresh.refresh_now()
         finally:
             _eng._default = _saved
         nkeys = len(pred._history)
@@ -165,19 +171,7 @@ def main() -> int:
         v = summary.get('verdict', summary.get('reason', ''))[:9]
         print(f"  {len(curve):>6}{b0 + len(batch):>7}{med:>12.1f}%{w2:>11.1f}%{nkeys:>11}  {v}")
 
-    conn.close()
-
-    if len(curve) >= 4:
-        first = np.mean([c[1] for c in curve[: max(2, len(curve) // 3)]])
-        last = np.mean([c[1] for c in curve[-max(2, len(curve) // 3):]])
-        print(f"\n  first third  median {first:.1f}%")
-        print(f"  last third   median {last:.1f}%")
-        delta = first - last
-        verdict = ("LEARNING — error fell as the loop saw more traffic" if delta > 2
-                   else "FLAT — the loop runs but is not adding accuracy" if delta > -2
-                   else "HARMFUL — the loop is making predictions worse")
-        print(f"  change       {delta:+.1f} points  ->  {verdict}")
-    return 0
+    return curve
 
 
 if __name__ == "__main__":

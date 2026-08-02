@@ -687,7 +687,7 @@ header comment; not worth building until someone actually runs 1-hour TTLs.
 
 See B1. Confirmed to exist, with OpenAI-shaped errors and dual auth-header support.
 
-### C3 — Prava sandbox rate limits · OPEN — researched 2026-08-01: not documented anywhere
+### C3 — Prava sandbox rate limits · **HANDLED IN CODE 2026-08-02 (Shubh)** — the limit itself is still undocumented by Prava
 
 Blocks A3. Owner: Shivam.
 
@@ -706,6 +706,29 @@ mandate's per-cycle cap (see the mandate finding in CONTEXT.md §6a). Prava's ow
 recommend a **3s poll cadence** for session credentials — a precedent that supports the
 demo-box `TREASURER_INTERVAL_S=3`. Implement backoff on 429 and treat `TRIES_EXHAUSTED` as
 a loop trip rather than a retryable blip.
+
+**Both implemented 2026-08-02 (Shubh).** The number is still unknown — Prava has not
+published one — but an undocumented limit is precisely the kind you meet on stage, and
+nothing handled it at all before this.
+
+* **Reads retry with exponential backoff** (2 retries, 1s→2s, capped at 8s), because a GET
+  has no side effect and the worst case of a retry is a wasted second. `Retry-After` is
+  honoured if it ever appears and **clamped**, so a bad value cannot wedge the loop for
+  hours.
+* **Writes are never retried in the transport helper.** A 429 on a charge is a definite
+  refusal, but the safe way to resume a charge is `topup`'s pending-event path with its
+  original idempotency key — a second POST from inside `_request` would be a second charge
+  attempt wearing the same clothes.
+* **`TRIES_EXHAUSTED` is a trip, not a blip.** It means an allowance is *spent*, so
+  retrying sooner cannot refill it. It is flagged separately from an ordinary 429 and is
+  never retried, on any method.
+* **The Treasurer backs off for 300s** on either signal, mirroring the circuit breaker, and
+  reports it on `/healthz .treasurer`. Without this a demo box ticking every 3s hammers a
+  throttled rail 1,200 times an hour and turns a recoverable throttle into a dead one.
+
+15 checks across `test_treasury.py`. **A3 is still not settled** — this makes either
+interval survivable, but it does not tell us what the real limit is. Measuring it, or
+asking `support@prava.space`, is still open.
 
 ### C4 — Provider credit balances · **RESOLVED — both providers funded and verified live**
 
@@ -781,7 +804,7 @@ Patterns from a review of the major open-source LLM gateways (LiteLLM, Helicone,
 OpenRouter, one-api/new-api, Langfuse) — things Meter deliberately does not yet have, or does
 have and was validated on. These are recorded for the team to pick from; none block the demo.
 
-### D1 — Client-visible request id / idempotency key · OPEN
+### D1 — Client-visible request id / idempotency key · **DONE — shipped 2026-08-02 (Shubh)**
 
 Every major gateway exposes a request id — Helicone accepts a client-supplied
 `Helicone-Request-Id` header (idempotent retries, links retries to one logical request),
@@ -794,7 +817,17 @@ response header and accept an optional client-supplied `X-Meter-Request-Id`, `IN
 REPLACE` semantics already make a replay idempotent (B8). ~5 lines, answers "what happens
 when the client retries?". Owner: Shubh.
 
-### D2 — Soft-budget alert below the hard ceiling · OPEN
+**Shipped 2026-08-02 (Shubh).** Half of this already existed — `X-Meter-Request-Id` was
+echoed on every response, including refusals. What was missing was the inbound half:
+`_request_id()` in `proxy/app.py` now uses a caller-supplied `X-Meter-Request-Id` when one
+is sent, so `record_request`'s `INSERT OR REPLACE` on that id makes a retry overwrite its
+own row rather than double-count spend (B8). Ids must match `[A-Za-z0-9._:-]{8,128}` —
+long enough not to collide, restricted enough to be safe as a primary key and in a log
+line, and **anchored at both ends** so a value carrying a newline cannot inject a header.
+A malformed id is *ignored*, not rejected: refusing would make adopting the header riskier
+than never sending it. 10 checks in `test_proxy.py`.
+
+### D2 — Soft-budget alert below the hard ceiling · **DONE — shipped 2026-08-02 (Shubh)**
 
 LiteLLM distinguishes `soft_budget` (warn only) from `max_budget` (block). Meter has the
 block side (`meter.yaml` ceilings → 429) and the alert rail (`alerts/` → iMessage) but no
@@ -805,7 +838,25 @@ into a preventable incident — and is a demo beat the current 429-only flow can
 burn rate) that fires `alerts/` when spend crosses a configurable fraction of a ceiling.
 Cheap; the pieces all exist. Owner: Shubh or Tanay, post-hackathon.
 
-### D3 — `402` vs `429` for budget refusals · OPEN — documentation decision
+**Shipped 2026-08-02 (Shubh).** `budget.soft_breaches(ratio)` plus a background poll in
+`proxy/app.py`'s lifespan, firing `alerts.send_budget_alert`. Four decisions worth keeping:
+
+* **A background poll, not a request-path check** — and not in the Treasurer loop as
+  suggested above, which would have put a proxy concern in `treasury/`. A ceiling being
+  80% full is a *level*, not an edge, so an inline test re-evaluates the same condition
+  thousands of times to send at most one message, in front of production traffic.
+* **Settled spend only.** Including in-flight holds would let a burst trip the warning and
+  then un-trip it as the holds released. An alert that retracts itself is worse than none.
+* **The same scope string a 429 would name**, so the warning and the refusal cannot
+  disagree about which line of `meter.yaml` is the problem. Asserted in the self-check.
+* **The message leads with headroom** ("$0.15 left"), not a percentage — "83% of ceiling"
+  needs arithmetic before anyone can act on it.
+
+Per-scope cooldown comes free from `alerts._within_cooldown`, and it matters more here
+than for the breaker: the condition stays true for the rest of the day, so without it this
+is one text per poll forever. 12 checks in `test_proxy.py`.
+
+### D3 — `402` vs `429` for budget refusals · **DECIDED & DOCUMENTED — 2026-08-02 (Shubh)**
 
 OpenRouter splits the two: credit/balance exhaustion is `402 Payment Required`, rate limits
 are `429` with `X-RateLimit-*` headers. Meter refuses budget-exhausted requests with `429`
@@ -837,3 +888,57 @@ cache-hit accounting (Helicone), pre-aggregated daily spend rollups (LiteLLM), m
 error encoding as SSE `finish_reason: "error"` (OpenRouter). All are real industry features;
 none are needed for the 48-hour demo, and a few (retries) would obscure the ledger's
 one-row-per-request contract.
+
+---
+
+### M5 — `GET /treasury/assess` creates a wallet, which silently defeats `/wallets/seed` · **DONE — fixed 2026-08-02 (Shubh, with Shivam's lane idle)**
+
+`treasurer.assess()` documents itself as *"Would we top up right now, and why? Reads only —
+never spends."* The second half is true. The first is not: its first statement is
+`db.ensure_wallet(project_id, provider)`, which **inserts a wallet row at $0.00** when the
+project has none. `GET /treasury/assess` is an unauthenticated read endpoint, so anyone —
+a judge poking the API, the dashboard, a demo script — can create wallet rows.
+
+On its own that is a docstring inaccuracy. It becomes a **demo trap** in combination with
+`POST /wallets/seed`, which is idempotent by design and applies its balance *on creation
+only* (`treasury/routes.py`, and correctly so — re-running it must not wipe a top-up the
+Treasurer already made). The sequence:
+
+1. Fresh `meter.db`. Anything hits `GET /treasury/assess`.
+2. A wallet is created at **$0.00**.
+3. `POST /wallets/seed` (default `balance_usd=4.00`, "the demo's too-low state") **no-ops**
+   and the wallet stays at $0.00. No error, and the response body looks successful — it
+   returns the wallet, just with the wrong balance.
+
+Reproduced on a fresh database:
+
+```
+wallets on fresh db:            []
+after GET /treasury/assess:     [('wal_demo-project_openai', 0.0)]
+after POST /wallets/seed 4.00:  0.0     <-- expected 4.00
+```
+
+Not fatal — the Treasurer still fires, because the floor trigger exists precisely for a
+balance that cannot pay for the next request. But the pitch's "$4.00, and OpenAI is about
+to run dry" beat is a number on screen during the demo, and it silently reads $0.00.
+
+**Recommendation:** make `assess()` match its own docstring and not create anything — look
+the wallet up and report `balance_usd: 0.0` when it is absent. `tick()` iterates
+`list_wallets()` and only ever assesses wallets that already exist, so nothing depends on
+the creation side effect. Roughly three lines.
+
+**The workaround until then is `POST /wallets/seed?reset=true`**, which is already
+implemented and documented. Anyone rehearsing the demo should use it rather than trusting
+a fresh-looking database.
+
+Owner: Shivam (`treasury/`). Raised rather than patched because it is another lane's
+module and the fix is a behaviour change to a documented endpoint.
+
+**Fixed 2026-08-02 (Shubh), on instruction, with Shivam's lane idle.** `assess()` now calls
+a new `db.wallet_id_for()` — pure string work — instead of `ensure_wallet`, so the read
+endpoint reads. A project with no wallet reports `balance_usd: 0.0`, which is what having
+no wallet means, and the floor trigger still fires. `tick()` only ever assesses wallets
+`list_wallets()` returned, so nothing depended on the creation side effect. Verified on a
+running app against a fresh database: `/wallets` stays `[]` across an `assess`, and seeding
+$4.00 afterwards now yields $4.00 rather than the $0.00 it silently produced before.
+5 checks in `test_treasury.py`.

@@ -126,7 +126,9 @@ cooldown and can always be reset manually.
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Postgres — the ledger. **Not read yet** (the proxy uses SQLite for the demo; the port is a schema swap) |
+| `DATABASE_URL` | Postgres — the ledger. **Required.** The proxy raises at first query without it rather than degrading |
+| `DB_SCHEMA` | Schema to use, default `public`. Test suites and harnesses override it with a throwaway one |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | Pooled connections (default `1` / `10`) |
 | `REDIS_URL` | Redis — wallet reservations, breaker state. **Not read yet** (needed at proxy replica #2 only) |
 | `PRAVA_API_KEY` / `PRAVA_MANDATE_ID` | Payment rail credentials |
 | `TREASURER_DRY_RUN` | Log top-up decisions without transacting. Default `true`. |
@@ -178,4 +180,6 @@ Set `FAIL_MODE=closed` if you would rather drop traffic than risk an unmetered c
 ## Status
 
 Hackathon build. Not yet production-hardened. See `ARCHITECTURE.md` for the design and
-`CONTEXT.md` for the decisions behind it.
+`CONTEXT.md` for the decisions behind it. `DEPLOY.md` covers hosting — and is explicit that
+the Postgres port is a prerequisite for the Vercel half, and that a Cloudflare Tunnel over
+localhost is the right answer for the demo itself.

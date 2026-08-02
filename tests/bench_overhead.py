@@ -27,10 +27,18 @@ import statistics
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 
 import httpx
 import uvicorn
+# Module level, not inside start_fake_upstream, and that placement is load-bearing: this
+# file uses `from __future__ import annotations`, so FastAPI resolves a handler's type
+# hints against its *module* globals. With `Request` imported as a local, `request:
+# Request` resolved to nothing, FastAPI treated it as a required query parameter, and the
+# fake upstream answered 422 to every call it ever received.
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 # Add repo root to path so we can import the proxy
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -69,12 +77,17 @@ async def main() -> None:
     # Set up a temporary environment
     with tempfile.TemporaryDirectory(prefix="meter-bench-") as tmpdir:
         tmpdir_path = Path(tmpdir)
-        db_path = tmpdir_path / "bench.db"
         env_path = tmpdir_path / ".env"
+
+        # A throwaway Postgres schema, the way the tests isolate themselves. The number
+        # this harness reports is added latency, so it must not be measured against a
+        # `requests` table carrying the demo's history: index depth is part of what a
+        # write costs.
+        schema = "bench_" + uuid.uuid4().hex[:8]
 
         # Minimal .env for the benchmark
         env_path.write_text(
-            f"METER_DB_PATH={db_path}\n"
+            f"DB_SCHEMA={schema}\n"
             f"METER_KEYS=mk_bench:bench-project:dev\n"
             f"OPENAI_API_KEY=fake\n"
             f"ANTHROPIC_API_KEY=fake\n"
@@ -91,7 +104,7 @@ async def main() -> None:
             env_path.write_text(env_path.read_text() + f"METER_YAML_PATH={yaml_path}\n")
 
         # Override the config module's env loading
-        os.environ["METER_DB_PATH"] = str(db_path)
+        os.environ["DB_SCHEMA"] = schema
         os.environ["METER_KEYS"] = "mk_bench:bench-project:dev"
         os.environ["OPENAI_API_KEY"] = "fake"
         os.environ["BREAKER_ENABLED"] = "false"
@@ -170,13 +183,13 @@ async def main() -> None:
             proxy_server.should_exit = True
             fake_server.should_exit = True
             await asyncio.sleep(0.5)
+            from proxy import pg
+            pg.drop_schema(schema)
+            pg.close()
 
 
 async def start_fake_upstream(port: int) -> uvicorn.Server:
     """Start a trivial fake upstream that returns 200 OK instantly."""
-    from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse
-
     app = FastAPI()
 
     @app.post("/fake/chat/completions")
@@ -199,7 +212,7 @@ async def start_fake_upstream(port: int) -> uvicorn.Server:
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     asyncio.create_task(server.serve())
-    await asyncio.sleep(0.5)  # Let it start
+    await _await_started(server, "fake upstream")
     return server
 
 
@@ -210,8 +223,24 @@ async def start_proxy(port: int) -> uvicorn.Server:
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     asyncio.create_task(server.serve())
-    await asyncio.sleep(1.0)  # Let it fully start
+    await _await_started(server, "proxy")
     return server
+
+
+async def _await_started(server: uvicorn.Server, what: str, timeout: float = 30.0) -> None:
+    """Block until uvicorn is actually accepting connections.
+
+    A fixed sleep was wrong here and silently so. The proxy's lifespan verifies the Prava
+    credentials over the network, which can take longer than any sleep worth hard-coding —
+    and the failure is not a clean error: requests sent before `seed_keys` has run get a
+    401 for an unknown Meter key, which reads like an auth bug rather than a race with
+    startup. `server.started` is the fact we actually want to wait on.
+    """
+    deadline = time.monotonic() + timeout
+    while not server.started:
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"{what} did not start within {timeout}s")
+        await asyncio.sleep(0.02)
 
 
 async def send_request(

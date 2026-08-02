@@ -63,6 +63,24 @@ UPSTREAM_TIMEOUT_S = _float("UPSTREAM_TIMEOUT_S", 600.0)
 UPSTREAM_CONNECT_TIMEOUT_S = _float("UPSTREAM_CONNECT_TIMEOUT_S", 10.0)
 
 # ── Ledger ───────────────────────────────────────────────────────────────────
+# The ledger is Postgres. There is no local-file fallback on purpose: a silent fallback
+# means half the team develops against a database nobody else can see, and the predictor
+# quietly gets the cold-start numbers (65% median error against 31%) without anyone
+# noticing why. Missing DATABASE_URL is an error you can read, not a degraded mode.
+DATABASE_URL = _str("DATABASE_URL", "")
+
+# Pool bounds. Small: one proxy process makes a handful of queries per request, and
+# Supabase's free tier is not generous with connections.
+DB_POOL_MIN = _int("DB_POOL_MIN", 1)
+DB_POOL_MAX = _int("DB_POOL_MAX", 10)
+
+# Which Postgres schema the ledger lives in. `public` in normal use; the test suites set
+# a throwaway one per run so they cannot write into the tables the demo and the judges
+# are using — the isolation a tempfile gave them for free under SQLite.
+DB_SCHEMA = _str("DB_SCHEMA", "public")
+
+# Retained only so the dashboard's own docs and any leftover tooling can still find the
+# old file. Nothing in the request path reads it.
 DB_PATH = Path(_str("METER_DB_PATH", str(REPO_ROOT / "meter.db")))
 PRICING_VERSION = _str("PRICING_VERSION", "2026-08-01")
 PRICING_DIR = REPO_ROOT / "pricing"
@@ -90,6 +108,17 @@ RESERVATION_TTL_S = _float("RESERVATION_TTL_S", 120.0)
 # How often a live stream pushes its reservation's expiry forward. Must stay comfortably
 # under RESERVATION_TTL_S or a slow stream reaps its own hold mid-flight.
 RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
+
+# Soft budgets (PROPOSALS.md D2). The hard ceiling refuses with 429; this warns before it,
+# while there is still time to act. Deliberately a background poll rather than a check in
+# the request path: crossing a threshold is a *level*, not an edge, so testing it per
+# request would re-evaluate it thousands of times to send at most one message — and would
+# put that work in front of production traffic for a notification nobody reads inline.
+BUDGET_SOFT_ALERT_ENABLED = _bool("BUDGET_SOFT_ALERT_ENABLED", True)
+# Fraction of a ceiling that counts as "close". 0.8 matches LiteLLM's default soft budget.
+BUDGET_SOFT_ALERT_RATIO = _float("BUDGET_SOFT_ALERT_RATIO", 0.8)
+# How often the poll runs. Cheap: one indexed SUM per configured ceiling.
+BUDGET_SOFT_ALERT_INTERVAL_S = _float("BUDGET_SOFT_ALERT_INTERVAL_S", 60.0)
 
 # The pre-flight estimate (ARCHITECTURE.md §2 step 3). Off puts `predicted_*` NULL on
 # every row and reserves nothing, which is Phase 1 behaviour exactly.

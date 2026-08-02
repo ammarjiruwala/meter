@@ -24,9 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import sqlite3
 import sys
-import tempfile
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -135,12 +133,11 @@ async def _walk(c, offline: bool) -> None:
     # ── 4. the ledger row ────────────────────────────────────────────────────
     stage("ledger capture")
     await asyncio.sleep(0.5)          # capture is scheduled, not inline
-    conn = sqlite3.connect(os.environ["METER_DB_PATH"])
-    conn.row_factory = sqlite3.Row
+    from proxy import pg
+    conn = pg.CONNECTION
     if traced_ok:
         row = conn.execute("SELECT * FROM requests WHERE trace_id = ?", (trace,)).fetchone()
         if chk("a ledger row was written for the trace", row is not None):
-            row = dict(row)
             chk("attribution captured", row.get("feature") == "ticket-summary", str(row.get("feature")))
             chk("actual usage captured", (row.get("output_tokens") or 0) > 0, str(row.get("output_tokens")))
             chk("cost priced", (row.get("cost_usd") or 0) > 0, str(row.get("cost_usd")))
@@ -158,10 +155,12 @@ async def _walk(c, offline: bool) -> None:
     r = await c.post("/v1/annotate", headers={"Authorization": "Bearer mk_demo"},
                      json={"trace_id": trace, "outcome": "resolved", "value_usd": 12.5})
     if chk("POST /v1/annotate accepts", r.status_code in (200, 201), f"{r.status_code} {r.text[:200]}"):
-        tables = {t[0] for t in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = {t["table_name"] for t in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+            " WHERE table_schema = current_schema()")}
         if chk("annotations table exists", "annotations" in tables, str(sorted(tables))):
-            n = conn.execute("SELECT COUNT(*) FROM annotations WHERE trace_id = ?",
-                             (trace,)).fetchone()[0]
+            n = conn.execute("SELECT COUNT(*) AS n FROM annotations WHERE trace_id = ?",
+                             (trace,)).fetchone()["n"]
             chk("annotation is queryable by trace_id", n > 0, f"{n} rows")
             # The join that produces the headline metric.
             try:
@@ -226,12 +225,13 @@ async def _walk(c, offline: bool) -> None:
     # ── 8. the dashboard's own queries ───────────────────────────────────────
     stage("dashboard queries")
     for name, sql in (
-        ("spend by feature", "SELECT feature, SUM(cost_usd) FROM requests GROUP BY feature"),
-        ("spend by actor", "SELECT actor, SUM(cost_usd) FROM requests GROUP BY actor"),
+        ("spend by feature", "SELECT feature, SUM(cost_usd) AS c FROM requests "
+                             "GROUP BY feature"),
+        ("spend by actor", "SELECT actor, SUM(cost_usd) AS c FROM requests GROUP BY actor"),
         ("live logs", "SELECT id, ts, feature, model, cost_usd, predicted_cost_usd "
                       "FROM requests ORDER BY ts DESC LIMIT 20"),
         ("predictor accuracy", "SELECT AVG(ABS(predicted_output_tokens - output_tokens) * 1.0 "
-                               "/ output_tokens) FROM requests WHERE output_tokens > 0 "
+                               "/ output_tokens) AS mape FROM requests WHERE output_tokens > 0 "
                                "AND predicted_output_tokens IS NOT NULL"),
     ):
         try:
@@ -239,7 +239,6 @@ async def _walk(c, offline: bool) -> None:
             chk(f"{name} query runs", True)
         except Exception as exc:
             chk(f"{name} query runs", False, f"{type(exc).__name__}: {exc}")
-    conn.close()
 
 
 def main() -> int:
@@ -249,33 +248,43 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="keep the scratch ledger")
     args = ap.parse_args()
 
-    db = tempfile.mktemp(suffix=".db")
-    os.environ.update(METER_DB_PATH=db, METER_KEYS="mk_demo:api-prod:prod",
+    schema = "journey_" + uuid.uuid4().hex[:8]
+    os.environ.update(DB_SCHEMA=schema, METER_KEYS="mk_demo:api-prod:prod",
                       PREDICT_REFRESH_INTERVAL_S="2", TREASURER_DRY_RUN="true")
 
     # Seed first, so the journey runs against a ledger with learned history -- which is
     # the state the demo box will be in, and a different code path from a cold one.
-    # check=True on purpose. The first version swallowed this with capture_output and
-    # check=False, so when the seeder was missing entirely the harness reported
-    # "learned_factors=0" as though it were a product defect. A setup step that fails
-    # silently makes every assertion downstream of it a lie.
+    # The seeder runs as a subprocess and inherits DB_SCHEMA through the environment,
+    # so it writes into the same throwaway schema this process reads.
+    #
+    # Its return code is checked on purpose. The first version swallowed it with
+    # capture_output and check=False, so when the seeder was missing entirely the
+    # harness reported "learned_factors=0" as though it were a product defect. A setup
+    # step that fails silently makes every assertion downstream of it a lie.
     import subprocess
-    seed = subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py"), "--db", db],
+    seed = subprocess.run([sys.executable, str(REPO / "scripts" / "seed_demo.py")],
                           capture_output=True, text=True)
     if seed.returncode != 0:
         print("SETUP FAILED — could not seed the ledger; downstream results would be "
               f"meaningless:\n{seed.stderr[-800:]}")
         return 1
 
-    print(f"ledger {db}\nmode   {'offline' if args.offline else 'live (a few real calls)'}")
-    asyncio.run(run(args.offline))
+    print(f"ledger schema {schema}\n"
+          f"mode          {'offline' if args.offline else 'live (a few real calls)'}")
+    try:
+        asyncio.run(run(args.offline))
+    finally:
+        from proxy import pg
+        if args.keep:
+            print(f"\n(kept schema {schema} — "
+                  f"python scripts/show_ledger.py --schema {schema})")
+        else:
+            pg.drop_schema(schema)
+        pg.close()
 
     print(f"\n{'=' * 66}\n{len(OK)} passed, {len(BAD)} failed")
     for label, detail in BAD:
         print(f"  FAILED  {label}\n            {detail}")
-    if not args.keep:
-        for suffix in ("", "-wal", "-shm"):
-            Path(db + suffix).unlink(missing_ok=True)
     return 1 if BAD else 0
 
 

@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import sqlite3
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -31,7 +29,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Must be set before proxy.config is imported — it reads the environment once, at import.
-os.environ["METER_DB_PATH"] = os.path.join(tempfile.mkdtemp(), "meter.db")
+# A throwaway Postgres schema per run, dropped at the end. Under SQLite this was a
+# tempfile; against a hosted database the suites would otherwise write into the same
+# tables the demo and the judges are using, and several checks here delete rows.
+os.environ["DB_SCHEMA"] = "test_treasury_" + uuid.uuid4().hex[:8]
 os.environ["PRAVA_LIVE_MODE"] = "False"      # simulated rail, no network
 os.environ["TREASURER_DRY_RUN"] = "false"    # but do move the local balance
 os.environ["TREASURER_ENABLED"] = "false"    # drive ticks by hand, no timer
@@ -104,8 +105,9 @@ def test_schema() -> None:
     """Phase 1: the tables exist from boot, not on first use."""
     print("\nschema — created at boot, because the dashboard reads it directly")
     conn = db.connect()
-    tables = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = {r["table_name"] for r in conn.execute(
+        "SELECT table_name FROM information_schema.tables"
+        " WHERE table_schema = current_schema()")}
     for t in ("wallets", "mandates", "treasury_events"):
         check(f"{t} exists", t in tables)
     # The dashboard opens meter.db read-only and queries this directly. If the table
@@ -113,7 +115,9 @@ def test_schema() -> None:
     rows = conn.execute("SELECT provider, balance_usd FROM wallets").fetchall()
     check("the dashboard's wallets query runs on an empty db", isinstance(rows, list))
 
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(mandates)")}
+    cols = {r["column_name"] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = current_schema() AND table_name = 'mandates'")}
     for c in ("project_id", "external_user_id", "remaining_usd", "recurring_frequency",
               "session_id", "renews_at"):
         check(f"mandates.{c} present (migration applied)", c in cols)
@@ -625,49 +629,47 @@ def test_migration_from_old_schema() -> None:
     exact situation produced "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
     constraint" during development.
     """
-    print("\nmigration from an older database")
-    old = sqlite3.connect(os.path.join(tempfile.mkdtemp(), "old.db"))
-    old.row_factory = sqlite3.Row
-    # The shape mandates had before scoping landed: no UNIQUE, none of the new columns.
-    old.execute("""
-        CREATE TABLE mandates (
-            id TEXT PRIMARY KEY, provider TEXT NOT NULL,
-            max_per_txn_usd REAL NOT NULL, max_daily_usd REAL NOT NULL,
-            cooldown_s INTEGER NOT NULL DEFAULT 300,
-            prava_mandate_id TEXT, active INTEGER NOT NULL DEFAULT 1
-        )""")
-    old.execute("INSERT INTO mandates VALUES ('mnd_legacy','openai',1,1,0,'mdt_leg',1)")
-    old.commit()
+    print("\nmigration onto an older database")
+    conn = db.connect()
 
-    before = {r["name"] for r in old.execute("PRAGMA table_info(mandates)")}
-    check("the old table lacks the new columns", "project_id" not in before)
+    def columns() -> set[str]:
+        return {r["column_name"] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'mandates'")}
 
-    old.executescript(db.SCHEMA)          # no-op on the table, but creates the index
-    db._migrate(old)
-    old.commit()
+    # Simulate the older shape in place by removing a column that scoping added, then
+    # re-running the boot path. Building a whole legacy database instead would mean
+    # pointing the pool at a second schema, and `search_path` is pinned per connection
+    # when the pool creates it — so an in-place drop is both simpler and a truer
+    # rehearsal of what a teammate's database actually looks like.
+    conn.execute("ALTER TABLE mandates DROP COLUMN IF EXISTS customer_id")
+    check("the older table lacks the column", "customer_id" not in columns())
 
-    after = {r["name"] for r in old.execute("PRAGMA table_info(mandates)")}
+    db._schema_ready = False              # force the boot path to run again
+    db.connect()
+
+    check("migration adds it back", "customer_id" in columns())
     for col in ("project_id", "external_user_id", "remaining_usd", "session_id",
-                "renews_at", "valid_until", "customer_id"):
-        check(f"migration adds {col}", col in after)
-    check("the legacy row survives",
-          old.execute("SELECT COUNT(*) FROM mandates").fetchone()[0] == 1)
+                "renews_at", "valid_until"):
+        check(f"{col} still present", col in columns())
 
-    idx = {r[1] for r in old.execute("PRAGMA index_list(mandates)")}
-    check("the unique index is applied retroactively",
-          "idx_mandates_prava_id" in idx, str(idx))
-
-    # The upsert needs that index to resolve ON CONFLICT against.
-    old.execute(
-        "INSERT INTO mandates (id, provider, max_per_txn_usd, max_daily_usd,"
-        " cooldown_s, prava_mandate_id, active) VALUES"
-        " ('mnd_x','openai',1,1,0,'mdt_leg',1)"
-        " ON CONFLICT(prava_mandate_id) DO UPDATE SET active = 0")
-    old.commit()
-    check("ON CONFLICT resolves after migration",
-          old.execute("SELECT active FROM mandates WHERE prava_mandate_id='mdt_leg'"
-                      ).fetchone()[0] == 0)
-    old.close()
+    # The upsert needs the unique index to resolve ON CONFLICT against — the exact
+    # failure that produced "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
+    # constraint" during development.
+    db.upsert_mandate("mdt_migrated", "openai", 1.0, 1.0, 0,
+                      recurring_frequency="monthly", status="active",
+                      approved_amount_usd=1.0, remaining_usd=1.0,
+                      project_id="mig", external_user_id_="meter_mig")
+    db.upsert_mandate("mdt_migrated", "openai", 2.0, 2.0, 0,
+                      recurring_frequency="monthly", status="paused",
+                      approved_amount_usd=1.0, remaining_usd=1.0,
+                      project_id="mig", external_user_id_="meter_mig")
+    row = conn.execute(
+        "SELECT status, max_per_txn_usd FROM mandates WHERE prava_mandate_id = ?",
+        ("mdt_migrated",)).fetchone()
+    check("ON CONFLICT resolves after migration", row["status"] == "paused",
+          str(row))
+    check("and updated rather than duplicated", row["max_per_txn_usd"] == 2.0)
 
 
 def test_concurrent_writers() -> None:
@@ -930,7 +932,226 @@ def test_routes_present() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+def test_rate_limit_trip() -> None:
+    """PROPOSALS.md C3 — a spent allowance stops the loop instead of being retried."""
+    print("\nrate limiting (C3)")
+
+    async def exhausted_charge(*a, **k):
+        return {"_ok": False, "_http_status": 429, "_error": "TRIES_EXHAUSTED",
+                "_exhausted": True, "_rate_limited": True, "_response_id": "resp_429",
+                "transactionId": None}
+
+    async def throttled_charge(*a, **k):
+        return {"_ok": False, "_http_status": 429, "_error": "RATE_LIMITED",
+                "_rate_limited": True, "_response_id": "resp_430",
+                "transactionId": None}
+
+    real_charge = topup.charge_mandate
+    real_dry = config.TREASURER_DRY_RUN
+    try:
+        config.TREASURER_DRY_RUN = False
+        topup.config.TREASURER_DRY_RUN = False
+        mandate("rl", "mdt_rl")
+        seed("rl", 4.0)
+        wid = db.ensure_wallet("rl", "openai")
+
+        treasurer._tripped_until = 0.0
+        topup.charge_mandate = exhausted_charge
+        out = asyncio.run(topup.execute_topup(project_id="rl", amount_usd=5.0))
+        check("an exhausted allowance is refused", out["ok"] is False, str(out))
+        check("and is reported as rate limiting, not a decline",
+              out["reason"] == "rate_limited", str(out))
+        check("with the exhausted flag set so the loop can trip",
+              out.get("exhausted") is True, str(out))
+
+        # A 429 is a definite answer — it did not happen — so unlike a timeout the event
+        # must settle rather than stay pending. A pending row would be resumed forever.
+        ev = db.recent_events(wid, limit=1)[0]
+        check("the event settles failed, not pending", ev["status"] == "failed",
+              str(ev["status"]))
+
+        # The trip itself: one exhausted outcome must stop the loop acting again.
+        treasurer._tripped_until = 0.0
+        results = asyncio.run(treasurer.tick())
+        check("the tick that hit the limit acted", any(r.get("acted") for r in results),
+              str(results))
+        check("the treasurer is now tripped", treasurer.trip_state()["tripped"] is True)
+
+        again = asyncio.run(treasurer.tick())
+        check("a tripped treasurer does not charge again",
+              all(not r.get("acted") for r in again), str(again))
+        check("and says how long it is backed off for",
+              again[0].get("cooldown_remaining_s", 0) > 0, str(again))
+
+        # An ordinary 429 trips too — the allowance may not be spent, but hammering a
+        # throttled rail every TREASURER_INTERVAL_S is what turns it into a dead one.
+        treasurer._tripped_until = 0.0
+        topup.charge_mandate = throttled_charge
+        out2 = asyncio.run(topup.execute_topup(project_id="rl", amount_usd=5.0))
+        check("a plain 429 is also reported as rate limiting",
+              out2["reason"] == "rate_limited", str(out2))
+        check("but is not marked exhausted", out2.get("exhausted") is False, str(out2))
+    finally:
+        topup.charge_mandate = real_charge
+        config.TREASURER_DRY_RUN = real_dry
+        topup.config.TREASURER_DRY_RUN = real_dry
+        treasurer._tripped_until = 0.0
+
+
+def test_assess_creates_nothing() -> None:
+    """PROPOSALS.md M5 — a read-only endpoint must not poison the demo seed."""
+    print("\nassess is read-only (M5)")
+
+    before = {w["id"] for w in db.list_wallets()}
+    decision = treasurer.assess("never-seen-project", "openai")
+    after = {w["id"] for w in db.list_wallets()}
+
+    check("assess creates no wallet for an unknown project", before == after,
+          str(after - before))
+    check("and still reports a balance of zero", decision["balance_usd"] == 0.0,
+          str(decision["balance_usd"]))
+    check("and still recommends a top-up on the floor trigger",
+          decision["should_topup"] is True and decision["trigger"] == "floor",
+          str(decision))
+
+    # The regression this exists for, end to end: assess first, THEN seed. Before the fix
+    # assess inserted the wallet at $0.00 and the seed silently no-opped, so the demo's
+    # "$4.00, about to run dry" state rendered as $0.00.
+    treasurer.assess("seed-order", "openai")
+    wid = db.ensure_wallet("seed-order", "openai", 4.00)
+    check("seeding after an assess still applies the balance",
+          (db.get_wallet(wid) or {})["balance_usd"] == 4.00,
+          str((db.get_wallet(wid) or {}).get("balance_usd")))
+
+    check("wallet_id_for derives an id without writing",
+          db.wallet_id_for("no-such", "openai") == "wal_no-such_openai"
+          and not any(w["id"] == "wal_no-such_openai" for w in db.list_wallets()))
+
+
+
+def test_prava_backoff() -> None:
+    """C3 transport rules: reads retry with backoff, writes never do."""
+    print("\nprava 429 backoff (C3)")
+
+    class FakeResponse:
+        def __init__(self, status, body=b'{"error":{"code":"RATE_LIMITED"}}', headers=None):
+            self.status_code = status
+            self._body = body
+            self.headers = headers or {}
+            self.text = body.decode()
+
+        def json(self):
+            import json as _j
+            return _j.loads(self._body)
+
+    calls = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def request(self, method, url, **k):
+            calls["n"] += 1
+            return FakeResponse(429)
+
+    real_client, real_sleep = prava.httpx.AsyncClient, prava.asyncio.sleep
+    real_live = prava.config.PRAVA_LIVE_MODE
+    slept: list[float] = []
+
+    async def no_sleep(s):
+        slept.append(s)
+
+    try:
+        prava.config.PRAVA_LIVE_MODE = True
+        prava.httpx.AsyncClient = FakeClient
+        prava.asyncio.sleep = no_sleep
+
+        calls["n"] = 0
+        slept.clear()
+        out = asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("a read retries after a 429", calls["n"] == 1 + prava._READ_RETRIES,
+              f"{calls['n']} attempts")
+        check("with exponential backoff between attempts", slept == [1.0, 2.0], str(slept))
+        check("and reports the rate limit to the caller", out.get("_rate_limited") is True,
+              str(out))
+
+        # The rule that matters for money: a charge is never re-POSTed from in here. The
+        # safe way to resume one is topup's pending-event path with the original
+        # idempotency key, not a second attempt hidden inside the transport helper.
+        calls["n"] = 0
+        slept.clear()
+        asyncio.run(prava._request("POST", "/v1/mandates/m/charge", {"amount": "1.00"}))
+        check("a write is never retried", calls["n"] == 1, f"{calls['n']} attempts")
+        check("and never sleeps", slept == [], str(slept))
+
+        # Exhaustion is not a "slow down", it is "stop". Retrying cannot refill it.
+        class ExhaustedClient(FakeClient):
+            async def request(self, method, url, **k):
+                calls["n"] += 1
+                return FakeResponse(429, b'{"error":{"code":"TRIES_EXHAUSTED"}}')
+
+        prava.httpx.AsyncClient = ExhaustedClient
+        calls["n"] = 0
+        out = asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("an exhausted allowance is not retried even on a read", calls["n"] == 1,
+              f"{calls['n']} attempts")
+        check("and is flagged distinctly from an ordinary 429",
+              out.get("_exhausted") is True, str(out))
+
+        # Retry-After is honoured when present, and bounded so a bad value cannot wedge
+        # the loop for hours.
+        class RetryAfterClient(FakeClient):
+            async def request(self, method, url, **k):
+                calls["n"] += 1
+                return FakeResponse(429, headers={"retry-after": "3"})
+
+        prava.httpx.AsyncClient = RetryAfterClient
+        calls["n"] = 0
+        slept.clear()
+        asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("Retry-After is honoured over the backoff schedule", slept == [3.0, 3.0],
+              str(slept))
+
+        class SillyRetryAfter(FakeClient):
+            async def request(self, method, url, **k):
+                calls["n"] += 1
+                return FakeResponse(429, headers={"retry-after": "99999"})
+
+        prava.httpx.AsyncClient = SillyRetryAfter
+        slept.clear()
+        asyncio.run(prava._request("GET", "/v1/mandates"))
+        check("an absurd Retry-After is clamped, not obeyed",
+              slept and max(slept) <= prava._BACKOFF_MAX_S, str(slept))
+    finally:
+        prava.httpx.AsyncClient = real_client
+        prava.asyncio.sleep = real_sleep
+        prava.config.PRAVA_LIVE_MODE = real_live
+
+
 def main() -> int:
+    global CLIENT
+    try:
+        return _run()
+    finally:
+        # Drop the throwaway schema whether the run passed or failed. A failed run that
+        # leaves its schema behind turns a hosted database into a graveyard of
+        # `test_treasury_*` after a few days.
+        from proxy import config as pconfig
+        from proxy import pg as ppg
+        try:
+            ppg.drop_schema(pconfig.DB_SCHEMA)
+        finally:
+            ppg.close()
+
+
+def _run() -> int:
     global CLIENT
     with TestClient(app) as client:
         CLIENT = client
@@ -947,6 +1168,9 @@ def main() -> int:
             test_failure_handling,
             test_mandates_route_degrades,
             test_loop_resilience,
+            test_prava_backoff,
+            test_rate_limit_trip,
+            test_assess_creates_nothing,
             test_alert_noise,
             test_credential_preflight,
             test_pending_mandates,

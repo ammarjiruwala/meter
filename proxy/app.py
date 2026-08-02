@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -42,7 +43,7 @@ from treasury import prava as treasury_prava
 from treasury import routes as treasury_routes
 from treasury import treasurer
 
-from . import breaker, budget, config, db, providers
+from . import breaker, budget, config, db, pg, providers
 from .pricing import Usage, estimate_from_bytes, price
 
 # Optional at import time on purpose. `predictor` pulls in tiktoken and numpy, and a
@@ -192,13 +193,20 @@ async def lifespan(app: FastAPI):
             # accuracy over time, never correctness on any single request.
             log.debug("predictor refresh loop not started", exc_info=True)
 
+    # Soft-budget warnings (PROPOSALS.md D2). Kept off the request path on purpose: a
+    # ceiling being 80% full is a level rather than an edge, so checking it per request
+    # would re-evaluate the same condition thousands of times to send at most one message.
+    soft_budget_task = None
+    if config.BUDGET_SOFT_ALERT_ENABLED:
+        soft_budget_task = asyncio.create_task(_soft_budget_loop())
+
     try:
         yield
     finally:
         # Cancel the background loops cleanly on shutdown. The Treasurer owns its own task
         # and cancels it through `stop()`, so it is not in this list.
         await treasurer.stop()
-        for task in (refresh_task,):
+        for task in (refresh_task, soft_budget_task):
             if task is None:
                 continue
             task.cancel()
@@ -212,6 +220,50 @@ async def lifespan(app: FastAPI):
         if _capture_tasks:
             await asyncio.wait(set(_capture_tasks), timeout=5.0)
         await app.state.http.aclose()
+        # Close the Postgres pool last: the capture tasks above may still be writing
+        # ledger rows, and a closed pool would drop exactly the rows written during
+        # shutdown — the ones you most want after a crash.
+        pg.close()
+
+
+async def _soft_budget_loop() -> None:
+    """Poll ceilings and warn before the hard 429 (`PROPOSALS.md` D2).
+
+    Mirrors `breaker.notify` in posture: the alert send is fire-and-forget on a daemon
+    thread inside `alerts`, and the per-scope cooldown lives there too, so a ceiling that
+    stays full for the rest of the day texts once rather than once per poll.
+
+    Does no work at all when nothing is configured — no `meter.yaml` means no ceilings
+    means the loop sleeps, which keeps this free for anyone who has not opted in.
+    """
+    # Imported once, not per iteration. Kept local to the function rather than at module
+    # scope so `alerts` stays an optional dependency of the proxy, the same posture the
+    # predictor import takes at the top of this file.
+    from alerts import send_budget_alert
+
+    ratio = config.BUDGET_SOFT_ALERT_RATIO
+    while True:
+        try:
+            if budget.active_ceilings():
+                # `soft_breaches` does blocking SQLite reads; keeping it in a thread is
+                # what stops a budget notification from stalling every in-flight request.
+                breaches = await asyncio.to_thread(budget.soft_breaches, ratio)
+                for b in breaches:
+                    log.info(
+                        "SOFT BUDGET | %s at %.0f%% of ceiling ($%.4f of $%.2f)",
+                        b["scope"], b["ratio"] * 100, b["spend_usd"], b["ceiling_usd"],
+                    )
+                    try:
+                        send_budget_alert(b["scope"], b["spend_usd"], b["ceiling_usd"])
+                    except Exception:
+                        # An alerting failure must never take down the loop that finds
+                        # the next one. Same rule as the breaker's notify seam.
+                        log.debug("soft budget alert failed", exc_info=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("soft budget poll failed; continuing")
+        await asyncio.sleep(config.BUDGET_SOFT_ALERT_INTERVAL_S)
 
 
 app = FastAPI(
@@ -269,17 +321,27 @@ def _attribution(request: Request) -> dict[str, str | None]:
     }
 
 
-def _error(status: int, message: str, code: str) -> JSONResponse:
+def _error(
+    status: int, message: str, code: str, request_id: str | None = None
+) -> JSONResponse:
     """OpenAI-shaped error envelope.
 
     Clients pointed at Meter are running provider SDKs, and those SDKs parse
     `error.message` and `error.type`. Returning FastAPI's default `{"detail": ...}` would
     surface as an unhelpful generic exception inside the caller's own error handling.
+
+    ``request_id`` is echoed when the request got far enough to have one. Refusals are the
+    responses that most need it: a breaker trip and a budget 429 both write a ledger row,
+    so the id is the link between the error a developer is looking at and the row that
+    explains it. Omitted on the auth failures above it, where no row exists to point at.
     """
-    return JSONResponse(
+    response = JSONResponse(
         status_code=status,
         content={"error": {"message": message, "type": code, "code": code, "param": None}},
     )
+    if request_id:
+        response.headers["X-Meter-Request-Id"] = request_id
+    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,6 +402,9 @@ async def healthz() -> dict[str, Any]:
             "window_s": config.BUDGET_WINDOW_S,
             "ceilings": budget.active_ceilings(),
             "model_allowlists": budget.active_allowlists(),
+            "soft_alert_ratio": (
+                config.BUDGET_SOFT_ALERT_RATIO if config.BUDGET_SOFT_ALERT_ENABLED else None
+            ),
             **budget.outstanding(),
         },
         "predictor": {
@@ -353,6 +418,10 @@ async def healthz() -> dict[str, Any]:
             "refresh_enabled": config.PREDICT_REFRESH_ENABLED,
             "learned_factors": _learned_factor_count(),
         },
+        # Whether the Treasurer has backed off the payment rail (PROPOSALS.md C3). A
+        # tripped Treasurer is not topping anything up, which is exactly the state you
+        # want visible on a liveness check rather than buried in a log line.
+        "treasurer": treasurer.trip_state(),
     }
 
 
@@ -502,7 +571,7 @@ async def _json_body(request: Request) -> dict[str, Any] | None:
 
 async def _proxy(request: Request, shape: str) -> Response:
     started = time.perf_counter()
-    request_id = f"req_{uuid.uuid4().hex}"
+    request_id = _request_id(request)
 
     # ── 1. AUTHENTICATE ──────────────────────────────────────────────────────
     raw_key = _presented_key(request)
@@ -546,6 +615,7 @@ async def _proxy(request: Request, shape: str) -> Response:
             f"Feature {tags['feature']!r} may not call model {model!r}. "
             f"Allowlisted: {', '.join(sorted(allowed)) or '(none)'}.",
             "model_not_allowed",
+            request_id,
         )
         response.headers["X-Meter-Feature"] = tags["feature"] or ""
         response.headers["X-Meter-Allowed-Models"] = ",".join(sorted(allowed))
@@ -588,7 +658,9 @@ async def _proxy(request: Request, shape: str) -> Response:
         decision = breaker.Decision(blocked=False)
 
     if decision.blocked:
-        response = _error(decision.status_code, decision.detail, "circuit_breaker_open")
+        response = _error(
+            decision.status_code, decision.detail, "circuit_breaker_open", request_id
+        )
         response.headers["X-Meter-Breaker-Scope"] = decision.scope
         response.headers["X-Meter-Breaker-Mode"] = decision.mode
         if decision.status_code == 429:
@@ -640,7 +712,7 @@ async def _proxy(request: Request, shape: str) -> Response:
         budget_decision = budget.Decision(blocked=False)
 
     if budget_decision.blocked:
-        response = _error(429, budget_decision.detail, "budget_exceeded")
+        response = _error(429, budget_decision.detail, "budget_exceeded", request_id)
         # Naming the ceiling that was hit is the difference between an actionable 429 and
         # a mystery: a project can have several, and the caller cannot see meter.yaml.
         response.headers["X-Meter-Budget-Scope"] = budget_decision.scope
@@ -971,6 +1043,32 @@ def _upstream_failure(
         release=common["reservation_id"],
     )
     return _error(502, f"Upstream provider error: {exc}", "upstream_error")
+
+
+# A client-supplied id has to be safe to use as a primary key and safe to log. Anything
+# outside this is ignored rather than rejected: a malformed idempotency key is not a
+# reason to refuse a request that is otherwise fine, and refusing would make adopting the
+# header riskier than not sending it.
+_CLIENT_REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+
+
+def _request_id(request: Request) -> str:
+    """Use the caller's request id when they send one, otherwise mint one.
+
+    `PROPOSALS.md` D1. Every major gateway lets a client name its own request —
+    Helicone's `Helicone-Request-Id`, OpenRouter's `request_id` — because it is what makes
+    a retry answerable: `db.record_request` is `INSERT OR REPLACE` on a caller-supplied id
+    (B8), so a client that retries with the same id overwrites its own row instead of
+    double-counting spend. Minting one internally, as this did before, means a retry storm
+    inflates the ledger and nobody can prove which rows were duplicates.
+
+    The value is echoed back on every response either way, so a caller that sends nothing
+    still gets an id it can quote in a bug report.
+    """
+    supplied = (request.headers.get("x-meter-request-id") or "").strip()
+    if supplied and _CLIENT_REQUEST_ID.match(supplied):
+        return supplied
+    return f"req_{uuid.uuid4().hex}"
 
 
 def _stamp(response: Response, request_id: str, started: float, latency_ms: float) -> None:

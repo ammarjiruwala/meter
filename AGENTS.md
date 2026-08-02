@@ -61,21 +61,37 @@ mounted onto it, one process on one port. The dashboard (Tanay) runs separately.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env                              # add provider keys
+cp .env.example .env                              # add provider keys + DATABASE_URL
 uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
-python tests/test_proxy.py                        # ~207 checks, no framework, ~3s
-python tests/test_predictor.py                    # ~108 checks, same convention
-python tests/test_alerts.py                       # 46 checks (alerts/)
+python tests/test_proxy.py                        # 241 checks, no framework, ~3s
+python tests/test_predictor.py                    # 130 checks, same convention
+python tests/test_treasury.py                     # 159 checks (treasury/)
+python tests/test_alerts.py                       # 46 checks (alerts/), needs Python 3.10+
+ruff check .                                      # CI runs this; keep it clean
 
-cd dashboard && npm install && npm run dev        # reads ../meter.db, read-only
+cd dashboard && cp .env.example .env.local        # its own DATABASE_URL
+npm install && npm run dev                        # reads the same Postgres, read-only
 npm run build && npm run lint                     # dashboard type/lint check
 ```
 
 Run the matching self-check before you commit: `test_proxy.py` for anything under
-`proxy/` or `treasury/`, `test_predictor.py` for anything under `predictor/`,
-`test_alerts.py` for anything under `alerts/`. They are plain asserts, so they need no
-pytest and no fixtures — if you add non-trivial logic, add an assertion rather than
-starting a second test system.
+`proxy/` or `treasury/`, `test_treasury.py` for `treasury/` specifically,
+`test_predictor.py` for anything under `predictor/`, `test_alerts.py` for anything under
+`alerts/`. They are plain asserts, so they need no pytest and no fixtures — if you add
+non-trivial logic, add an assertion rather than starting a second test system.
+
+Two harnesses **measure** rather than gate, and are deliberately out of CI because their
+thresholds are timing-sensitive and a shared runner would make them flaky:
+
+```bash
+python tests/bench_overhead.py                            # added latency
+python tests/load_soak.py --seconds 20 --concurrency 16   # two writers, one ledger
+python tests/load_soak.py --stream                         # streamed path + heartbeat
+```
+
+Run `load_soak.py` before claiming anything about concurrency. Run `bench_overhead.py`
+**three times** before quoting a latency number anywhere — single readings of it do not
+reproduce, and one that did not was briefly written into three documents.
 
 Daily spend ceilings are declared in `meter.yaml` at the repo root (see
 `meter.yaml.example`), deliberately in the repo so a limit changes by pull request. No
@@ -88,7 +104,8 @@ concluding something is missing by accident.
 
 ## How the pieces fit
 
-Four components, one process, one SQLite file (`meter.db`, gitignored):
+Five components. The backend three are one process; all of them share one Postgres
+(`DATABASE_URL`, required — see `.env.example`):
 
 | Component | What it is | Owner |
 | --- | --- | --- |
@@ -96,29 +113,39 @@ Four components, one process, one SQLite file (`meter.db`, gitignored):
 | `treasury/` | Wallets, Prava mandates/charges, mock provider billing. **Routers mounted onto the proxy app** | Shivam |
 | `predictor/` | Pre-flight `tiktoken` cost estimate. Called by proxy at ESTIMATE | Ammar |
 | `alerts/` | Poke/Linq iMessage dispatch. Called from `proxy/breaker.py` on trip | Tanay |
-| `dashboard/` | Next.js 16 App Router + Tailwind. Reads `meter.db` **read-only** | Tanay |
+| `dashboard/` | Next.js 16 App Router + Tailwind. Reads the ledger **read-only** via `pg` | Tanay |
 
 Things an agent will get wrong without knowing:
 
 - **`uvicorn proxy.app:app --port 8080` starts everything.** There is no second server.
-- **Dependencies run one way:** `treasury.db` reads `proxy.config` for `DB_PATH`;
-  `predictor` reads `proxy.pricing` for rates. Nothing in `proxy/` imports `predictor/`
-  or `treasury/` at module scope beyond the router mount in `app.py`.
-- **`meter.db` has two writers.** Proxy writes `requests`; `treasury/db.py` writes
-  `wallets`, `mandates`, `treasury_events`. WAL + `busy_timeout` covers it *because*
+- **All database access goes through `proxy/pg.py`** — one pool, per-statement
+  autocommit, `?` placeholders rewritten to `%s`. `DATABASE_URL` is required; the proxy
+  raises rather than degrading. `DB_SCHEMA` selects the schema, and every test suite and
+  scratch harness mints a throwaway one and drops it, so a test run cannot touch the
+  demo's data.
+- **Dependencies run one way:** `treasury.db` and `predictor` go through `proxy.pg` /
+  `proxy.pricing`. Nothing in `proxy/` imports `predictor/` or `treasury/` at module
+  scope beyond the router mount in `app.py`.
+- **The ledger has two writers.** Proxy writes `requests`; `treasury/db.py` writes
+  `wallets`, `mandates`, `treasury_events`. Postgres makes the lock contention a
+  non-event, but the rule that made it safe still holds and is now about *connections*:
   every treasury write is a single statement with no transaction held open across a
-  network call. **Add a long-running transaction and that assumption breaks.**
+  network call. **Hold one across a Prava round trip and you pin a pooled connection.**
+- **Multi-statement writes need `pg.transaction()`, never a bare `BEGIN`.** Every other
+  statement borrows its own pooled connection, so a `BEGIN` opens a transaction on a
+  connection that goes straight back to the pool. `replace_budgets` is the only caller.
 - **Treasury tables are created in `app.py`'s `lifespan`, not on first use.** Without
   this, `wallets` wouldn't exist until a treasury route is hit, and the dashboard reads
   that table directly.
-- **New `requests` columns need an entry in `_ADDED_REQUEST_COLUMNS`** (`proxy/db.py`).
-  `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without the ALTER,
-  teammates with an older `meter.db` get failing INSERTs.
+- **New columns need an entry in `_ADDED_COLUMNS`** (`proxy/db.py`).
+  `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so without the ALTER
+  anyone whose proxy has not restarted gets failing INSERTs — and the database is shared
+  now, so that is everyone at once.
 - **Dashboard is Next.js 16** — breaking changes from training data. Read
   `dashboard/node_modules/next/dist/docs/` before writing dashboard code.
-- **Every dashboard query guards on the table existing** (checks `sqlite_master`), so a
-  half-built database shows what it has instead of 500ing. Keep both guards when adding
-  a card.
+- **Every dashboard query guards on the table existing** (and on the *column*, for the
+  prediction columns and `sort_order`), so a half-built or half-migrated database shows
+  what it has instead of 500ing. Keep both guards when adding a card.
 
 ## Gotchas that bite
 

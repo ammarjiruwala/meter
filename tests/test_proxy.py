@@ -18,12 +18,15 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
-# Point the ledger at a throwaway file BEFORE proxy.config is imported, so a test run can
-# never touch a real meter.db someone has demo data sitting in.
+# Point the ledger at a throwaway Postgres SCHEMA before proxy.config is imported, so a
+# test run can never touch the tables the demo and the judges are using. Under SQLite this
+# was a tempfile; a hosted database needs the schema-level equivalent, and the run drops it
+# at the end.
 _TMP = tempfile.mkdtemp(prefix="meter-selfcheck-")
-os.environ["METER_DB_PATH"] = str(Path(_TMP) / "test.db")
+os.environ["DB_SCHEMA"] = "test_proxy_" + uuid.uuid4().hex[:8]
 os.environ["METER_KEYS"] = "test_key_alpha:proj-alpha:test,test_key_beta:proj-beta:test"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1470,36 +1473,41 @@ def _row_template(request_id: str, project: str) -> dict:
 
 
 def test_ledger_migration() -> None:
-    """An existing meter.db from Phase 1 must gain the new columns, not break on them."""
+    """A ledger from Phase 1 must gain the new columns, not break on them."""
     print("\nledger migration")
-    import sqlite3
+    conn = db.connect()
 
-    legacy = Path(_TMP) / "legacy.db"
-    conn = sqlite3.connect(str(legacy))
-    # The Phase 1 `requests` table, before any prediction column existed.
-    conn.execute(
-        "CREATE TABLE requests (id TEXT PRIMARY KEY, ts TEXT NOT NULL, "
-        "project_id TEXT NOT NULL, provider TEXT NOT NULL, endpoint TEXT NOT NULL)"
-    )
-    conn.execute(
-        "INSERT INTO requests VALUES ('old_1', '2026-01-01T00:00:00.000000+00:00', "
-        "'proj-alpha', 'openai', '/v1/chat/completions')"
-    )
-    conn.commit()
+    def columns() -> set[str]:
+        return {r["column_name"] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'requests'")}
 
-    db._migrate(conn)
-    conn.commit()
-    columns = {r[1] for r in conn.execute("PRAGMA table_info(requests)")}
+    # Simulate the older shape in place by dropping a prediction column, then re-running
+    # the boot path. Building a separate legacy database would mean a second schema, and
+    # `search_path` is pinned per connection when the pool creates it — so an in-place
+    # drop is both simpler and a truer rehearsal of a teammate's actual database.
+    conn.execute("INSERT INTO requests (id, ts, project_id, provider, endpoint)"
+                 " VALUES ('old_1', '2026-01-01T00:00:00.000000+00:00',"
+                 " 'proj-alpha', 'openai', '/v1/chat/completions')"
+                 " ON CONFLICT (id) DO NOTHING")
+    conn.execute("ALTER TABLE requests DROP COLUMN IF EXISTS predicted_cost_usd")
+    check("the older ledger lacks the column", "predicted_cost_usd" not in columns())
+
+    db._schema_ready = False              # force the boot path to run again
+    db.connect()
+
     for table, column, _decl in db._ADDED_COLUMNS:
         if table == "requests":
-            check(f"migration adds requests.{column}", column in columns)
+            check(f"migration adds requests.{column}", column in columns())
     check(
         "the pre-existing row survives the migration",
-        conn.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1,
+        conn.execute("SELECT COUNT(*) AS n FROM requests WHERE id = 'old_1'"
+                     ).fetchone()["n"] == 1,
     )
     check(
         "and its new columns read as NULL, not as a wrong number",
-        conn.execute("SELECT predicted_cost_usd FROM requests").fetchone()[0] is None,
+        conn.execute("SELECT predicted_cost_usd FROM requests WHERE id = 'old_1'"
+                     ).fetchone()["predicted_cost_usd"] is None,
     )
 
     db._migrate(conn)  # idempotent — a second boot must not fail on duplicate columns
@@ -1523,8 +1531,134 @@ def _with_breaker_disabled(project: str, feature: str, key: dict) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+def test_client_request_id() -> None:
+    """PROPOSALS.md D1 — a caller may name its own request, so a retry is idempotent."""
+    print("\nclient request id")
+    from proxy.app import _CLIENT_REQUEST_ID, _request_id
+
+    class _Req:
+        def __init__(self, headers: dict[str, str]) -> None:
+            self.headers = headers
+
+    minted = _request_id(_Req({}))
+    check("mints an id when the client sends none", minted.startswith("req_"))
+    check("minted ids are unique", _request_id(_Req({})) != minted)
+
+    check(
+        "accepts a well-formed client id",
+        _request_id(_Req({"x-meter-request-id": "trace-abc_123:9"})) == "trace-abc_123:9",
+    )
+    check(
+        "surrounding whitespace is trimmed, not rejected",
+        _request_id(_Req({"x-meter-request-id": "  order-42-retry  "})) == "order-42-retry",
+    )
+
+    # Ignored rather than refused, and that choice is the point: a malformed idempotency
+    # key is not a reason to fail a request that is otherwise fine. Refusing would make
+    # adopting the header riskier than never sending it.
+    for bad, why in (
+        ("short", "under 8 characters"),
+        ("x" * 129, "over 128 characters"),
+        ("has spaces here", "whitespace inside"),
+        ("drop;--table", "punctuation outside the safe set"),
+        ("", "empty"),
+    ):
+        got = _request_id(_Req({"x-meter-request-id": bad}))
+        check(f"ignores a client id with {why}", got.startswith("req_"), f"got {got!r}")
+
+    check(
+        "the pattern anchors both ends",
+        not _CLIENT_REQUEST_ID.match("ok-value\nInjected: header"),
+    )
+
+
+def test_soft_budget() -> None:
+    """PROPOSALS.md D2 — warn before the 429, not instead of it."""
+    print("\nsoft budget alerts")
+    import textwrap
+
+    from alerts.poke import compose_budget
+    from proxy import budget
+
+    path = Path(_TMP) / "meter-soft.yaml"
+    path.write_text(
+        textwrap.dedent("""
+        projects:
+          proj-soft:
+            ceiling_usd_per_day: 10
+            features:
+              warm: { ceiling_usd_per_day: 1 }
+    """)
+    )
+    budget.load_meter_yaml(path)
+
+    check("nothing breached on an empty ledger", budget.soft_breaches(0.8) == [])
+
+    # $0.85 against the feature's $1 ceiling: over 80%, under 100% — the window the
+    # whole feature exists for. Also 8.5% of the project's $10, so the project ceiling
+    # must NOT fire; a warning that cannot tell them apart is noise.
+    db.record_request(
+        {
+            "id": "req-soft-1",
+            "ts": db.now_iso(),
+            "project_id": "proj-soft",
+            "feature": "warm",
+            "actor": "tester",
+            "model": "gpt-4o-mini",
+            "provider": "openai",
+            "endpoint": "/v1/chat/completions",
+            "cost_usd": 0.85,
+            "status": 200,
+        }
+    )
+
+    breaches = budget.soft_breaches(0.8)
+    scopes = [b["scope"] for b in breaches]
+    check("the feature over 80% is reported", "feature:proj-soft/warm" in scopes, str(scopes))
+    check("the project well under its own ceiling is not", "project:proj-soft" not in scopes,
+          str(scopes))
+
+    hit = next(b for b in breaches if b["scope"] == "feature:proj-soft/warm")
+    check("it reports the spend", abs(hit["spend_usd"] - 0.85) < 1e-6, str(hit))
+    check("and the ceiling it is measured against", hit["ceiling_usd"] == 1.0, str(hit))
+    check("and the ratio", abs(hit["ratio"] - 0.85) < 1e-6, str(hit))
+
+    # The scope string is the contract between the warning and the eventual refusal: an
+    # operator reading the iMessage has to be able to find the same line in meter.yaml
+    # that the 429 will name.
+    check(
+        "the breach scope matches what a 429 would report",
+        hit["scope"] == "feature:proj-soft/warm",
+    )
+
+    check("a higher threshold does not fire yet", budget.soft_breaches(0.9) == [])
+
+    body = compose_budget("feature:proj-soft/warm", 0.85, 1.0)
+    check("the message names the scope", "feature:proj-soft/warm" in body, body)
+    check("leads with headroom, not just a percentage", "$0.15 left" in body, body)
+    check("and says what happens next", "429" in body, body)
+
+    budget.load_meter_yaml(Path(_TMP) / "does-not-exist.yaml")
+    check("no ceilings configured means nothing to poll", budget.soft_breaches(0.8) == [])
+
+
 def main() -> int:
+    try:
+        return _run()
+    finally:
+        # Drop the throwaway schema whether the run passed or failed, or a hosted
+        # database fills up with `test_proxy_*` after a few days.
+        from proxy import pg as _pg
+        try:
+            _pg.drop_schema(config.DB_SCHEMA)
+        finally:
+            _pg.close()
+
+
+def _run() -> int:
     for suite in (
+        test_client_request_id,
+        test_soft_budget,
         test_routing,
         test_header_substitution,
         test_prepare_body,

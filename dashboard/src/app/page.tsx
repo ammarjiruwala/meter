@@ -19,22 +19,39 @@ import {
   isLedgerAvailable,
 } from "@/lib/db";
 
-// Reads meter.db on every request — must not be statically prerendered at build
+// Reads the ledger on every request — must not be statically prerendered at build
 // time, or the dashboard would freeze on whatever spend existed the moment
-// `next build` ran.
+// `next build` ran. It also means `next build` never needs a reachable database.
 export const dynamic = "force-dynamic";
 
-export default function Home() {
-  const ledgerAvailable = isLedgerAvailable();
-  const summary = getSpendSummary();
-  const spend = getTeamSpend();
-  const wallets = getProviderBalances();
-  const budgets = getBudgets();
-  const breaker = getBreakerState();
-  const treasuryEvents = getTreasuryEvents();
-  const liveLogs = getLiveLogs();
-  const outcomes = getOutcomeCosts();
-  const outcomeCoverage = getOutcomeCoverage();
+export default async function Home() {
+  // Promise.all, not nine awaits in a row. Every one of these is a network round trip
+  // to a hosted database now — ~50ms each from outside its region — so serial awaits
+  // would put half a second of dead time in front of first paint for no reason. None
+  // of them depends on another.
+  const [
+    ledgerAvailable,
+    summary,
+    spend,
+    wallets,
+    budgets,
+    breaker,
+    treasuryEvents,
+    liveLogs,
+    outcomes,
+    outcomeCoverage,
+  ] = await Promise.all([
+    isLedgerAvailable(),
+    getSpendSummary(),
+    getTeamSpend(),
+    getProviderBalances(),
+    getBudgets(),
+    getBreakerState(),
+    getTreasuryEvents(),
+    getLiveLogs(),
+    getOutcomeCosts(),
+    getOutcomeCoverage(),
+  ]);
 
   return (
     <>
