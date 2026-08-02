@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getTreasuryEvents } from "@/lib/db";
 import { cached } from "@/lib/poll-cache";
+import { judgeContext } from "@/lib/session";
 
 // Polled by the Treasurer Agent panel — never a build-time snapshot. The whole
 // claim of the panel is that you are watching an autonomous agent act.
@@ -10,7 +11,15 @@ export const dynamic = "force-dynamic";
 // the 3s poll, so nothing is served staler than the poll interval already allowed.
 // What it removes is N viewers each asking for the identical rows.
 export async function GET() {
+  // Same scoping and the same cache-key rule as /api/live-logs: a judge watching
+  // their own agent must not have the team's top-up attempts poll in over the top,
+  // and a shared cache key would hand one session's events to another.
+  const judge = await judgeContext();
+  const scope = judge?.projectId ?? null;
+
   return NextResponse.json({
-    events: await cached("treasury-events", () => getTreasuryEvents()),
+    events: await cached(`treasury-events:${scope ?? "public"}`, () =>
+      getTreasuryEvents(40, scope),
+    ),
   });
 }

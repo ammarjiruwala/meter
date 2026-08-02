@@ -51,7 +51,17 @@ SESSION_TTL_S = 4 * 3600
 # Demo-scale rails, per session. The deployed defaults are production numbers: a $20
 # breaker floor is unreachable when a call costs $0.00004, and a judge would never see
 # the feature fire (PITCH.md §2.2).
-DEFAULT_BREAKER_FLOOR_USD = 0.0002
+# Sized so the runaway act actually trips, from measured cost rather than a guess.
+#
+# A `ticket-summary` call costs ~$0.000033 (measured on the deployed proxy). The breaker
+# reads spend BEFORE each call, so with a floor of F it trips on the first call where the
+# spend already recorded exceeds F -- i.e. after ceil(F / 0.000033) + 1 calls.
+#
+# At the old $0.0002 that is the 7th call, and the act only fires six: the demo showed
+# "call 1..6 went through" and no trip, which reads as the breaker not working. At
+# $0.00006 it trips on the 3rd, comfortably inside the act, and still far enough above a
+# single call that the first prompt of the walkthrough cannot set it off on its own.
+DEFAULT_BREAKER_FLOOR_USD = 0.00006
 DEFAULT_CEILING_USD_DAY = 0.50
 
 # A cap on how many proxied calls one session may make. PITCH.md's flow uses about ten;
