@@ -78,7 +78,9 @@ function BudgetCard({
   const used = scope.ceiling_usd > 0 ? scope.spend_usd / scope.ceiling_usd : 0;
   const band = bandFor(used);
   const headroom = Math.max(0, scope.ceiling_usd - scope.spend_usd);
-  const shown = scope.members.slice(0, 4);
+  // Three avatars, not four — the narrower card has to keep room for the headroom
+  // figure beside them.
+  const shown = scope.members.slice(0, 3);
   const extra = scope.members.length - shown.length;
 
   return (
@@ -98,7 +100,11 @@ function BudgetCard({
         <span className={band.badge}>{(used * 100).toFixed(0)}%</span>
       </div>
 
-      <div className="relative z-[1] mb-[14px] pl-[8px]">
+      {/* At ~200px wide the spend and the ceiling no longer fit on one line beside
+          each other, so they stack: the figure that changes on top, the fixed
+          ceiling under it. "Rolling 24h" moved to the rail header — it is the same
+          window for every card and did not need saying nineteen times. */}
+      <div className="relative z-[1] mb-[12px] pl-[8px]">
         <div className="progress-track mb-[8px]">
           {/* Bar length caps at the ceiling; the badge percentage does not, so an
               overspend still reads as the number it is. */}
@@ -107,41 +113,35 @@ function BudgetCard({
             style={{ width: `${Math.min(100, used * 100)}%` }}
           />
         </div>
-        <div className="t-num flex justify-between text-[12px] text-text-secondary">
-          <span>
-            {usd.spend(scope.spend_usd)} of {usd.ceiling(scope.ceiling_usd)}
-          </span>
-          <span className="text-text-tertiary">Rolling 24h</span>
+        <div className="t-num truncate text-[13px] font-medium text-text-primary">
+          {usd.spend(scope.spend_usd)}
+        </div>
+        <div className="t-num truncate text-[11px] text-text-tertiary">
+          of {usd.ceiling(scope.ceiling_usd)} ceiling
         </div>
       </div>
 
-      <div className="relative z-[1] flex items-center justify-between gap-[12px] pl-[8px]">
-        <div className="flex items-center gap-[4px] text-[11px] text-text-tertiary">
-          <span
-            className="t-num"
-            style={
-              band.pulse === "none"
-                ? undefined
-                : { color: `var(--color-status-${band.pulse === "bad" ? "bad" : "warn"})` }
-            }
-          >
-            {band.pulse !== "none" && "⚠ "}
-            {usd.spend(headroom)} headroom
-          </span>
-          {scope.members.length > 0 && (
-            <>
-              <span className="h-[3px] w-[3px] rounded-full bg-text-tertiary/50" />
-              <span>
-                {scope.members.length} member
-                {scope.members.length === 1 ? "" : "s"}
-              </span>
-            </>
+      <div className="relative z-[1] flex items-center justify-between gap-[8px] pl-[8px]">
+        <span
+          className="t-num truncate text-[11px] text-text-tertiary"
+          title={`${usd.spend(headroom)} headroom`}
+        >
+          {band.pulse !== "none" && (
+            <span
+              style={{
+                color: `var(--color-status-${band.pulse === "bad" ? "bad" : "warn"})`,
+              }}
+            >
+              ⚠{" "}
+            </span>
           )}
-        </div>
+          {usd.spend(headroom)} left
+        </span>
 
         {/* Real attribution: these are the actors who spent against this scope,
-            ordered by how much they spent. */}
-        <div className="flex items-center">
+            ordered by how much they spent. The member count that used to sit here
+            is redundant with the stack itself. */}
+        <div className="flex shrink-0 items-center">
           {shown.map((m) => (
             <span
               key={m}
@@ -156,7 +156,7 @@ function BudgetCard({
             <span
               className="avatar text-text-secondary"
               style={{ background: "rgba(234,234,236,0.08)" }}
-              title={scope.members.slice(4).join(", ")}
+              title={scope.members.slice(3).join(", ")}
             >
               +{extra}
             </span>
@@ -288,7 +288,7 @@ function BudgetRail({
         <h2 className="t-section">Team Budget</h2>
         <div className="flex items-center gap-[8px]">
           <span className="t-caption text-text-tertiary">
-            {count} scope{count === 1 ? "" : "s"} · meter.yaml order
+            {count} scope{count === 1 ? "" : "s"} · rolling 24h · meter.yaml order
           </span>
           {/* The controls appear only when there is somewhere to go. */}
           {scrollable && (
