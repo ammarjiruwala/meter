@@ -52,15 +52,15 @@ commercial use) using the committed `dashboard/Dockerfile`.
 
    | String | Goes to | Why |
    | --- | --- | --- |
-   > **Append `?options=-c%20search_path%3Dpublic` to BOTH strings.** Not cosmetic.
+   | **Session pooler** | Render backend | One long-lived process with a small pool |
+   | **Transaction pooler** (port 6543) | Vercel dashboard | Serverless functions open a connection each; direct ones pile up until Postgres refuses more |
+
+   > ⚠️ **Append `?options=-c%20search_path%3Dpublic` to BOTH strings.** Not cosmetic.
    > Supabase's poolers reuse backend connections without resetting session state, so a
    > connection can inherit a stale `search_path` from whatever ran on that backend
    > before it and fail with `relation "requests" does not exist`. It is intermittent,
    > which is worse than broken — measured here as 0/6 connections working without it
    > and 6/6 with it.
-
-   | **Session pooler** | Render backend | One long-lived process with a small pool |
-   | **Transaction pooler** (port 6543) | Vercel dashboard | Serverless functions open a connection each; direct ones pile up until Postgres refuses more |
 
 No tables to create — `proxy/db.py` and `treasury/db.py` build the schema at boot.
 
