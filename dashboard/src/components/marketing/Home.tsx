@@ -40,7 +40,11 @@ const SLIDES = [
     accent: "mint",
     num: "03",
     h: "Cut spend anomalies.",
-    p: "Named after the fuse box in a house. When one feature runs 50× normal, the Circuit Breaker cuts it off. Everything else keeps flowing. Leaked keys die immediately.",
+    // 3×, not the 50× this said. BREAKER_BURST_RATIO defaults to 3.0, and
+    // proxy/config.py notes the ratio is capped by the window sizes at 3600/300 = 12
+    // — set above that and the breaker can never trip at all. So 50× did not merely
+    // overstate the threshold, it described a breaker that would never fire.
+    p: "Named after the fuse box in a house. When one feature's spend rate triples against its own trailing hour, the Circuit Breaker cuts it off. Everything else keeps flowing. Leaked keys die immediately.",
     foot: "✓ Per-feature circuit breaker",
   },
 ];

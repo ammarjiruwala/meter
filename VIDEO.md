@@ -29,8 +29,9 @@ request path and is allowed to spend.
 One line changes: your base URL points at us, not OpenAI. Before we forward anything we
 price the call and hold that money against your budget — a real hold, not a
 read-and-hope check, so ten calls at once can't all see the same balance and all pass.
-We forward, read the true usage back, write it down. Over ceiling, 429. One feature
-burning fifty times normal, the breaker cuts it off and leaves the rest running.
+We forward, read the true usage back, write it down. Over ceiling, 429. And if one
+feature's spend rate suddenly triples against its own trailing hour, the breaker cuts
+that feature off and leaves everything else running.
 
 ---
 
@@ -71,7 +72,7 @@ pay for itself.
 |---|---|---|
 | "under twelve percent" | median **11.9%** | current engine, 63 rows |
 | "three real settlements" | **3** | `treasury_events.status='settled'` |
-| "fifty times normal" | the breaker's burst ratio | `proxy/breaker.py` — confirm the figure before saying it |
+| "triples against its trailing hour" | `BREAKER_BURST_RATIO` = **3.0** | `proxy/config.py` |
 
 **Two things not to say:**
 
