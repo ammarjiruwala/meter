@@ -1,42 +1,40 @@
 #!/usr/bin/env python3
 """Read the ledger from the terminal.
 
-    python scripts/show_ledger.py                  # last 25 requests
-    python scripts/show_ledger.py --all            # everything
-    python scripts/show_ledger.py --accuracy       # predictor accuracy by bucket
-    python scripts/show_ledger.py --spend          # spend by actor / feature
-    python scripts/show_ledger.py --tables         # every table, with row counts
-    python scripts/show_ledger.py --db /tmp/x.db   # a different ledger file
+    python scripts/show_ledger.py                    # last 25 requests
+    python scripts/show_ledger.py --all              # everything
+    python scripts/show_ledger.py --accuracy         # predictor accuracy by bucket
+    python scripts/show_ledger.py --spend            # spend by actor / feature
+    python scripts/show_ledger.py --tables           # every table, with row counts
+    python scripts/show_ledger.py --schema scratch   # a different Postgres schema
 
 Exists because "is the data actually landing?" is a question every one of us asks
-several times a day, and `sqlite3` one-liners are easy to get subtly wrong when the
+several times a day, and hand-written SQL is easy to get subtly wrong when the
 interesting columns are nullable.
+
+Every query here is a SELECT, so it cannot disturb the proxy's writer: under Postgres
+MVCC readers never block writers. That is the same guarantee the old `mode=ro` SQLite
+URI bought, obtained for free.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 
-def resolve_db(explicit: str | None) -> Path:
-    if explicit:
-        return Path(explicit)
-    return Path(os.getenv("METER_DB_PATH", str(REPO / "meter.db")))
-
-
-def show_requests(conn: sqlite3.Connection, limit: int | None) -> None:
+def show_requests(pg, limit: int | None) -> None:
     q = ("SELECT ts, actor, feature, bucket, prediction_method, input_tokens, "
          "predicted_output_tokens, output_tokens, predicted_cost_usd, cost_usd, "
          "status, is_stream FROM requests ORDER BY ts DESC")
     if limit:
         q += f" LIMIT {limit}"
-    rows = conn.execute(q).fetchall()
+    rows = pg.fetchall(q)
     if not rows:
         print("  (no requests yet — run the proxy and send a call)")
         return
@@ -53,15 +51,15 @@ def show_requests(conn: sqlite3.Connection, limit: int | None) -> None:
               f"{r['input_tokens']:>5}{str(pred if pred is not None else '-'):>6}"
               f"{r['output_tokens']:>6}{err:>8}${r['cost_usd']:>10.6f}")
 
-    total = conn.execute("SELECT COUNT(*), SUM(cost_usd) FROM requests").fetchone()
-    print(f"\n  {total[0]} requests, ${total[1] or 0:.6f} total spend")
+    total = pg.fetchone("SELECT COUNT(*) AS n, SUM(cost_usd) AS spend FROM requests")
+    print(f"\n  {total['n']} requests, ${total['spend'] or 0:.6f} total spend")
 
 
-def show_accuracy(conn: sqlite3.Connection) -> None:
-    rows = conn.execute(
-        "SELECT bucket, predicted_output_tokens p, output_tokens a FROM requests "
+def show_accuracy(pg) -> None:
+    rows = pg.fetchall(
+        "SELECT bucket, predicted_output_tokens AS p, output_tokens AS a FROM requests "
         "WHERE predicted_output_tokens IS NOT NULL AND output_tokens > 0"
-    ).fetchall()
+    )
     if not rows:
         print("  (no rows with both a prediction and an actual yet)")
         return
@@ -89,28 +87,29 @@ def show_accuracy(conn: sqlite3.Connection) -> None:
     print("  under-prediction is the safety metric — it is the one that leaks a ceiling")
 
 
-def show_spend(conn: sqlite3.Connection) -> None:
+def show_spend(pg) -> None:
     for label, col in (("actor", "actor"), ("feature", "feature"), ("model", "model")):
-        rows = conn.execute(
-            f"SELECT {col} k, COUNT(*) n, SUM(cost_usd) c FROM requests "
+        rows = pg.fetchall(
+            f"SELECT {col} AS k, COUNT(*) AS n, SUM(cost_usd) AS c FROM requests "
             f"GROUP BY {col} ORDER BY c DESC"
-        ).fetchall()
+        )
         print(f"\n  by {label}")
         for r in rows:
             print(f"    {str(r['k'] or '-'):<22}{r['n']:>5} calls   ${r['c'] or 0:.6f}")
 
 
-def show_tables(conn: sqlite3.Connection) -> None:
-    names = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+def show_tables(pg) -> None:
+    names = [r["table_name"] for r in pg.fetchall(
+        "SELECT table_name FROM information_schema.tables"
+        " WHERE table_schema = current_schema() ORDER BY table_name")]
     for name in names:
-        n = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+        n = pg.fetchone(f'SELECT COUNT(*) AS n FROM "{name}"')["n"]
         print(f"  {name:<22}{n:>6} rows")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db")
+    ap.add_argument("--schema", help="Postgres schema to read (default: DB_SCHEMA)")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--accuracy", action="store_true")
     ap.add_argument("--spend", action="store_true")
@@ -118,29 +117,38 @@ def main() -> int:
     ap.add_argument("-n", type=int, default=25)
     args = ap.parse_args()
 
-    path = resolve_db(args.db)
-    if not path.exists():
-        print(f"no ledger at {path}\n\n"
-              "The proxy creates it on first boot. Either start it:\n"
-              "    uvicorn proxy.app:app --port 8080\n"
-              "or point at another file:\n"
-              "    python scripts/show_ledger.py --db /tmp/meter-25.db")
+    if args.schema:
+        os.environ["DB_SCHEMA"] = args.schema
+
+    from proxy import config, pg
+
+    if not config.DATABASE_URL:
+        print("DATABASE_URL is not set — copy .env.example to .env and fill it in.")
         return 1
 
-    print(f"ledger: {path}\n")
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)  # read-only: never disturb a live writer
-    conn.row_factory = sqlite3.Row
+    print(f"ledger: {config.DATABASE_URL.split('@')[-1]}  schema={config.DB_SCHEMA}\n")
+    if not pg.table_exists("requests"):
+        print("no `requests` table in this schema.\n\n"
+              "The proxy creates it on first boot. Either start it:\n"
+              "    uvicorn proxy.app:app --port 8080\n"
+              "or point at another schema:\n"
+              "    python scripts/show_ledger.py --schema scratch")
+        return 1
+
     if args.tables:
-        show_tables(conn)
+        show_tables(pg)
     elif args.accuracy:
-        show_accuracy(conn)
+        show_accuracy(pg)
     elif args.spend:
-        show_spend(conn)
+        show_spend(pg)
     else:
-        show_requests(conn, None if args.all else args.n)
-    conn.close()
+        show_requests(pg, None if args.all else args.n)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    finally:
+        from proxy import pg
+        pg.close()

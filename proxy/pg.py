@@ -137,10 +137,22 @@ def q(sql: str) -> str:
     return sql.replace("?", "%s")
 
 
+def _args(params: tuple | list):
+    """Empty params become ``None``, not ``()``.
+
+    psycopg only client-side-binds when it is handed a parameter sequence, and an empty
+    tuple still counts as one. It then scans the SQL for placeholders and rejects any
+    literal ``%`` -- so ``DELETE FROM requests WHERE id LIKE 'seed_%'`` fails with "only
+    '%s', '%b', '%t' are allowed as placeholders". Passing None skips binding entirely,
+    which is the right thing for a statement that has no parameters anyway.
+    """
+    return tuple(params) if params else None
+
+
 def execute(sql: str, params: tuple | list = ()) -> int:
     """Run a write. Returns rowcount. Commits on success, rolls back on error."""
     with pool().connection() as conn:
-        cur = conn.execute(q(sql), tuple(params))
+        cur = conn.execute(q(sql), _args(params))
         return cur.rowcount
 
 
@@ -152,7 +164,7 @@ def execute_returning(sql: str, params: tuple | list = ()) -> dict[str, Any] | N
     back with RETURNING instead.
     """
     with pool().connection() as conn:
-        cur = conn.execute(q(sql), tuple(params))
+        cur = conn.execute(q(sql), _args(params))
         return cur.fetchone()
 
 
@@ -168,12 +180,12 @@ def executescript(sql: str) -> None:
 
 def fetchone(sql: str, params: tuple | list = ()) -> dict[str, Any] | None:
     with pool().connection() as conn:
-        return conn.execute(q(sql), tuple(params)).fetchone()
+        return conn.execute(q(sql), _args(params)).fetchone()
 
 
 def fetchall(sql: str, params: tuple | list = ()) -> list[dict[str, Any]]:
     with pool().connection() as conn:
-        return conn.execute(q(sql), tuple(params)).fetchall()
+        return conn.execute(q(sql), _args(params)).fetchall()
 
 
 class _Cursor:
@@ -228,7 +240,7 @@ class _Connection:
 
     def execute(self, sql: str, params: tuple | list = ()) -> _Cursor:
         with pool().connection() as conn:
-            cur = conn.execute(q(sql), tuple(params))
+            cur = conn.execute(q(sql), _args(params))
             rows = cur.fetchall() if cur.description else []
             last = None
             if rows and "id" in rows[0] and "RETURNING" in sql.upper():
