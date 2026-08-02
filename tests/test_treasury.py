@@ -40,6 +40,7 @@ os.environ["TREASURER_ENABLED"] = "false"    # drive ticks by hand, no timer
 from fastapi.testclient import TestClient  # noqa: E402
 
 from proxy import db as ledger  # noqa: E402
+from proxy import pg  # noqa: E402
 from proxy.app import app  # noqa: E402
 from treasury import config, db, prava, topup, treasurer  # noqa: E402
 
@@ -212,6 +213,35 @@ def test_mandate_selection() -> None:
     mandate("multi", "mdt_big", remaining=400.0)
     check("picks the mandate with the most headroom",
           db.chargeable_mandate("multi", "openai")["prava_mandate_id"] == "mdt_big")
+
+    # ── Ordering is a safety property, not a tie-break ────────────────────────
+    # Observed live 2026-08-02: a $500 mandate carrying last_charge_status='declined'
+    # was selected ahead of four healthy $50 mandates with full headroom — because
+    # ordering was headroom alone. Those large mandates are exactly the ones that
+    # cannot mint credentials on this sandbox ("Visa 400 — Fetching cryptogram
+    # failed"), so the selector preferred the broken ones by construction.
+    mandate("mint", "mdt_too_big", remaining=500.0)
+    mandate("mint", "mdt_mintable", remaining=50.0)
+    check("a mintable mandate beats a larger one that cannot mint",
+          db.chargeable_mandate("mint", "openai")["prava_mandate_id"] == "mdt_mintable")
+
+    # Deprioritised, never excluded: on a production account a large mandate is
+    # perfectly chargeable, and refusing the only one available would turn a probable
+    # failure into a certain one.
+    mandate("onlybig", "mdt_lone_big", remaining=500.0)
+    check("...but a large mandate is still used when it is the only one",
+          db.chargeable_mandate("onlybig", "openai")["prava_mandate_id"] == "mdt_lone_big")
+
+    # A previous decline is a weaker signal than size — it can be transient — so it
+    # breaks ties rather than leading. Here both are mintable, so it decides.
+    mandate("decl", "mdt_clean", remaining=40.0)
+    db.upsert_mandate("mdt_declined", "openai", 200.0, 500.0, 0,
+                      recurring_frequency="monthly", status="active",
+                      approved_amount_usd=50.0, remaining_usd=50.0,
+                      project_id="decl", external_user_id_=db.external_user_id("decl"),
+                      last_charge_status="declined")
+    check("a mandate whose last charge declined loses to one that did not",
+          db.chargeable_mandate("decl", "openai")["prava_mandate_id"] == "mdt_clean")
 
     # Confirmed live: a second charge in the same cycle is declined by Visa with
     # "Purchase already made in the current payment cycle", even though the mandate stays
@@ -931,6 +961,136 @@ def test_routes_present() -> None:
     check("the proxy still rejects unauthenticated calls", r.status_code == 401)
 
 
+def test_cooldown_does_not_renew_itself() -> None:
+    """A refused attempt must not restart the cooldown clock.
+
+    Every refusal writes its own audit row, and the cooldown reads the most recent event
+    for the wallet. Counting refusals made it self-renewing: the check refuses, the
+    refusal writes a row, the next check measures from that row. Observed live
+    2026-08-02 — two consecutive `/topup` calls returned `wait_s` 279.7 then **298.4**,
+    the deadline receding each time. A wallet that entered cooldown could never leave,
+    and the only symptom was a Treasurer that had silently stopped topping up.
+
+    `failed` and `pending` still count: a charge that actually reached Prava and is being
+    retried in a loop is exactly what the cooldown exists to stop.
+    """
+    print("\ncooldown does not renew itself")
+    wid = db.ensure_wallet("cool", "openai", 1.0)
+
+    check("no attempts yet -> no cooldown",
+          db.seconds_since_last_attempt(wid) is None)
+
+    # A local refusal — never reached the card.
+    ev = db.open_event(wid, 5.0)
+    db.settle_event(ev["id"], "refused")
+    check("a refused attempt does not start the clock",
+          db.seconds_since_last_attempt(wid) is None,
+          str(db.seconds_since_last_attempt(wid)))
+
+    # A dry run stops before the charge, so nothing was touched.
+    ev = db.open_event(wid, 5.0)
+    db.settle_event(ev["id"], "dry_run")
+    check("nor does a dry run", db.seconds_since_last_attempt(wid) is None)
+
+    # A real charge does, whether it succeeded or was declined by the network.
+    ev = db.open_event(wid, 5.0)
+    db.settle_event(ev["id"], "failed", error="declined")
+    age = db.seconds_since_last_attempt(wid)
+    check("a charge that reached Prava does start it",
+          age is not None and age < 60, str(age))
+
+    # And a refusal after it must not push the deadline out.
+    ev = db.open_event(wid, 5.0)
+    db.settle_event(ev["id"], "refused")
+    later = db.seconds_since_last_attempt(wid)
+    check("a later refusal does not reset it",
+          later is not None and later >= age, f"{age} -> {later}")
+
+
+def test_open_event_placeholder_cannot_wedge_the_table() -> None:
+    """A row that never got its key must not block every future top-up.
+
+    `idempotency_key` is UNIQUE and cannot be known until the row has an id, so
+    `open_event` writes a placeholder and fills it in. The placeholder used to be `''`,
+    which Postgres allows exactly one of — so a single row whose UPDATE never landed
+    wedged the payment path permanently. Observed live 2026-08-02: one `dry_run` row sat
+    at `''`, and the next real charge died on
+
+        duplicate key value violates unique constraint
+        "treasury_events_idempotency_key_key"
+
+    The column is UNIQUE *and* NOT NULL, so the placeholder cannot be NULL either. A
+    random per-row placeholder is the fix: it cannot collide, so a stuck row is inert
+    instead of fatal.
+    """
+    print("\nopen_event placeholder")
+    wid = db.ensure_wallet("wedge", "openai", 100.0)
+
+    # The exact row that poisoned production: a legacy `''` placeholder whose UPDATE
+    # never landed. It must no longer stop anything.
+    pg.execute(
+        "INSERT INTO treasury_events (wallet_id, amount_usd, status, idempotency_key,"
+        " created_at) VALUES (?, ?, 'dry_run', '', ?)",
+        (wid, 25.0, db.now_iso()))
+    check("a legacy empty-string row can exist", True)
+
+    a = db.open_event(wid, 5.0)
+    b = db.open_event(wid, 5.0)
+    check("open_event still works with a poisoned row present",
+          isinstance(a["id"], int) and isinstance(b["id"], int), f"{a} {b}")
+    check("and mints distinct keys", a["idempotency_key"] != b["idempotency_key"],
+          f"{a['idempotency_key']} vs {b['idempotency_key']}")
+    check("neither key is empty or None-derived",
+          all(k and k != "tev_None" for k in
+              (a["idempotency_key"], b["idempotency_key"])),
+          f"{a['idempotency_key']} {b['idempotency_key']}")
+
+    row = pg.fetchone("SELECT idempotency_key AS k FROM treasury_events WHERE id = ?",
+                      (a["id"],))
+    check("the key is persisted, not just returned", row["k"] == a["idempotency_key"],
+          str(row))
+
+
+def test_body_is_rejected_not_ignored() -> None:
+    """A JSON body on a query-parameter route must fail loudly.
+
+    These routes bind bare scalar defaults, which FastAPI reads as query parameters, and
+    with no body model declared it never reads the body — so a JSON body used to be
+    *invisible* rather than rejected. Measured before the fix:
+
+        POST /wallets/seed {"balance_usd": 99.00, "reset": true}
+        -> 200, balance unchanged at 0.05, updated_at unchanged
+
+    The caller was told it worked and nothing was written. That is the failure mode a
+    money endpoint can least afford, and it is on the path a judge's browser drives —
+    posting JSON is the default thing a frontend does, so a "Connect your card" button
+    would have returned 200 and done nothing on every click.
+    """
+    print("\nquery-parameter routes reject a body")
+
+    seeded = CLIENT.post("/wallets/seed", headers=AUTH,
+                         params={"project_id": "bodycheck", "provider": "openai",
+                                 "balance_usd": 1.00, "reset": True}).json()
+    check("query parameters still work", seeded["balance_usd"] == 1.00, str(seeded))
+
+    r = CLIENT.post("/wallets/seed", headers=AUTH,
+                    json={"project_id": "bodycheck", "balance_usd": 99.00, "reset": True})
+    check("a JSON body is refused, not silently ignored", r.status_code == 415,
+          f"got {r.status_code} {r.text[:160]}")
+
+    after = CLIENT.get("/wallets").json()
+    row = next((w for w in after if w["project_id"] == "bodycheck"), None)
+    check("and the refused call changed nothing",
+          row is not None and row["balance_usd"] == 1.00, str(row))
+
+    # Every money-moving POST, not just the one that was found by hand.
+    for path in ("/topup", "/mandates/create", "/mandates/sync", "/charge", "/report",
+                 "/charge-refusal", "/treasury/tick"):
+        rr = CLIENT.post(path, headers=AUTH, json={"project_id": "bodycheck"})
+        check(f"{path} refuses a body", rr.status_code == 415,
+              f"got {rr.status_code}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_rate_limit_trip() -> None:
@@ -1183,6 +1343,9 @@ def _run() -> int:
             test_dashboard_queries,
             test_integration_proxy_to_treasurer,
             test_routes_present,
+            test_cooldown_does_not_renew_itself,
+            test_open_event_placeholder_cannot_wedge_the_table,
+            test_body_is_rejected_not_ignored,
         ):
             suite()
     print(f"\n{PASSED} checks passed")
