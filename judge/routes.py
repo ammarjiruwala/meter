@@ -21,7 +21,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Header, HTTPException
 
-from . import prompts, sessions
+from . import ledger, prompts, sessions
 
 log = logging.getLogger("meter.judge.routes")
 
@@ -189,3 +189,40 @@ async def alert_test(x_judge_session: str | None = Header(default=None)):
             "line yet — Linq's sandbox drops those silently (error 2008)."
         ),
     }
+
+
+@router.get("/ledger")
+async def judge_ledger(limit: int = 50,
+                       x_judge_session: str | None = Header(default=None)):
+    """This session's own calls, newest first, prediction beside outcome."""
+    session = _require(x_judge_session)
+    return {
+        "project_id": session.project_id,
+        "rows": ledger.recent(session.project_id, min(max(limit, 1), 200)),
+    }
+
+
+@router.get("/stats")
+async def judge_stats(x_judge_session: str | None = Header(default=None)):
+    """Accuracy over this session, with the sample size attached.
+
+    `enough_for_median` is the field that matters: at n=1 a "median error" is one
+    observation wearing a statistic's clothes, and a judge shown 4% and then 61% was
+    misled by the first label rather than surprised by the second number.
+    """
+    session = _require(x_judge_session)
+    return ledger.stats(session.project_id)
+
+
+@router.get("/budgets")
+async def judge_budgets(x_judge_session: str | None = Header(default=None)):
+    """The session's own ceilings and the spend measured against them."""
+    session = _require(x_judge_session)
+    return ledger.budgets(session.project_id)
+
+
+@router.get("/outcomes")
+async def judge_outcomes(x_judge_session: str | None = Header(default=None)):
+    """Cost per outcome for this session — spend per resolved thing, joined on trace."""
+    session = _require(x_judge_session)
+    return {"rows": ledger.outcomes(session.project_id)}

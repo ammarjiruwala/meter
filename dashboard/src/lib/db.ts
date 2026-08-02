@@ -135,6 +135,23 @@ function numOrNull(value: unknown): number | null {
   return typeof value === "number" ? value : Number(value);
 }
 
+/**
+ * The public dashboard shows the team's own traffic, never a judge's.
+ *
+ * A "Try it yourself" session is a tenant like any other — that is exactly what makes it
+ * safe, and it means every query here would pick it up for free (PITCH.md §5). Free is
+ * the wrong price in this direction: this page is the product, and a stranger's six-call
+ * demo landing in Team Spend, Cost per Outcome and the headline totals would distort the
+ * numbers the page exists to show, in public, while someone is reading them.
+ *
+ * Judge traffic is not hidden — the console renders it from `/judge/*`, scoped to the
+ * session that produced it. It is just not *this* page's traffic.
+ *
+ * A string literal rather than a bound parameter so it can be dropped into any WHERE
+ * clause without renumbering the placeholders around it. It interpolates nothing.
+ */
+const NOT_JUDGE = "project_id NOT LIKE 'judge-%'";
+
 export type SpendRow = {
   project_id: string;
   actor: string | null;
@@ -152,6 +169,7 @@ export async function getTeamSpend(): Promise<SpendRow[]> {
             SUM(cost_usd) AS total_cost_usd,
             COUNT(*)      AS request_count
        FROM requests
+      WHERE ${NOT_JUDGE}
       GROUP BY project_id, actor, feature
       ORDER BY total_cost_usd DESC`,
   );
@@ -209,6 +227,7 @@ export async function getBreakerState(): Promise<BreakerState> {
   const rows = await query<{ scope: string; mode: string }>(
     `SELECT scope, mode FROM breaker_events
       WHERE closed_at IS NULL
+        AND scope NOT LIKE 'judge-%'
       ORDER BY id DESC`,
   );
   if (rows.length === 0) return idle;
@@ -242,7 +261,8 @@ export async function getSpendSummary(): Promise<SpendSummary> {
             COUNT(DISTINCT provider)   AS provider_count,
             COALESCE(SUM(input_tokens + output_tokens), 0) AS token_count,
             MAX(ts)                    AS last_ts
-       FROM requests`,
+       FROM requests
+      WHERE ${NOT_JUDGE}`,
   );
   const row = rows[0];
   if (!row) return empty;
@@ -276,6 +296,7 @@ export async function getProviderBalances(): Promise<WalletRow[] | null> {
   const rows = await query<WalletRow>(
     `SELECT id, project_id, provider, balance_usd, updated_at
        FROM wallets
+      WHERE ${NOT_JUDGE}
       ORDER BY project_id, provider`,
   );
   return rows.map((r) => ({ ...r, balance_usd: num(r.balance_usd) }));
@@ -372,6 +393,7 @@ export async function getBudgets(): Promise<BudgetScope[] | null> {
         `SELECT id AS project_id, ceiling_usd_day
            FROM projects
           WHERE ceiling_usd_day IS NOT NULL
+            AND id NOT LIKE 'judge-%'
           ORDER BY ${hasProjectOrder ? "sort_order NULLS LAST, " : ""}id`,
       )
     : [];
@@ -605,25 +627,27 @@ export async function getHeadlineMetrics(): Promise<HeadlineMetrics> {
   const [windowRows, prevRows, ceilingRows, walletRows] = await Promise.all([
     query<{ spend: number; requests: number }>(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend, COUNT(*) AS requests
-         FROM requests WHERE ts >= $1`,
+         FROM requests WHERE ts >= $1 AND ${NOT_JUDGE}`,
       [cutoff],
     ),
     // The window *before* this one — bounded on both sides, or it would include
     // the current window too and the delta would always read flat.
     query<{ spend: number }>(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend
-         FROM requests WHERE ts >= $1 AND ts < $2`,
+         FROM requests WHERE ts >= $1 AND ts < $2 AND ${NOT_JUDGE}`,
       [prevCutoff, cutoff],
     ),
     hasProjects
       ? query<{ project_id: string; ceiling_usd_day: number }>(
           `SELECT id AS project_id, ceiling_usd_day
-             FROM projects WHERE ceiling_usd_day IS NOT NULL`,
+             FROM projects WHERE ceiling_usd_day IS NOT NULL
+               AND id NOT LIKE 'judge-%'`,
         )
       : Promise.resolve([]),
     hasWallets
       ? query<{ project_id: string; provider: string; balance_usd: number }>(
-          `SELECT project_id, provider, balance_usd FROM wallets`,
+          `SELECT project_id, provider, balance_usd FROM wallets
+        WHERE ${NOT_JUDGE}`,
         )
       : Promise.resolve([]),
   ]);
@@ -720,7 +744,8 @@ const OUTCOME_CTES = `
   WITH latest AS (
     SELECT a.project_id, a.trace_id, a.outcome, a.value_usd
       FROM annotations a
-     WHERE a.id = (SELECT MAX(b.id)
+     WHERE a.project_id NOT LIKE 'judge-%'
+       AND a.id = (SELECT MAX(b.id)
                      FROM annotations b
                     WHERE b.project_id = a.project_id
                       AND b.trace_id  = a.trace_id)
@@ -732,6 +757,7 @@ const OUTCOME_CTES = `
            COUNT(*)      AS request_count
       FROM requests
      WHERE trace_id IS NOT NULL
+       AND ${NOT_JUDGE}
      GROUP BY project_id, trace_id
   )
 `;
@@ -825,7 +851,8 @@ export async function getOutcomeCoverage(): Promise<OutcomeCoverage | null> {
                FROM latest l LEFT JOIN trace_rollup t
                  ON t.project_id = l.project_id AND t.trace_id = l.trace_id
               WHERE t.trace_id IS NULL)                               AS orphan_annotations,
-            (SELECT COALESCE(SUM(cost_usd), 0)     FROM requests)     AS total_cost`,
+            (SELECT COALESCE(SUM(cost_usd), 0)     FROM requests
+              WHERE ${NOT_JUDGE})                                     AS total_cost`,
   );
   const row = rows[0];
   if (!row) return null;
@@ -893,6 +920,7 @@ export async function getTreasuryEvents(limit = 40): Promise<TreasuryEvent[]> {
             ${joined ? "w.project_id, w.provider" : "NULL AS project_id, NULL AS provider"}
        FROM treasury_events e
        ${joined ? "LEFT JOIN wallets w ON w.id = e.wallet_id" : ""}
+      ${joined ? "WHERE w.project_id IS NULL OR w.project_id NOT LIKE 'judge-%'" : ""}
       ORDER BY e.id DESC
       LIMIT $1`,
     [limit],
@@ -967,6 +995,7 @@ export async function getLiveLogs(limit = 50): Promise<LiveLogRow[]> {
             cost_usd,
             status
        FROM requests
+      WHERE ${NOT_JUDGE}
       ORDER BY ts DESC
       LIMIT $1`,
     [limit],

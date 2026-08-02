@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Must be set before proxy.config is imported — it reads the environment once, at import.
 os.environ["DB_SCHEMA"] = "test_judge_" + uuid.uuid4().hex[:8]
 
-from judge import sessions  # noqa: E402
+from judge import ledger, sessions  # noqa: E402
 from proxy import db  # noqa: E402
 from proxy import pg  # noqa: E402
 
@@ -576,6 +576,106 @@ def test_routes() -> None:
               sessions.resolve(token) is not None)
 
 
+# ── The console's own view of the ledger ─────────────────────────────────────
+
+def _write(project_id: str, feature: str, predicted: int, actual: int,
+           trace_id: str | None = None) -> None:
+    db.record_request({
+        "id": f"req_{uuid.uuid4().hex}", "ts": db.now_iso(),
+        "project_id": project_id, "feature": feature, "actor": "judge",
+        "trace_id": trace_id, "provider": "openai", "model": "gpt-4o-mini",
+        "endpoint": "/v1/chat/completions", "status": 200,
+        "input_tokens": 60, "output_tokens": actual,
+        "predicted_output_tokens": predicted,
+        "predicted_cost_usd": predicted * 6e-7, "cost_usd": actual * 6e-7,
+    })
+
+
+def test_console_ledger_and_stats() -> None:
+    print("\nthe console reads its own session, and only its own")
+    from judge import ledger
+
+    mine = sessions.create()
+    theirs = sessions.create()
+
+    _write(mine.project_id, "ticket-summary", 100, 100, trace_id="ticket-1")
+    _write(mine.project_id, "sql-from-question", 100, 110)
+    _write(mine.project_id, "pr-description", 100, 80)
+    _write(theirs.project_id, "ticket-summary", 100, 900)
+
+    rows = ledger.recent(mine.project_id)
+    check("only this session's calls come back", len(rows) == 3)
+    check("another judge's call is not among them",
+          all(r["feature"] != "ticket-summary" or r["output_tokens"] != 900
+              for r in rows))
+    check("each row carries the prediction beside the outcome",
+          all(r["predicted_output_tokens"] is not None for r in rows))
+    check("and the error computed from them",
+          {r["output_token_error_pct"] for r in rows} == {0.0, 9.1, 25.0})
+
+    s = ledger.stats(mine.project_id)
+    check("stats count only this session", s["calls"] == 3 and s["sample"] == 3)
+    check("median error is the middle observation", s["median_error_pct"] == 9.1)
+    check("all three are within 2x", s["within_2x_pct"] == 100.0)
+    check("three is enough to call it a median", s["enough_for_median"] is True)
+
+    # The honesty guard: one observation must not be labelled a median.
+    fresh = sessions.create()
+    check("a session with no calls reports no median",
+          ledger.stats(fresh.project_id)["median_error_pct"] is None)
+    _write(fresh.project_id, "ticket-summary", 100, 300)
+    one = ledger.stats(fresh.project_id)
+    # Error is relative to what actually happened: |300-100|/300, not |300-100|/100.
+    check("one call produces a number", one["median_error_pct"] == 66.7,
+          str(one["median_error_pct"]))
+    check("but is flagged as too few to call a median",
+          one["enough_for_median"] is False)
+    check("and a 3x miss is correctly outside 2x", one["within_2x_pct"] == 0.0)
+
+    budgets = ledger.budgets(mine.project_id)
+    check("the session's project ceiling is reported",
+          budgets["project"]["ceiling_usd"] == 0.50)
+    check("with spend measured against it", budgets["project"]["spend_usd"] > 0)
+    check("and a row per offered feature",
+          len(budgets["features"]) == len(sessions.DEFAULT_FEATURE_CEILINGS))
+
+    db.record_annotation(mine.project_id, "ticket-1", "resolved", 12.50)
+    out = ledger.outcomes(mine.project_id)
+    check("cost per outcome joins on the trace", len(out) == 1)
+    check("and computes margin against the value",
+          out[0]["margin_usd"] is not None and out[0]["margin_usd"] < 12.50)
+    check("another judge's outcomes are not visible",
+          ledger.outcomes(theirs.project_id) == [])
+
+
+def test_public_dashboard_excludes_judges() -> None:
+    """The dashboard's SQL, run here so the exclusion is verified against real rows."""
+    print("\nthe public dashboard does not show judge traffic")
+    conn = db.connect()
+    judge = sessions.create()
+    _write(judge.project_id, "ticket-summary", 100, 100)
+    db.seed_keys("mk_public_probe:public-project:dev")
+    _write("public-project", "ticket-summary", 100, 100)
+
+    # Exactly the predicate dashboard/src/lib/db.ts applies (NOT_JUDGE).
+    visible = [dict(r)["project_id"] for r in conn.execute(
+        "SELECT DISTINCT project_id FROM requests "
+        "WHERE project_id NOT LIKE 'judge-%'").fetchall()]
+    check("the team's own project is visible", "public-project" in visible)
+    check("no judge project is", not any(
+        p.startswith(sessions.PROJECT_PREFIX) for p in visible), str(visible))
+
+    ceilings = [dict(r)["id"] for r in conn.execute(
+        "SELECT id FROM projects WHERE ceiling_usd_day IS NOT NULL "
+        "AND id NOT LIKE 'judge-%'").fetchall()]
+    check("judge ceilings do not appear as public budget cards",
+          not any(p.startswith(sessions.PROJECT_PREFIX) for p in ceilings))
+
+    # And the judge can still see their own, which is the other half of the claim.
+    check("while the console still sees the judge's own spend",
+          ledger.stats(judge.project_id)["calls"] == 1)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -597,6 +697,8 @@ def main() -> int:
             test_prava_key_is_per_task_not_per_process,
             test_alerts_reach_the_judge_not_the_on_call_phone,
             test_routes,
+            test_console_ledger_and_stats,
+            test_public_dashboard_excludes_judges,
         ):
             suite()
     finally:
