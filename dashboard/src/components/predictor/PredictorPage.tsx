@@ -162,7 +162,7 @@ export function PredictorPage() {
       // Reveal on scroll, staggered per section.
       gsap.utils.toArray<HTMLElement>(".reveal").forEach((el) => {
         gsap.from(el, {
-          scrollTrigger: { trigger: el, start: "top 85%" },
+          scrollTrigger: { trigger: el, start: "top 88%", once: true },
           y: 40,
           opacity: 0,
           duration: 1,
@@ -181,6 +181,13 @@ export function PredictorPage() {
         });
       });
     }, rootRef);
+
+    // ScrollTrigger measures start/end positions once, at creation. The page uses
+    // two webfonts, so every heading reflows when they land and every measurement
+    // taken before that points at the wrong scroll offset — the failure mode is a
+    // `.reveal` element whose trigger never fires, leaving it at opacity 0 forever.
+    // That is a blank band where content should be, and it is the bug this page had.
+    document.fonts?.ready.then(() => ScrollTrigger.refresh());
 
     return () => {
       ctx.revert();
@@ -266,18 +273,20 @@ export function PredictorPage() {
           {/* The engine object: seven translucent plates in real 3D, a token
               falling through them. Tilts toward the cursor. */}
           <div className="px-engine-stage">
-            <div className="px-engine" ref={engineRef}>
-              {STAGES.map((s, i) => (
-                <div
-                  className="px-plate"
-                  key={s.n}
-                  style={{ "--i": i } as React.CSSProperties}
-                >
-                  <span className="px-plate-n">{s.n}</span>
-                  <span className="px-plate-tag">{s.tag}</span>
-                </div>
-              ))}
-              <div className="px-token" aria-hidden="true" />
+            <div className="px-engine-tilt">
+              <div className="px-engine" ref={engineRef}>
+                {STAGES.map((s, i) => (
+                  <div
+                    className="px-plate"
+                    key={s.n}
+                    style={{ "--i": i } as React.CSSProperties}
+                  >
+                    <span className="px-plate-n">{s.n}</span>
+                    <span className="px-plate-tag">{s.tag}</span>
+                  </div>
+                ))}
+                <div className="px-token" aria-hidden="true" />
+              </div>
             </div>
           </div>
         </div>

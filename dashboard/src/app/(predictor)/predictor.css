@@ -25,7 +25,9 @@
 }
 .px > * { position: relative; z-index: 1; }
 
-.px-sec { padding: 120px 0; border-top: 1px solid var(--rule); }
+/* 120px top and bottom meant 240px of nothing between every pair of sections.
+   96px still separates them without reading as a hole in the page. */
+.px-sec { padding: 96px 0; border-top: 1px solid var(--rule); }
 
 /* ── SHARED TYPE ──────────────────────────────────────── */
 .px-h1 {
@@ -85,30 +87,39 @@
   display: grid;
   place-items: center;
   perspective: 1200px;
-  min-height: 420px;
+  /* Sized to the *painted* height, not the layout height. A 300px square at
+     rotateX(52deg) projects to 300·cos52 ≈ 185, and the ±110px translateZ spread
+     adds 2·110·sin52 ≈ 173 — so ~360, not the 420 a naive reading gives. Guessing
+     this number is what left a band of dead space under the engine. */
+  min-height: 360px;
 }
-/* The stack of plates lives in 3D and tilts toward the cursor (--rx/--ry set in JS). */
+/* Two nested transforms on purpose. An `animation` sets `transform` outright, so
+   idle drift and cursor tilt on one element means the animation silently wins and
+   the tilt never renders. Drift on the outer, tilt on the inner: they compose. */
+.px-engine-tilt {
+  transform-style: preserve-3d;
+  animation: px-engine-idle 16s ease-in-out infinite;
+}
 .px-engine {
   position: relative;
   width: 300px;
   height: 300px;
   transform-style: preserve-3d;
-  transform: rotateX(calc(58deg + var(--rx, 0deg))) rotateZ(var(--ry, 0deg));
-  transition: transform 400ms cubic-bezier(0.16, 1, 0.3, 1);
-  animation: px-engine-idle 14s ease-in-out infinite;
+  transform: rotateX(calc(52deg + var(--rx, 0deg))) rotateZ(var(--ry, 0deg));
+  transition: transform 500ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 @keyframes px-engine-idle {
-  0%, 100% { transform: rotateX(58deg) rotateZ(-6deg); }
-  50% { transform: rotateX(58deg) rotateZ(6deg); }
+  0%, 100% { transform: rotateZ(-7deg) translateY(-6px); }
+  50% { transform: rotateZ(7deg) translateY(6px); }
 }
-/* Cursor control overrides the idle drift by re-declaring transform above; when the
-   pointer leaves, --rx/--ry return to 0 and the idle keyframes read through. */
 .px-plate {
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  background: linear-gradient(135deg, rgba(240, 104, 92, 0.08), rgba(20, 20, 28, 0.5));
-  border: 1px solid rgba(240, 104, 92, 0.22);
+  /* Opacity and rim brightness ramp with depth, so the stack reads as seven
+     distinct plates receding rather than as one thick slab. */
+  background: linear-gradient(135deg, rgba(240, 104, 92, calc(0.05 + var(--i) * 0.012)), rgba(20, 20, 28, 0.55));
+  border: 1px solid rgba(240, 104, 92, calc(0.14 + var(--i) * 0.03));
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05);
   transform: translateZ(calc(var(--i) * 34px - 100px));
   display: flex;
@@ -180,7 +191,11 @@
 
 /* ── STATS + QUOTE ────────────────────────────────────── */
 .px-statrow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 0 0 44px; }
-.px-stat { padding: 26px; background: var(--card); border: 1px solid var(--rule); border-radius: 14px; }
+.px-stat {
+  padding: 26px; background: var(--card); border: 1px solid var(--rule); border-radius: 14px;
+  transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), border-color 300ms ease;
+}
+.px-stat:hover { transform: translateY(-4px); border-color: rgba(240, 104, 92, 0.35); }
 .px-stat-n { display: block; font-family: var(--cond); font-weight: 700; font-size: clamp(2.4rem, 5vw, 3.6rem); line-height: 1; color: var(--signal); margin-bottom: 12px; }
 .px-stat-l { font-size: 14px; color: var(--ink-2); line-height: 1.45; }
 .px-quote {
@@ -235,9 +250,11 @@
   content: ""; position: absolute; left: 21px; top: 24px; bottom: 24px; width: 2px;
   background: linear-gradient(180deg, var(--signal), var(--gold)); opacity: 0.35;
 }
+/* 0.4 put body copy under 3:1 contrast — six of the seven stages read as blank
+   space rather than as "not the active one". 0.62 still recedes, but stays legible. */
 .px-pipe-step {
   display: grid; grid-template-columns: 44px 1fr; gap: 24px; padding: 26px 0;
-  position: relative; opacity: 0.4; transition: opacity 400ms ease, transform 400ms ease;
+  position: relative; opacity: 0.62; transition: opacity 400ms ease, transform 400ms ease;
 }
 .px-pipe-step.active { opacity: 1; }
 .px-pipe-num {
@@ -287,31 +304,42 @@
 .px-badge.property { color: var(--gold); border-color: rgba(232, 181, 123, 0.3); }
 
 /* ── LOOP RING (3D) ───────────────────────────────────── */
-.px-loop { display: grid; place-items: center; padding: 40px 0 8px; perspective: 1000px; }
+.px-loop { display: grid; place-items: center; padding: 24px 0 8px; perspective: 1000px; }
+/* Height is the projection, not the radius: nodes sit at r=155 in the ring plane,
+   which at rotateX(58deg) spans only 155·cos58·2 ≈ 164px vertically. A 340px-tall
+   box therefore painted ~170px of ring and ~170px of nothing. Width stays 340
+   because the horizontal radius is not foreshortened.
+   The ring also no longer spins on its own axis — rotateZ swung all five labels
+   through every angle, which read as broken rather than as motion. The orbiting
+   particle carries the movement instead. */
 .px-loop-ring {
-  position: relative; width: 340px; height: 340px;
-  transform-style: preserve-3d; transform: rotateX(64deg);
-  animation: px-ring-spin 26s linear infinite;
+  position: relative; width: 340px; height: 190px;
+  transform-style: preserve-3d; transform: rotateX(58deg);
 }
-@keyframes px-ring-spin { to { transform: rotateX(64deg) rotateZ(360deg); } }
 .px-loop-node {
   position: absolute; left: 50%; top: 50%;
-  transform: translate(-50%, -50%) rotate(var(--a)) translateY(-155px) rotate(calc(-1 * var(--a))) rotateX(-64deg);
+  transform: translate(-50%, -50%) rotate(var(--a)) translateY(-155px) rotate(calc(-1 * var(--a))) rotateX(-58deg);
   font-family: var(--mono); font-size: 12px; color: var(--ink);
   padding: 9px 14px; background: var(--bg-2); border: 1px solid var(--rule); border-radius: 8px;
-  white-space: nowrap;
+  white-space: nowrap; box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.8);
 }
 .px-loop-node.accent { color: var(--signal); border-color: rgba(240,104,92,0.4); box-shadow: 0 0 20px rgba(240,104,92,0.25); }
 .px-loop-node.gold { color: var(--gold); border-color: rgba(232,181,123,0.4); }
-.px-loop-orbit { position: absolute; inset: 30px; border-radius: 50%; border: 1px dashed rgba(240,104,92,0.25); }
+/* Centred on the ring rather than inset from its box — the box is no longer square,
+   so `inset` would have made the orbit an ellipse the particle could not follow. */
+.px-loop-orbit {
+  position: absolute; left: 50%; top: 50%;
+  width: 310px; height: 310px; margin: -155px 0 0 -155px;
+  border-radius: 50%; border: 1px dashed rgba(240, 104, 92, 0.25);
+}
 .px-loop-particle {
-  position: absolute; top: -4px; left: 50%; width: 10px; height: 10px; margin-left: -5px;
-  border-radius: 50%; background: var(--signal); box-shadow: 0 0 16px var(--signal);
-  transform-origin: 5px 144px; animation: px-particle 5s linear infinite;
+  position: absolute; top: -5px; left: 50%; width: 10px; height: 10px; margin-left: -5px;
+  border-radius: 50%; background: var(--signal); box-shadow: 0 0 20px var(--signal);
+  transform-origin: 5px 160px; animation: px-particle 6s linear infinite;
 }
 @keyframes px-particle { to { transform: rotate(360deg); } }
 .px-loop-core {
-  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) rotateX(-64deg);
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) rotateX(-58deg);
   font-family: var(--mono); font-size: 11px; letter-spacing: 0.1em; color: var(--ink-3);
   text-align: center; line-height: 1.5;
 }
@@ -322,10 +350,20 @@
 .px-cta p { font-size: 18px; color: var(--ink-2); max-width: 46ch; margin: 0 auto 34px; }
 .px-footer { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 44px 0; border-top: 1px solid var(--rule); font-family: var(--mono); font-size: 12px; color: var(--ink-3); letter-spacing: 0.04em; }
 
+/* GSAP is skipped under reduced motion (see PredictorPage), but these loops are
+   pure CSS and would otherwise keep running. */
+@media (prefers-reduced-motion: reduce) {
+  .px-engine-tilt, .px-token, .px-drop, .px-loop-particle, .px-term-caret {
+    animation: none;
+  }
+  .px-token { opacity: 1; transform: translateZ(0); }
+}
+
 /* ── RESPONSIVE ───────────────────────────────────────── */
 @media (max-width: 900px) {
   .px-hero-grid { grid-template-columns: 1fr; gap: 24px; }
-  .px-engine-stage { min-height: 340px; order: -1; }
+  .px-engine-stage { min-height: 300px; order: -1; }
+  .px-loop-ring { transform: rotateX(58deg) scale(0.8); }
   .px-pipe-layout { grid-template-columns: 1fr; }
   .px-readout { position: relative; top: 0; margin-bottom: 12px; }
 }
