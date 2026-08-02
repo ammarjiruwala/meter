@@ -402,6 +402,58 @@ def test_a_boot_does_not_wipe_judge_ceilings() -> None:
           budget.active_ceilings().get(f"project:{s.project_id}") == 0.50)
 
 
+# ── Per-judge Prava merchant key ─────────────────────────────────────────────
+
+def test_prava_key_is_per_task_not_per_process() -> None:
+    print("\nthe Prava merchant key is per call, not fixed at import")
+    import asyncio
+
+    from treasury import config as tconfig
+    from treasury import prava
+
+    check("with nothing set, the configured key is used",
+          prava.current_api_key() == tconfig.PRAVA_API_KEY)
+
+    with prava.use_api_key("sk_test_judge_alice"):
+        check("inside the block, the judge's key wins",
+              prava.current_api_key() == "sk_test_judge_alice")
+        check("and the header carries it",
+              prava._headers()["Authorization"] == "Bearer sk_test_judge_alice")
+    check("outside it, the configured key is back",
+          prava.current_api_key() == tconfig.PRAVA_API_KEY)
+
+    with prava.use_api_key(None):
+        check("an absent judge key falls back rather than sending an empty bearer",
+              prava.current_api_key() == tconfig.PRAVA_API_KEY)
+
+    try:
+        with prava.use_api_key("sk_test_boom"):
+            raise RuntimeError("charge blew up")
+    except RuntimeError:
+        pass
+    check("an exception cannot leave a judge's key installed",
+          prava.current_api_key() == tconfig.PRAVA_API_KEY)
+
+    # The property a module global could not give us. One backend instance serves every
+    # judge, so two overlapping charges must not be able to see each other's merchant
+    # key — the failure would be charging one judge's card on another's account.
+    async def observe(key: str, hold_s: float) -> str:
+        with prava.use_api_key(key):
+            await asyncio.sleep(hold_s)
+            return prava.current_api_key()
+
+    async def race() -> list[str]:
+        return await asyncio.gather(
+            observe("sk_test_alice", 0.03),
+            observe("sk_test_bob", 0.01),
+            observe("sk_test_cara", 0.02),
+        )
+
+    seen = asyncio.run(race())
+    check("concurrent tasks each keep their own key",
+          seen == ["sk_test_alice", "sk_test_bob", "sk_test_cara"], str(seen))
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -420,6 +472,7 @@ def main() -> int:
             test_floor_actually_decides_the_trip,
             test_ceilings_are_written_where_the_dashboard_reads,
             test_a_boot_does_not_wipe_judge_ceilings,
+            test_prava_key_is_per_task_not_per_process,
         ):
             suite()
     finally:
