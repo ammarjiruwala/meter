@@ -15,6 +15,29 @@ is another 2–3 minutes the first time.
 
 **Cost:** under 5 cents of real OpenAI spend for the whole walkthrough.
 
+> ### On the OpenAI free tier? Read this first.
+>
+> The core walkthrough (§4, §5, §6, §9) is **17 requests and about 1,000 input
+> tokens** — comfortably under half of a free-tier day, whichever limit binds.
+>
+> **Two things will bite you, and neither is Meter's fault:**
+>
+> **1. Do not run `scripts/demo_live.py --n 2` (§5, "All 32 features at once").** It is
+> 64 requests and **600,000 input tokens** — several times a free-tier daily token
+> allowance, because it includes the high-consumption features whose prompts are 33k–44k
+> tokens each. A free-tier-safe version is given in that section.
+>
+> **2. The free tier allows ~3 requests per minute. Pace yourself — roughly one command
+> every 20 seconds.** If you fire them back to back, OpenAI returns a `429` of its own,
+> and it looks almost exactly like the circuit breaker tripping in §6. Tell them apart
+> like this:
+>
+> | | Meter's breaker | OpenAI's rate limit |
+> | --- | --- | --- |
+> | where it appears | `try.sh` prints an error; ledger row has status `429` | error mentions `rate_limit_exceeded` / `Rate limit reached` |
+> | proxy log | `breaker TRIPPED scope=...` | no breaker line |
+> | fix | wait 120s or reset the breaker | wait 60s |
+
 ---
 
 ## 1. Prerequisites
@@ -206,13 +229,20 @@ worth knowing before anyone demos an improvised prompt.
 
 ### All 32 features at once
 
+**Paid tier only.** 64 requests and ~600,000 input tokens, because it includes the
+high-consumption features whose prompts run 33k–44k tokens each:
+
 ```bash
-python scripts/demo_live.py --n 2
+python scripts/demo_live.py --n 2          # ~4 minutes, ~4 cents, blows a free-tier day
 ```
 
-Sends 2 fresh prompts per feature (including the high-consumption ones whose inputs are
-30k–120k characters and cannot be typed by hand), then reports predicted vs actual from
-the ledger. ~4 minutes, ~4 cents.
+**Free-tier-safe version** — the same harness restricted to small-input features,
+16 requests and under 1,000 input tokens:
+
+```bash
+python scripts/demo_live.py --n 2 --tags ticket-summary,commit-message,changelog-entry,\
+sql-from-question,code-review-note,ticket-classify,pr-description,api-doc-paragraph
+```
 
 ---
 
@@ -449,6 +479,23 @@ curl -s -X POST localhost:8080/v1/annotate \
 The Cost per Outcome table on the dashboard joins `requests × annotations` on
 `trace_id`. One resolved ticket is usually a dozen calls, which is why the join is on
 the trace and not the request.
+
+---
+
+## Budget for the whole guide
+
+| section | requests | input tokens |
+| --- | --- | --- |
+| §4 one prompt | 1 | ~60 |
+| §5 ten features | 10 | ~500 |
+| §5 free-tier-safe sweep (optional) | 16 | ~700 |
+| §6 breaker | 5 | ~300 |
+| §9 cost per outcome | 1 | ~40 |
+| **total** | **33** | **~1,600** |
+
+Against a free tier's ~200 requests/day that is **17%**. §10 costs nothing — the test
+suites never call a provider. The only thing that breaks the budget is the paid-tier
+sweep in §5, which is labelled.
 
 ---
 
