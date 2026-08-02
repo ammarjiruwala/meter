@@ -62,7 +62,7 @@ const SECTION_IDS = ["hero-section", "overview", "usage", "final"];
 export function Home() {
   const scroller = useRef<HTMLDivElement>(null);
   const [landed, setLanded] = useState(false);
-  const [taglineIn, setTaglineIn] = useState(false);
+  const [hintIn, setHintIn] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [progress, setProgress] = useState(0);
   const [section, setSection] = useState(0);
@@ -71,12 +71,12 @@ export function Home() {
   const [step, setStep] = useState(0);
   const [copied, setCopied] = useState<string | null>(null);
 
-  // The hero waits on the intro's event. The tagline and scroll hint come 400ms after
-  // the wordmark, matching the design's two-stage landing.
+  // The hero waits on the intro's event. The scroll hint comes 400ms after the
+  // wordmark, matching the design's two-stage landing.
   useEffect(() => {
     const land = () => {
       setLanded(true);
-      setTimeout(() => setTaglineIn(true), 400);
+      setTimeout(() => setHintIn(true), 400);
     };
     window.addEventListener("meter:intro-done", land);
     return () => window.removeEventListener("meter:intro-done", land);
@@ -288,13 +288,10 @@ export function Home() {
                 </span>
               ))}
             </h1>
-            <p className={`hero-tagline${taglineIn ? " animate" : ""}`}>
-              AI infrastructure that pays its own bills
-            </p>
           </div>
 
           <div
-            className={`scroll-hint${taglineIn ? " animate" : ""}`}
+            className={`scroll-hint${hintIn ? " animate" : ""}`}
             aria-hidden="true"
           >
             <span>Scroll</span>
