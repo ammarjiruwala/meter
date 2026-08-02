@@ -99,20 +99,38 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
-*   **Deployment: PLANNED, NOT DEPLOYED** — [DEPLOY.md](DEPLOY.md) written 2026-08-02 (Shubh).
-    Target is **Supabase (Postgres) + Vercel (dashboard) + Fly.io (backend)**. ⚠ **It cannot
-    be executed yet**: the dashboard reads `meter.db` off the local filesystem, so Vercel is
-    blocked until the Postgres port lands — the port is scoped in DEPLOY.md §6 (~1,000 lines
-    across three languages; the risky parts are `INSERT OR REPLACE` → `ON CONFLICT`, which is
-    D1's idempotency, and the `ts` TEXT → `timestamptz` rewrite of every window query).
-    **Three hosts, not two: Vercel cannot run the Treasurer/refresh/soft-budget loops** —
-    they are lifespan `asyncio` tasks and serverless functions do not outlive a request.
-    Pooler decision recorded: **transaction pooler for the Vercel dashboard** (verified safe —
-    zero transactions, no session state in `dashboard/src/lib/db.ts` — but prepared statements
-    must be disabled), **session pooler or direct for the Fly backend**, which holds one
-    long-lived connection. **Redis is still required at replica #2** (A5): Postgres does not
-    fix the in-process reservation lock, so `min_machines_running = 1` and no autoscaling.
-    **For the demo, deploy nothing** — a Cloudflare Tunnel over localhost needs no migration.
+*   **Deployment: LIVE** (Ammar, 2026-08-02). Backend **https://meter-proxy.onrender.com**
+    (Render free, Singapore, Docker), dashboard **https://meter-three-beta.vercel.app**,
+    ledger on **Supabase** ap-south-1. **Render, not Fly.io** — Fly now requires a card and
+    the goal was zero spend; Render's free web service takes the existing Dockerfile as-is.
+    Three hosts, not two, for the reason DEPLOY.md gives: **Vercel cannot run the
+    Treasurer/refresh/soft-budget loops**, which are lifespan `asyncio` tasks, and serverless
+    functions do not outlive a request. Render runs them.
+    *   **Cold start is handled, not eliminated.** A free service sleeps after ~15 min idle
+        and pays 30–60s waking. **UptimeRobot** pings `/healthz` every 5 min, which keeps it
+        warm — measured 300 ms. Judges must not meet a 60-second first request.
+    *   **Poolers:** transaction (6543) for the Vercel dashboard, **session (5432) for the
+        Render backend**. Both need `?options=-c%20search_path%3Dpublic` — the poolers reuse
+        backends without resetting session state, so without it a connection inherits a stale
+        `search_path` and fails `relation "requests" does not exist`, *intermittently*.
+        Measured 0/6 connections working without it, 6/6 with.
+    *   **The dashboard opens one connection per serverless instance, not four.** Vercel
+        gives every instance its own module scope, so the `globalThis` pool cache de-dups
+        *within* an instance and not across them — `max: 4` became 4 × N connections and hit
+        Supabase's `EMAXCONN: max client connections reached, limit: 200`, 500ing every DB
+        route while the static page still served. `dashboard/src/lib/db.ts` now detects
+        serverless via `process.env.VERCEL` and drops to `max: 1` with a 5s idle timeout.
+        A local `npm run dev` polling the same pooler counts against the same 200 — leaving
+        one running overnight is enough to take the deployed dashboard down.
+    *   ⚠ **One backend instance, on any plan.** `proxy/budget.py` serialises reservations
+        with an in-process `asyncio.Lock` (A5), so two instances mean two locks reading the
+        same headroom and a daily ceiling that silently stops holding. Redis fixes it and is
+        not built. `render.yaml` carries this warning for whoever upgrades the plan.
+    *   **RLS is on** (`scripts/secure_ledger.py`). Supabase's `anon` role shipped with full
+        read/write **and TRUNCATE** on all nine tables; that key is designed to go in
+        browsers and is only safe because RLS is meant to be the gate. Re-run the script
+        after any schema change — `CREATE TABLE IF NOT EXISTS` at boot creates new tables
+        with RLS *off*.
 
 *   **Last updated:** 2026-08-02 — **Full post-Postgres audit (Shubh).** Boot, every route,
     both images, the dashboard, all suites and soaks, and config-vs-docs drift. Everything
