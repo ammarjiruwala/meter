@@ -323,3 +323,22 @@ def purge_expired() -> int:
     if stale:
         log.info("purged %d expired judge credential set(s)", len(stale))
     return len(stale)
+
+
+def alert_target(project_id: str) -> tuple[str | None, str | None]:
+    """The Linq key and phone number to alert for a project, or ``(None, None)``.
+
+    Looked up by `project_id` because that is what the request path carries — a tripped
+    breaker knows the scope it fired on, never a session token.
+
+    Returns `(None, None)` for anything that is not a live judge session, which makes the
+    caller fall back to the configured on-call pair. That fallback is the important half:
+    a judge who skipped the optional Linq step must not silently redirect this
+    deployment's own alerts, and an expired session must not keep messaging someone who
+    has finished.
+    """
+    session = session_for_project(project_id)
+    if session is None or session.expired:
+        return None, None
+    held = secrets_for(session.token)
+    return held.get("poke_api_key"), held.get("poke_phone")

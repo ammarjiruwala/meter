@@ -11,6 +11,7 @@ Owner: Ammar.
 
 from .sessions import (
     PROJECT_PREFIX,
+    alert_target,
     Session,
     create,
     forget_secrets,
@@ -22,6 +23,7 @@ from .sessions import (
 
 __all__ = [
     "PROJECT_PREFIX",
+    "alert_target",
     "Session",
     "create",
     "forget_secrets",

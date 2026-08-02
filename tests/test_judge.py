@@ -454,6 +454,46 @@ def test_prava_key_is_per_task_not_per_process() -> None:
           seen == ["sk_test_alice", "sk_test_bob", "sk_test_cara"], str(seen))
 
 
+# ── Per-judge alert recipient ────────────────────────────────────────────────
+
+def test_alerts_reach_the_judge_not_the_on_call_phone() -> None:
+    print("\na judge's breaker alert goes to their own phone")
+    from alerts import config as alerts_config
+    from proxy import breaker
+
+    s = sessions.create()
+    sessions.put_secrets(s.token, {
+        "poke_api_key": "linq_judge_key", "poke_phone": "+15550001111",
+    })
+
+    check("the target resolves to what the judge supplied",
+          sessions.alert_target(s.project_id) == ("linq_judge_key", "+15550001111"))
+    check("the breaker resolves the same pair",
+          breaker._alert_target(s.project_id) == ("linq_judge_key", "+15550001111"))
+
+    # A judge who skipped the optional Linq step must fall back rather than silently
+    # redirecting this deployment's own alerts to nobody.
+    bare = sessions.create()
+    check("a judge with no Linq details falls back",
+          sessions.alert_target(bare.project_id) == (None, None))
+    check("so does an ordinary project",
+          breaker._alert_target("demo-project") == (None, None))
+    check("so does no project at all", breaker._alert_target(None) == (None, None))
+
+    # An expired session must stop messaging someone who has finished.
+    done = sessions.create(ttl_s=-1)
+    sessions.put_secrets(done.token, {"poke_api_key": "k", "poke_phone": "+15550002222"})
+    check("an expired session stops alerting", sessions.alert_target(done.project_id)
+          == (None, None))
+
+    ok, reason = alerts_config.is_configured("linq_judge_key", "+15550001111")
+    check("a judge's own pair validates", ok, reason)
+    bad_ok, bad_reason = alerts_config.is_configured("linq_judge_key", "not-a-number")
+    check("a mistyped judge number is rejected", not bad_ok)
+    check("and the reason names the supplied number, not the env var",
+          "supplied phone number" in bad_reason, bad_reason)
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -473,6 +513,7 @@ def main() -> int:
             test_ceilings_are_written_where_the_dashboard_reads,
             test_a_boot_does_not_wipe_judge_ceilings,
             test_prava_key_is_per_task_not_per_process,
+            test_alerts_reach_the_judge_not_the_on_call_phone,
         ):
             suite()
     finally:

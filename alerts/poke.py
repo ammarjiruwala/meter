@@ -124,19 +124,26 @@ def compose(scope: str, mode: str, metric: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _post(body: str) -> None:
-    """Blocking send. Only ever called on the dispatch thread."""
+def _post(body: str, api_key: str | None = None,
+          recipient: str | None = None) -> None:
+    """Blocking send. Only ever called on the dispatch thread.
+
+    The credentials are passed in rather than read from `config` here, and rather than
+    carried in a ContextVar: this runs on a `threading.Thread`, and a thread does not
+    inherit the spawning task's context. Capturing them at dispatch is the only way a
+    judge's own Linq key and phone number survive the hand-off.
+    """
     url = f"{config.POKE_API_BASE}/messages"
     try:
         response = httpx.post(
             url,
             timeout=config.POKE_TIMEOUT_S,
             headers={
-                "Authorization": f"Bearer {config.POKE_API_KEY}",
+                "Authorization": f"Bearer {api_key or config.POKE_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={
-                "to": [config.POKE_CTO_PHONE],
+                "to": [recipient or config.POKE_CTO_PHONE],
                 "message": {"parts": [{"type": "text", "value": body}]},
             },
         )
@@ -157,13 +164,19 @@ def _post(body: str) -> None:
         )
 
 
-def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any]) -> bool:
+def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any],
+                       api_key: str | None = None,
+                       recipient: str | None = None) -> bool:
     """Fire-and-forget an iMessage about a tripped breaker.
 
     Returns whether a send was *dispatched* — not whether it arrived, which is
     not knowable synchronously and which no caller should be waiting on.
+
+    `api_key` and `recipient` let one tripped breaker alert the person who caused it
+    rather than this deployment's fixed on-call number. A judge running the console
+    supplies their own Linq key and phone; everything else keeps the configured pair.
     """
-    configured, reason = config.is_configured()
+    configured, reason = config.is_configured(api_key, recipient)
     if not configured:
         log.info("poke alert skipped: %s", reason)
         return False
@@ -181,7 +194,8 @@ def send_breaker_alert(scope: str, mode: str, metric: dict[str, Any]) -> bool:
     # no event loop on this thread — breaker.check() runs under asyncio.to_thread
     # — so a thread is the right primitive rather than a task.
     threading.Thread(
-        target=_post, args=(body,), name=f"poke-alert-{scope}", daemon=True
+        target=_post, args=(body, api_key, recipient),
+        name=f"poke-alert-{scope}", daemon=True,
     ).start()
     return True
 

@@ -168,7 +168,7 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
     if mode == REVOKE:
         db.revoke_key(key["key_id"])
     log.warning("breaker TRIPPED scope=%s mode=%s %s", scope, mode, _describe(metric))
-    notify(scope, mode, metric)
+    notify(scope, mode, metric, project_id)
     return _blocked(mode, scope, config.BREAKER_COOLDOWN_S, metric)
 
 
@@ -294,7 +294,30 @@ def reset(scope: str, key_id: str | None = None, reset_by: str = "manual") -> di
     return {"scope": scope, "closed_events": closed, "key_restored": bool(key_id)}
 
 
-def notify(scope: str, mode: str, metric: dict[str, Any]) -> None:
+def _alert_target(project_id: str | None) -> tuple[str | None, str | None]:
+    """Who to message about this breaker: the judge who caused it, else the on-call pair.
+
+    A judge running the console gave us their own Linq key and phone, and the alert is
+    the moment the product is most worth feeling — it should reach *their* device, not
+    this deployment's fixed number (PITCH.md Act 5).
+
+    Lazily imported and fully guarded. `proxy/` does not depend on `judge/`, and an alert
+    lookup must never be what turns a tripped breaker into a failed request — the same
+    posture `notify` already takes towards `alerts` itself.
+    """
+    if not project_id:
+        return None, None
+    try:
+        from judge import alert_target
+
+        return alert_target(project_id)
+    except Exception as exc:  # noqa: BLE001 — falls back to the configured pair
+        log.warning("judge alert target lookup failed: %s: %s", type(exc).__name__, exc)
+        return None, None
+
+
+def notify(scope: str, mode: str, metric: dict[str, Any],
+           project_id: str | None = None) -> None:
     """Alert on a tripped breaker: always a log line, plus iMessage if configured.
 
     The log line comes first and unconditionally. It is the record of record —
@@ -318,7 +341,7 @@ def notify(scope: str, mode: str, metric: dict[str, Any]) -> None:
     try:
         from alerts import send_breaker_alert
 
-        send_breaker_alert(scope, mode, metric)
+        send_breaker_alert(scope, mode, metric, *_alert_target(project_id))
     except Exception as exc:  # noqa: BLE001
         # Covers the import itself — a missing dependency in the alerts package
         # must not take down the breaker that is mid-trip.
