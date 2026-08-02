@@ -99,6 +99,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
+*   **Deployment: PLANNED, NOT DEPLOYED** — [DEPLOY.md](DEPLOY.md) written 2026-08-02 (Shubh).
+    Target is **Supabase (Postgres) + Vercel (dashboard) + Fly.io (backend)**. ⚠ **It cannot
+    be executed yet**: the dashboard reads `meter.db` off the local filesystem, so Vercel is
+    blocked until the Postgres port lands — the port is scoped in DEPLOY.md §6 (~1,000 lines
+    across three languages; the risky parts are `INSERT OR REPLACE` → `ON CONFLICT`, which is
+    D1's idempotency, and the `ts` TEXT → `timestamptz` rewrite of every window query).
+    **Three hosts, not two: Vercel cannot run the Treasurer/refresh/soft-budget loops** —
+    they are lifespan `asyncio` tasks and serverless functions do not outlive a request.
+    Pooler decision recorded: **transaction pooler for the Vercel dashboard** (verified safe —
+    zero transactions, no session state in `dashboard/src/lib/db.ts` — but prepared statements
+    must be disabled), **session pooler or direct for the Fly backend**, which holds one
+    long-lived connection. **Redis is still required at replica #2** (A5): Postgres does not
+    fix the in-process reservation lock, so `min_machines_running = 1` and no autoscaling.
+    **For the demo, deploy nothing** — a Cloudflare Tunnel over localhost needs no migration.
+
 *   **Last updated:** 2026-08-02 — **Treasury hardening (Shubh, in Shivam's module, on
     instruction while that lane was idle).** Three things, all in `treasury/`:
     *   ✅ **M5 fixed.** `GET /treasury/assess` no longer creates a wallet — it uses a new

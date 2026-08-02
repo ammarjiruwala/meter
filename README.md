@@ -178,4 +178,6 @@ Set `FAIL_MODE=closed` if you would rather drop traffic than risk an unmetered c
 ## Status
 
 Hackathon build. Not yet production-hardened. See `ARCHITECTURE.md` for the design and
-`CONTEXT.md` for the decisions behind it.
+`CONTEXT.md` for the decisions behind it. `DEPLOY.md` covers hosting — and is explicit that
+the Postgres port is a prerequisite for the Vercel half, and that a Cloudflare Tunnel over
+localhost is the right answer for the demo itself.
