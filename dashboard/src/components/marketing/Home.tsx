@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Intro } from "./Intro";
+import { STEPS, CODE } from "./usage-content";
 
 const RING_1 = [
   { t: "Explain" },
@@ -33,7 +34,10 @@ const SLIDES = [
     accent: "coral",
     num: "01",
     h: "Meter every call.",
-    p: "Change one base URL. Every AI call now passes through Meter — priced, attributed, and written to the ledger with a p50 overhead of 1.49ms.",
+    // The design said 0.35ms. Our measured figure is 1.49ms, and CONTEXT.md requires
+    // it to carry its qualifier — on a page whose own lede says "no mocks, no
+    // illustrations", an invented latency is the wrong thing to be caught on.
+    p: "Change one base URL. Every AI call now passes through Meter — priced, attributed, and written to the ledger with a measured p50 overhead of 1.49ms on loopback.",
     foot: "✓ Attribution recorded on every row",
   },
   {
@@ -41,7 +45,7 @@ const SLIDES = [
     num: "02",
     h: "Pay while you sleep.",
     p: "When the provider balance runs low, the Treasurer agent charges a pre-approved Prava mandate and tops up the wallet before anything fails. You get the iMessage in the morning.",
-    foot: "✓ Auto top-up via Prava mandate",
+    foot: "✓ Auto-topup via Prava mandate",
   },
   {
     accent: "mint",
@@ -52,30 +56,35 @@ const SLIDES = [
   },
 ];
 
-const SLIDE_MS = 6000;
-const SECTIONS = ["hero-section", "overview", "usage"];
+const SLIDE_TICK_MS = 60;
+const SECTION_IDS = ["hero-section", "overview", "usage", "final"];
 
 export function Home() {
   const scroller = useRef<HTMLDivElement>(null);
   const [landed, setLanded] = useState(false);
+  const [taglineIn, setTaglineIn] = useState(false);
   const [scrolled, setScrolled] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [activeSection, setActiveSection] = useState(0);
+  const [section, setSection] = useState(0);
   const [slide, setSlide] = useState(0);
   const [slideProgress, setSlideProgress] = useState(0);
+  const [step, setStep] = useState(0);
   const [copied, setCopied] = useState<string | null>(null);
 
-  // The hero waits for the intro rather than a duplicated timer, so retuning one
-  // cannot leave the other behind.
+  // The hero waits on the intro's event. The tagline and scroll hint come 400ms after
+  // the wordmark, matching the design's two-stage landing.
   useEffect(() => {
-    const land = () => setLanded(true);
+    const land = () => {
+      setLanded(true);
+      setTimeout(() => setTaglineIn(true), 400);
+    };
     window.addEventListener("meter:intro-done", land);
     return () => window.removeEventListener("meter:intro-done", land);
   }, []);
 
-  // `.snap-container` is the scrolling element, not the window — it has its own
-  // `overflow-y: auto`. Listening on window here would silently never fire, which
-  // is the kind of bug that looks like "the progress bar just doesn't work".
+  // `.snap-container` is the scrolling element, not the window — it carries its own
+  // `overflow-y: auto`. A listener on window here would silently never fire, which
+  // looks exactly like "the progress bar is broken".
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
@@ -83,16 +92,13 @@ export function Home() {
     const onScroll = () => {
       const max = el.scrollHeight - el.clientHeight;
       setProgress(max > 0 ? (el.scrollTop / max) * 100 : 0);
-      setScrolled(el.scrollTop > 40);
+      setScrolled(el.scrollTop > 50);
 
       let current = 0;
-      SECTIONS.forEach((id, i) => {
-        const s = document.getElementById(id);
-        if (s && s.getBoundingClientRect().top <= el.clientHeight * 0.5) {
-          current = i;
-        }
+      el.querySelectorAll<HTMLElement>(".snap-section").forEach((sec, i) => {
+        if (el.scrollTop >= sec.offsetTop - 100) current = i;
       });
-      setActiveSection(current);
+      setSection(current);
     };
 
     onScroll();
@@ -100,39 +106,53 @@ export function Home() {
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Reveal-on-scroll. The root is the snap container for the same reason as above.
+  // Reveal-on-scroll, rooted at the snap container for the same reason.
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    const targets = el.querySelectorAll(".reveal, .step");
     const io = new IntersectionObserver(
-      (entries) => {
+      (entries) =>
         entries.forEach((e) => {
           if (e.isIntersecting) e.target.classList.add("in-view");
-        });
-      },
+        }),
       { root: el, threshold: 0.15 },
     );
-    targets.forEach((t) => io.observe(t));
+    el.querySelectorAll(".reveal").forEach((t) => io.observe(t));
     return () => io.disconnect();
   }, []);
 
-  // Carousel autoplay, driven by one 80ms ticker so the progress bar and the slide
-  // change cannot drift out of step with each other.
+  // Sticky-code sync: whichever step block is in the reading band drives which code
+  // window is shown. rootMargin trims the band to the middle of the viewport so the
+  // active step is the one being read, not the one just entering.
   useEffect(() => {
-    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (still) return;
-    const step = 80;
+    const el = scroller.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) =>
+        entries.forEach((e) => {
+          if (e.isIntersecting && e.intersectionRatio > 0.4) {
+            setStep(Number((e.target as HTMLElement).dataset.step));
+          }
+        }),
+      { root: el, threshold: [0.4, 0.6], rootMargin: "-20% 0px -30% 0px" },
+    );
+    el.querySelectorAll(".step-block").forEach((b) => io.observe(b));
+    return () => io.disconnect();
+  }, []);
+
+  // Carousel autoplay. One ticker drives both the bar and the slide change, so they
+  // cannot drift apart.
+  useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const id = setInterval(() => {
       setSlideProgress((p) => {
-        const next = p + (step / SLIDE_MS) * 100;
-        if (next >= 100) {
+        if (p >= 100) {
           setSlide((s) => (s + 1) % SLIDES.length);
           return 0;
         }
-        return next;
+        return p + 1;
       });
-    }, step);
+    }, SLIDE_TICK_MS);
     return () => clearInterval(id);
   }, []);
 
@@ -145,10 +165,10 @@ export function Home() {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(id);
-      setTimeout(() => setCopied(null), 1600);
+      setTimeout(() => setCopied(null), 2000);
     } catch {
-      // Clipboard is permission-gated and blocked outright in some embeds. Failing
-      // silently is right here — the snippet is on screen and can be selected.
+      // Clipboard access is permission-gated and blocked outright in some embeds.
+      // Failing quietly is right — the snippet is on screen and selectable.
     }
   }, []);
 
@@ -176,8 +196,8 @@ export function Home() {
             <a href="#usage" className="glass-pill" onClick={jump("usage")}>
               How to use
             </a>
-            {/* A real navigation, not an in-page jump: the dashboard is a separate
-                root layout, so this is deliberately a full page load. */}
+            {/* Next turns this into a full page load by itself — the dashboard is a
+                separate root layout — which is what we want: no stylesheet crosses. */}
             <Link href="/dashboard" className="glass-cta">
               Open dashboard <span className="arr">→</span>
             </Link>
@@ -186,12 +206,12 @@ export function Home() {
       </div>
 
       <div className="section-dots">
-        {SECTIONS.map((id, i) => (
+        {SECTION_IDS.map((id, i) => (
           <a
             key={id}
             href={`#${id}`}
             onClick={jump(id)}
-            className={activeSection === i ? "active" : undefined}
+            className={section === i ? "active" : undefined}
             aria-label={id.replace("-section", "")}
           />
         ))}
@@ -204,56 +224,39 @@ export function Home() {
           id="hero-section"
         >
           <div className="orbit-container">
-            <div className="orbit-ring ring-1">
-              {RING_1.map((tok, i) => (
-                <div
-                  key={tok.t}
-                  className="t3d"
-                  style={
-                    {
-                      "--a": `${(360 / RING_1.length) * i}deg`,
-                      "--r": "300px",
-                    } as React.CSSProperties
-                  }
-                >
-                  <span className={`tk${tok.cls ? ` ${tok.cls}` : ""}`}>
-                    {tok.t}
-                    {tok.cost && <span className="cost">{tok.cost}</span>}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <div className="orbit-ring ring-2">
-              {RING_2.map((tok, i) => (
-                <div
-                  key={tok.t}
-                  className="t3d"
-                  style={
-                    {
-                      "--a": `${(360 / RING_2.length) * i}deg`,
-                      "--r": "240px",
-                    } as React.CSSProperties
-                  }
-                >
-                  <span className={`tk${tok.cls ? ` ${tok.cls}` : ""}`}>
-                    {tok.t}
-                    {tok.cost && <span className="cost">{tok.cost}</span>}
-                  </span>
-                </div>
-              ))}
-            </div>
+            {[RING_1, RING_2].map((ring, r) => (
+              <div key={r} className={`orbit-ring ring-${r + 1}`}>
+                {ring.map((tok, i) => (
+                  <div
+                    key={tok.t}
+                    className="t3d"
+                    style={
+                      {
+                        "--a": `${(360 / ring.length) * i}deg`,
+                        "--r": r === 0 ? "300px" : "240px",
+                      } as React.CSSProperties
+                    }
+                  >
+                    <span className={`tk${tok.cls ? ` ${tok.cls}` : ""}`}>
+                      {tok.t}
+                      {tok.cost && <span className="cost">{tok.cost}</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
 
           {(
             [
-              ["22%", "14%", "1.8s", "7s", "8px", "-12px"],
-              ["68%", "78%", "2.4s", "8s", "-10px", "8px"],
-              ["35%", "82%", "3s", "6s", "6px", "-10px"],
-              ["72%", "20%", "2.1s", "9s", "-8px", "6px"],
+              ["22%", "14%", "1.8s", "7s", "8px", "-12px", "$0.0012"],
+              ["68%", "78%", "2.4s", "8s", "-10px", "8px", "$0.0034"],
+              ["35%", "82%", "3s", "6s", "6px", "-10px", "$0.0091"],
+              ["72%", "20%", "2.1s", "9s", "-8px", "6px", "$0.0044"],
             ] as const
-          ).map(([top, left, delay, dur, x2, y2], i) => (
+          ).map(([top, left, delay, dur, x2, y2, label]) => (
             <div
-              key={i}
+              key={label}
               className="cost-float"
               style={
                 {
@@ -268,7 +271,7 @@ export function Home() {
                 } as React.CSSProperties
               }
             >
-              {["$0.0012", "$0.0034", "$0.0091", "$0.0044"][i]}
+              {label}
             </div>
           ))}
 
@@ -285,12 +288,15 @@ export function Home() {
                 </span>
               ))}
             </h1>
-            <p className={`hero-tagline${landed ? " animate" : ""}`}>
+            <p className={`hero-tagline${taglineIn ? " animate" : ""}`}>
               AI infrastructure that pays its own bills
             </p>
           </div>
 
-          <div className={`scroll-hint${landed ? " animate" : ""}`} aria-hidden="true">
+          <div
+            className={`scroll-hint${taglineIn ? " animate" : ""}`}
+            aria-hidden="true"
+          >
             <span>Scroll</span>
             <span className="line-drop" />
           </div>
@@ -390,232 +396,95 @@ export function Home() {
         {/* ── USAGE ──────────────────────────────────────────────── */}
         <section className="snap-section usage" id="usage">
           <div className="wrap">
-            <p className="section-label reveal">How to use it</p>
-            <h2 className="reveal d1">Three steps. All of it real.</h2>
-            <p className="lede reveal d2">
-              Every snippet below runs against a live Meter instance. No mocks, no
-              illustrations. Install takes about a minute.
-            </p>
-
-            <Step
-              num="01"
-              tag="Point at Meter"
-              title="Change one base URL."
-              foot="✓ Attribution recorded on every row"
-              body={
-                <>
-                  Your app normally talks straight to <b>api.openai.com</b>. Point
-                  it at Meter instead. Now every request arrives at our door — we
-                  look at it, price it, write it down, and forward it on. Anthropic
-                  works the same way.
-                </>
-              }
-              file=".env"
-              copyId="env"
-              copied={copied === "env"}
-              onCopy={copy}
-              raw={`OPENAI_BASE_URL=https://meter.acme.dev/v1
-OPENAI_API_KEY=mtr_platformeng_e7c9a1b2
-
-ANTHROPIC_BASE_URL=https://meter.acme.dev/v1
-ANTHROPIC_API_KEY=mtr_platformeng_e7c9a1b2`}
-              code={
-                <>
-                  <span className="c"># the only line that changes</span>
-                  {"\n"}
-                  <span className="k">OPENAI_BASE_URL</span>=
-                  <span className="s">https://meter.acme.dev/v1</span>
-                  {"\n"}
-                  <span className="k">OPENAI_API_KEY</span>=
-                  <span className="s">mtr_platformeng_e7c9a1b2</span>
-                  {"\n\n"}
-                  <span className="k">ANTHROPIC_BASE_URL</span>=
-                  <span className="s">https://meter.acme.dev/v1</span>
-                  {"\n"}
-                  <span className="k">ANTHROPIC_API_KEY</span>=
-                  <span className="s">mtr_platformeng_e7c9a1b2</span>
-                </>
-              }
-            />
-
-            <Step
-              num="02"
-              tag="Budgets as code"
-              title="Set ceilings per project and per feature."
-              foot="✓ Rolling 24h · settled + in-flight holds"
-              body={
-                <>
-                  When a limit is hit, the refusal names the exact scope in{" "}
-                  <b>X-Meter-Budget-Scope</b>, so a developer reading a 429 knows
-                  which line to raise. Two ways in, one place it lands.
-                </>
-              }
-              file="meter.yaml"
-              copyId="yaml"
-              copied={copied === "yaml"}
-              onCopy={copy}
-              raw={`projects:
-  - id: acme-app
-    ceiling_usd_day: 200
-    features:
-      - id: summarize
-        ceiling_usd_day: 50
-      - id: chat
-        ceiling_usd_day: 120`}
-              code={
-                <>
-                  <span className="k">projects</span>:{"\n"}
-                  {"  - "}
-                  <span className="k">id</span>: <span className="s">acme-app</span>
-                  {"\n    "}
-                  <span className="k">ceiling_usd_day</span>:{" "}
-                  <span className="n">200</span>
-                  {"\n    "}
-                  <span className="k">features</span>:{"\n"}
-                  {"      - "}
-                  <span className="k">id</span>:{" "}
-                  <span className="s">summarize</span>
-                  {"\n        "}
-                  <span className="k">ceiling_usd_day</span>:{" "}
-                  <span className="n">50</span>
-                  {"\n"}
-                  {"      - "}
-                  <span className="k">id</span>: <span className="s">chat</span>
-                  {"\n        "}
-                  <span className="k">ceiling_usd_day</span>:{" "}
-                  <span className="n">120</span>
-                </>
-              }
-            />
-
-            {/* ⚠ RECONSTRUCTED — the pasted design was truncated at the 50k limit
-                partway through step 02, so step 03 and the final CTA below are
-                written from the real product surface rather than from the design.
-                Replace when the tail arrives. */}
-            <Step
-              num="03"
-              tag="Close the loop"
-              title="Tell Meter what a call was worth."
-              foot="✓ Cost per resolved outcome, not cost per token"
-              body={
-                <>
-                  Meter cannot know whether a support ticket was resolved — so you
-                  tell it. Post an outcome against a <b>trace_id</b> and the ledger
-                  turns from a cost report into a margin report.
-                </>
-              }
-              file="annotate.sh"
-              copyId="annotate"
-              copied={copied === "annotate"}
-              onCopy={copy}
-              raw={`curl -X POST https://meter.acme.dev/v1/annotate \\
-  -H "Authorization: Bearer mtr_platformeng_e7c9a1b2" \\
-  -d '{"trace_id":"tkt_9812","outcome":"resolved","value_usd":40}'`}
-              code={
-                <>
-                  <span className="k">curl</span> -X POST{" "}
-                  <span className="s">
-                    https://meter.acme.dev/v1/annotate
-                  </span>{" "}
-                  \{"\n  "}
-                  -H{" "}
-                  <span className="s">
-                    &quot;Authorization: Bearer mtr_platformeng_e7c9a1b2&quot;
-                  </span>{" "}
-                  \{"\n  "}
-                  -d{" "}
-                  <span className="s">
-                    {
-                      '\'{"trace_id":"tkt_9812","outcome":"resolved","value_usd":40}\''
-                    }
-                  </span>
-                </>
-              }
-            />
-          </div>
-
-          <div className="wrap">
-            <div className="final-cta">
-              <h2>
-                Stop watching the graph. <em>Start paying the bill.</em>
+            <div className="usage-header">
+              <p className="section-label reveal">How to use it</p>
+              <h2 className="reveal d1">
+                Three steps. <span className="grad-text">All of it real.</span>
               </h2>
-              <p>
-                Meter is metering, budgeting, alerting and transacting today. The
-                dashboard is live — go look at what it already knows.
+              <p className="lede reveal d2">
+                Scroll through the process. The code updates in real-time on the
+                right. No mocks, no illustrations. Install takes about a minute.
               </p>
-              <Link href="/dashboard" className="hero-cta">
-                Open the dashboard <span className="arr">→</span>
-              </Link>
+            </div>
+
+            <div className="usage-grid">
+              <div className="usage-steps">
+                {STEPS.map((s, i) => (
+                  <div
+                    key={s.num}
+                    className={`step-block${step === i ? " active" : ""}`}
+                    data-step={i}
+                  >
+                    <div className="step-node">{s.num}</div>
+                    <div className="step-content">
+                      <span className="step-tag">{s.tag}</span>
+                      <h3>{s.title}</h3>
+                      <p>{s.body}</p>
+                      <div className="foot">{s.foot}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Sticky: the windows are stacked in one grid cell and cross-faded,
+                  so the panel keeps its height and nothing reflows on change. */}
+              <div className="usage-code-wrapper">
+                {CODE.map((c, i) => (
+                  <div
+                    key={c.file}
+                    className={`code-window${step === i ? " active" : ""}`}
+                    data-code={i}
+                  >
+                    <div className="head">
+                      <div
+                        style={{ display: "flex", alignItems: "center", gap: 14 }}
+                      >
+                        <div className="dots">
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                        <span className="fname">{c.file}</span>
+                      </div>
+                      <button
+                        className={`copy${copied === c.file ? " copied" : ""}`}
+                        onClick={() => copy(c.file, c.raw)}
+                      >
+                        {copied === c.file ? "Copied!" : "Copy"}
+                      </button>
+                    </div>
+                    <pre>{c.body}</pre>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-
-          <footer>
-            <div className="wrap">
-              <span>Meter — the autonomous inference treasurer</span>
-              <span>Built for the Prava Agentic Commerce Hackathon</span>
-            </div>
-          </footer>
         </section>
+
+        {/* ── FINAL CTA ──────────────────────────────────────────── */}
+        <section className="snap-section final-cta" id="final">
+          <div className="wrap">
+            <h2>
+              Stop watching charts. <br />
+              <em>Start paying bills.</em>
+            </h2>
+            <p>
+              Meter is live for select teams. Point your first request at us today
+              and see exactly where the money goes.
+            </p>
+            <Link href="/dashboard" className="hero-cta">
+              Open dashboard <span className="arr">→</span>
+            </Link>
+          </div>
+        </section>
+
+        <footer>
+          <div className="wrap">
+            <span>Meter — the autonomous inference treasurer</span>
+            <span>Built for AI engineers</span>
+          </div>
+        </footer>
       </div>
     </>
-  );
-}
-
-function Step({
-  num,
-  tag,
-  title,
-  body,
-  foot,
-  file,
-  code,
-  raw,
-  copyId,
-  copied,
-  onCopy,
-}: {
-  num: string;
-  tag: string;
-  title: string;
-  body: React.ReactNode;
-  foot: string;
-  file: string;
-  code: React.ReactNode;
-  raw: string;
-  copyId: string;
-  copied: boolean;
-  onCopy: (id: string, text: string) => void;
-}) {
-  return (
-    <div className="step">
-      <div>
-        <div className="step-marker">
-          <span className="num">{num}</span>
-          <span className="tag">{tag}</span>
-        </div>
-        <h3>{title}</h3>
-        <p>{body}</p>
-        <div className="foot">{foot}</div>
-      </div>
-      <div className="code">
-        <div className="head">
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <div className="dots">
-              <span />
-              <span />
-              <span />
-            </div>
-            <span className="fname">{file}</span>
-          </div>
-          <button
-            className={`copy${copied ? " copied" : ""}`}
-            onClick={() => onCopy(copyId, raw)}
-          >
-            {copied ? "Copied" : "Copy"}
-          </button>
-        </div>
-        <pre>{code}</pre>
-      </div>
-    </div>
   );
 }
