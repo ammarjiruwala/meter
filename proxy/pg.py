@@ -27,6 +27,7 @@ Owner: Shivam (Payments & Agent), migrating Shubh's ledger.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import Any
 
@@ -199,6 +200,48 @@ def executescript(sql: str) -> None:
     """
     with pool().connection() as conn, conn.transaction():
         conn.execute(sql)
+
+
+@contextlib.contextmanager
+def transaction():
+    """Several statements on ONE connection, atomically.
+
+    Everything else in this module borrows a connection per statement, which is right for
+    the single-statement writes the two db modules are made of. It is wrong for the one
+    caller that spans statements: `proxy/db.py`'s `replace_budgets` clears every ceiling
+    and re-inserts them from meter.yaml, and a half-applied budget config is worse than
+    either the old one or the new one — it would be live for however long the rest of the
+    loop took.
+
+    Statement-per-connection makes an explicit `BEGIN` silently useless: it opens a
+    transaction on whichever connection served that one statement, and that connection
+    goes straight back to the pool while the DELETE runs on a different one. This yields
+    something that spans the block instead.
+
+        with pg.transaction() as tx:
+            tx.execute("DELETE FROM feature_budgets")
+            tx.execute("INSERT INTO feature_budgets ...", (...))
+
+    Rolls back on any exception. Do not hold one of these across a network call — that is
+    the rule `treasury/db.py` is built around, and it is what keeps a Prava round trip
+    from pinning a connection.
+    """
+    with pool().connection() as conn, conn.transaction():
+        yield _Transaction(conn)
+
+
+class _Transaction:
+    """The `?`-placeholder surface, bound to one connection for a whole block."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: tuple | list = ()) -> _Cursor:
+        cur = self._conn.execute(q(sql), _args(params))
+        rows = cur.fetchall() if cur.description else []
+        return _Cursor(rows, cur.rowcount, None)
 
 
 def fetchone(sql: str, params: tuple | list = ()) -> dict[str, Any] | None:

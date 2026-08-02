@@ -246,6 +246,14 @@ _ADDED_COLUMNS = (
     ("requests", "bound_output_tokens", "INTEGER"),
     ("requests", "bound_cost_usd", "double precision"),
     ("requests", "history_factor", "double precision"),
+    # meter.yaml order, recorded explicitly. Under SQLite the dashboard read it off
+    # `rowid` — `replace_budgets` clears both tables and re-inserts in file order, so
+    # insertion order *was* file order. Postgres has no rowid, and `ctid` is a physical
+    # address that VACUUM is free to move, so the ordering the budget cards depend on
+    # has to be a column. Without it the cards reshuffle between reloads while someone
+    # is watching them.
+    ("projects", "sort_order", "INTEGER"),
+    ("feature_budgets", "sort_order", "INTEGER"),
 )
 
 
@@ -484,28 +492,31 @@ def replace_budgets(budgets: dict[str, tuple[float | None, dict[str, float | Non
     Projects named only in meter.yaml are created. A ceiling on a project no Meter key has
     been seeded for is almost always a typo, and the row is what makes it visible.
     """
-    conn = connect()
-    with _lock:
-        try:
-            conn.execute("BEGIN")
-            conn.execute("DELETE FROM feature_budgets")
-            conn.execute("UPDATE projects SET ceiling_usd_day = NULL")
-            for project_id, (ceiling, features) in budgets.items():
-                conn.execute(
-                    "INSERT INTO projects (id, name, ceiling_usd_day) VALUES (?, ?, ?) "
-                    "ON CONFLICT(id) DO UPDATE SET ceiling_usd_day = excluded.ceiling_usd_day",
-                    (project_id, project_id, ceiling),
+    connect()
+    # `pg.transaction()` rather than `conn.execute("BEGIN")`. Every other statement in
+    # this module borrows its own pooled connection, so a bare BEGIN would open a
+    # transaction on whichever connection served that one statement and then hand it
+    # straight back — the DELETE below would run on a different connection, outside it,
+    # and commit on its own. Silently non-atomic, which is the failure this docstring
+    # exists to rule out.
+    with _lock, pg.transaction() as tx:
+        tx.execute("DELETE FROM feature_budgets")
+        tx.execute("UPDATE projects SET ceiling_usd_day = NULL, sort_order = NULL")
+        for order, (project_id, (ceiling, features)) in enumerate(budgets.items()):
+            tx.execute(
+                "INSERT INTO projects (id, name, ceiling_usd_day, sort_order) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET ceiling_usd_day = excluded.ceiling_usd_day, "
+                "sort_order = excluded.sort_order",
+                (project_id, project_id, ceiling, order),
+            )
+            for feature_order, (feature, feature_ceiling) in enumerate(features.items()):
+                tx.execute(
+                    "INSERT INTO feature_budgets "
+                    "(project_id, feature, ceiling_usd_day, sort_order) "
+                    "VALUES (?, ?, ?, ?)",
+                    (project_id, feature, feature_ceiling, feature_order),
                 )
-                for feature, feature_ceiling in features.items():
-                    conn.execute(
-                        "INSERT INTO feature_budgets (project_id, feature, ceiling_usd_day) "
-                        "VALUES (?, ?, ?)",
-                        (project_id, feature, feature_ceiling),
-                    )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
 
 
 def load_ceilings() -> dict[tuple[str, str | None], float]:
