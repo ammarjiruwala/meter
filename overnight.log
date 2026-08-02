@@ -1,0 +1,161 @@
+tags to collect   17  (book-chapter-summary, dataset-profile, entity-tag, full-spec-draft, json-extract, legal-contract-review, log-anomaly-summary, migration-guide, multi-log-correlate, perf-analysis, readme-section, release-notes-bulk, schema-map, security-audit, severity-triage, tradeoff-analysis, unit-test-gen)
+calls             680
+hard spend cap    $4.00
+anthropic cap     $1.50
+stages            corpus -> shrinkage sweep -> cold-start refit -> cross-model
+                  -> prequential -> seed -> verify -> report
+report            /Users/ammar/Desktop/meter-project/meter/data/overnight-report.md
+[20:39:49] === overnight batch starting ===
+[20:39:49] corpus: 17 tags to collect -> book-chapter-summary, dataset-profile, entity-tag, full-spec-draft, json-extract, legal-contract-review, log-anomaly-summary, migration-guide, multi-log-correlate, perf-analysis, readme-section, release-notes-bulk, schema-map, security-audit, severity-triage, tradeoff-analysis, unit-test-gen
+model        gpt-4o-mini
+tags         17  x 40 calls  (8 held out each)
+calls        680
+input        10,625,269 tokens (counted exactly)
+WORST CASE   $2.25   (hard cap $4.00)
+ETA          65 min  (rate-limit bound 65m, generation bound 33m)
+               book-chapter-summary     ~ 35,000 in /    800 out
+               dataset-profile          ~ 25,000 in /  1,000 out
+               entity-tag               ~  3,000 in /    250 out
+               full-spec-draft          ~  3,000 in /  8,000 out
+               json-extract             ~  4,000 in /    400 out
+               legal-contract-review    ~ 25,000 in /  1,500 out
+               log-anomaly-summary      ~ 12,000 in /    900 out
+               migration-guide          ~  5,000 in /  2,500 out
+               multi-log-correlate      ~ 30,000 in /  1,500 out
+               perf-analysis            ~ 12,000 in /  1,400 out
+               readme-section           ~  4,000 in /    800 out
+               release-notes-bulk       ~ 10,000 in /  1,200 out
+               schema-map               ~  8,000 in /  1,200 out
+               security-audit           ~  8,000 in /  2,000 out
+               severity-triage          ~  3,000 in /    120 out
+               tradeoff-analysis        ~  6,000 in /  1,800 out
+               unit-test-gen            ~  4,000 in /  2,000 out
+    10/680  $0.057
+    20/680  $0.115
+    30/680  $0.172
+    40/680  $0.229
+    50/680  $0.290
+    60/680  $0.351
+    70/680  $0.412
+    80/680  $0.434
+    90/680  $0.439
+    100/680  $0.444
+    110/680  $0.449
+    120/680  $0.468
+    130/680  $0.479
+    140/680  $0.490
+    150/680  $0.500
+    160/680  $0.510
+    170/680  $0.520
+    180/680  $0.529
+    190/680  $0.539
+    200/680  $0.574
+    210/680  $0.633
+    220/680  $0.692
+    230/680  $0.751
+    240/680  $0.794
+    250/680  $0.825
+    260/680  $0.860
+    270/680  $0.891
+    280/680  $0.914
+    290/680  $0.927
+    300/680  $0.940
+    310/680  $0.953
+    320/680  $0.989
+    330/680  $1.060
+    340/680  $1.131
+    350/680  $1.202
+    360/680  $1.250
+    370/680  $1.281
+    380/680  $1.313
+    390/680  $1.344
+    400/680  $1.364
+    410/680  $1.380
+    420/680  $1.390
+    430/680  $1.400
+    440/680  $1.418
+    450/680  $1.443
+    460/680  $1.468
+    470/680  $1.493
+    480/680  $1.516
+    490/680  $1.538
+    500/680  $1.559
+    510/680  $1.581
+    520/680  $1.601
+    530/680  $1.619
+    540/680  $1.638
+    550/680  $1.657
+    560/680  $1.670
+    570/680  $1.677
+    580/680  $1.684
+    590/680  $1.691
+    600/680  $1.701
+    610/680  $1.715
+    620/680  $1.728
+    630/680  $1.741
+    640/680  $1.754
+    650/680  $1.766
+    660/680  $1.784
+    670/680  $1.796
+    680/680  $1.832
+
+wrote 680 rows in 3856s  ($1.832 actual, bound was $2.25)
+
+  feature                    n   med in  med out  p90/p10  trunc
+  book-chapter-summary      40   37,108      276     1.6x      0
+  dataset-profile           40   37,227      854     1.2x      1
+  entity-tag                40    3,215       52     1.1x      0
+  full-spec-draft           40    3,365      932     1.3x      0
+  json-extract              40    5,994       86     1.0x      0
+  legal-contract-review     40   37,238      535     1.4x      0
+  log-anomaly-summary       40   17,890      855     1.4x     10
+  migration-guide           40    5,530      704     1.3x      0
+  multi-log-correlate       40   44,680      702     1.4x      0
+  perf-analysis             40   17,898      788     1.3x      0
+  readme-section            40    4,433      580     1.4x      3
+  release-notes-bulk        40   14,896      460     1.4x      0
+  schema-map                40   11,952      584     1.4x      0
+  security-audit            40    8,854      882     1.3x      0
+  severity-triage           40    4,513       34     6.0x      6
+  tradeoff-analysis         40    6,394      612     1.4x      0
+  unit-test-gen             40    4,438      898     1.3x      0
+
+-> /Users/ammar/Desktop/meter-project/meter/data/templated/corpus.jsonl
+[21:44:28] tune: best k=1 (6.7% median across 19 features); current k=20 is 32.1%
+[21:44:28] coldstart/split: starting
+[21:44:28] coldstart/split: rc=0
+[21:44:28] coldstart/optimize: starting
+[22:22:19] coldstart/optimize: rc=0
+[22:22:19] coldstart/discover: starting
+[23:00:29] coldstart/discover: rc=0
+[23:00:29] cross-model: starting
+[23:00:29] cross-model: rc=1
+[23:00:29] prequential: starting
+[23:00:30] prequential: rc=0
+[23:00:30] seed: rc=0 ['Start the proxy against this ledger and /healthz will report learned_factors: 13']
+[23:00:30] test_predictor: starting
+[23:00:30] test_predictor: rc=0
+[23:00:30] test_proxy: starting
+[23:00:33] test_proxy: rc=0
+[23:00:33] test_treasury: starting
+[23:01:03] test_treasury: rc=0
+[23:01:03] test_alerts: starting
+[23:01:04] test_alerts: rc=0
+[23:01:04] e2e journey: starting
+[23:01:07] e2e journey: rc=0
+Traceback (most recent call last):
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 334, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 327, in main
+    write_report(corpus, tune, seed, started,
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                 cold=cold, cross=cross, preq=preq, verify=verify)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 280, in write_report
+    block("Cold-start refit (held out by feature)", (cold or {}).get("optimize"))
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ammar/Desktop/meter-project/meter/scripts/overnight.py", line 272, in block
+    lines.extend(["", f"## {title}", ""])
+    ^^^^^
+UnboundLocalError: cannot access local variable 'lines' where it is not associated with a value

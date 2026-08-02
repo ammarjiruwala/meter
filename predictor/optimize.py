@@ -50,7 +50,16 @@ sys.path.insert(0, str(REPO))
 from predictor import buckets                      # noqa: E402
 from predictor.scope import DEFAULT_CONFIG, ScopeConfig, _text_of, estimate  # noqa: E402
 
+# Overridable so the fitters can target the templated corpus as well as WildChat.
+# These constants are fitted to whatever traffic they are shown, and the product's
+# traffic is templated -- so a config tuned only on WildChat is tuned for the case we
+# have measured to matter least.
 DATA = REPO / "data" / "wildchat"
+
+
+def set_data_dir(path) -> None:
+    global DATA
+    DATA = Path(path)
 FITTED = REPO / "data" / "fitted.json"
 
 # A bucket needs this many training rows before its fitted factor is trusted; below
@@ -170,10 +179,14 @@ def search(train: List[dict], val: List[dict], rounds: int = 3,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--data", default=None,
+                    help="directory holding train/validation/test.jsonl")
     ap.add_argument("--apply", action="store_true", help="write the winner to data/fitted.json")
     ap.add_argument("--final", action="store_true", help="score the LOCKED test set")
     ap.add_argument("--rounds", type=int, default=3)
     args = ap.parse_args()
+    if args.data:
+        set_data_dir(args.data)
 
     train, val = load("train"), load("validation")
     print(f"train {len(train)} rows   validation {len(val)} rows\n")

@@ -71,12 +71,34 @@ DEFAULT_BUFFER = 1.0
 # error) into a loss, so the gate correctly rejected every candidate and the loop
 # silently did nothing.
 #
+# Widened twice, both times because it was clamping real signal rather than noise.
+# First from [0.5, 3.0], when measured features wanted 0.27 to 18.2. Then from
+# [0.05, 20.0], after lowering `task_code` for cold start shrank code-bucket scopes:
+# `security-audit` then needed a factor of 51.7, was held to 20, and its held-out error
+# went from 8% to 63%. The two constants interact -- a smaller base scope demands a
+# larger correction -- so the ceiling has to clear the range the heuristic actually
+# creates, not the range we expected it to.
+#
 # Widening is safe because the clamp was never the thing guarding against noise --
 # MIN_ROWS_FOR_KEY (a key needs 20+ observations) and shrinkage toward 1.0 are. The clamp
 # only has to stop the absurd, so it is set well outside the observed range rather than
 # tightly around it.
-FACTOR_MIN = 0.05
-FACTOR_MAX = 20.0
+FACTOR_MIN = 0.02
+FACTOR_MAX = 100.0
+
+# How hard a fitted factor is pulled back toward 1.0, via (n*raw + k) / (n + k).
+# Was 20, set once and never revisited. Measured on 1,224 held-out slot fillings across
+# 19 features, k=20 cost 25 points of median error: 32.1% against 6.7% at k=1, and it
+# was worse for EVERY feature tested. It also holds at small fit sets -- subsampling
+# down to 10 fit rows still favours k=1 (9.5% vs 58.6%), which was the obvious
+# objection since MIN_ROWS_FOR_KEY admits a factor at 20 rows.
+#
+# The reason it was wrong: shrinkage guards against noisy estimates, but output length
+# inside one prompt template varies by only 1.0-1.4x (p90/p10). There is almost no
+# noise to suppress, so the blend contributed bias and nothing else -- visible as every
+# held-out row being under-predicted. It is kept non-zero because the guard is still
+# the right shape for a genuinely noisy feature; see scripts/shrinkage_sweep.py.
+SHRINK_K = 1
 TARGET_UNDER_PREDICTION = 0.15   # what a fitted buffer aims for
 
 # Step 1.
@@ -225,10 +247,22 @@ class Predictor:
             # ── 2 & 3. EXPLICIT LENGTH, else TASK STACKING ─────────────────
             raw, method, tasks = scope_mod.estimate(payload, model, self._cfg)
 
-        scope_tokens = max(1, int(round(raw)))
-        # Per-bucket scale fitted on held-out data. Applied to the raw scope, so the
-        # ledger's predicted_scope_tokens stays the clean baseline the learner needs.
+        # Per-bucket scale fitted on held-out data.
         raw *= self._factors.get(bucket, 1.0)
+
+        # `scope_tokens` is recorded AFTER the bucket factor, because it is not merely a
+        # diagnostic -- it is the baseline `refresh.py` fits the history factor against,
+        # as `actual / predicted_scope_tokens`. Recording the pre-bucket value made those
+        # two disagree: the factor was fitted against `scope` but applied to
+        # `scope x bucket`, so the prediction came out as `actual x bucket_factor` --
+        # inflated 2.4x to 4.7x depending on the bucket.
+        #
+        # It survived every offline check because those checks reproduced the same
+        # mistake, multiplying scope by the history factor and omitting the bucket term.
+        # Only driving real prompts through the proxy exposed it (median error 6% offline
+        # against 111% live). The invariant to preserve: whatever the history factor
+        # multiplies is exactly what gets written to the ledger.
+        scope_tokens = max(1, int(round(raw)))
 
         # ── 4. SAFETY BUFFER — now applied to the BOUND, not the prediction ─
         # See DEFAULT_BUFFER. The forecast optimises for accuracy; the ceiling
@@ -361,7 +395,7 @@ class Predictor:
     MIN_ROWS_FOR_KEY = 20
 
     def shrink_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
-                       shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
+                       shrink_k: int = SHRINK_K) -> Dict[Tuple[str, ...], float]:
         """The exact transformation `load_history` applies, without installing anything.
 
         Exists so `refresh.py`'s held-out gate can score the factors that would ACTUALLY
@@ -371,6 +405,8 @@ class Predictor:
         never existed. Validating one object and installing another is the kind of bug
         that makes a gate worse than no gate, because it still reports a verdict.
         """
+        import numpy as np
+
         out: Dict[Tuple[str, ...], float] = {}
         for key, (raw, n) in factors.items():
             # Below this the level is skipped entirely so the ladder falls through to
@@ -380,7 +416,15 @@ class Predictor:
                 continue
             # Shrinkage still applies on top: a level that just cleared the threshold
             # is trusted less than one with hundreds of rows.
-            blended = (n * raw + shrink_k * 1.0) / (n + shrink_k)
+            #
+            # GEOMETRIC, not linear. These factors are multiplicative, so blending them
+            # arithmetically toward 1.0 is asymmetric: it inflates factors below 1 far
+            # more than it deflates factors above 1. `commit-message` needs 0.092 and a
+            # linear blend returned 0.114 -- 24% high -- which showed up live as a
+            # 51-token prediction for a feature whose ideal constant is 42. The
+            # geometric blend returns 0.099, and across every held-out feature it takes
+            # median error from 8.2% to 7.1%.
+            blended = float(np.exp((n * np.log(max(raw, 1e-9))) / (n + shrink_k)))
             out[key] = float(min(max(blended, FACTOR_MIN), FACTOR_MAX))
         return out
 
@@ -396,7 +440,7 @@ class Predictor:
             self._cache.clear()
 
     def load_history(self, factors: Dict[Tuple[str, ...], Tuple[float, int]],
-                     shrink_k: int = 20) -> Dict[Tuple[str, ...], float]:
+                     shrink_k: int = SHRINK_K) -> Dict[Tuple[str, ...], float]:
         """Install per-key correction factors with shrinkage toward 1.0.
 
         `factors` is {key_tuple: (median_actual_over_predicted, n)}. Shrinkage is not
@@ -444,9 +488,9 @@ def predict(payload: Payload, model: str, max_tokens: Optional[int] = None,
 def load_fits(rows_by_bucket): return _default.load_fits(rows_by_bucket)
 def load_buffers(observations): return _default.load_buffers(observations)
 def load_bounds(observations, quantile: float = 0.95): return _default.load_bounds(observations, quantile)
-def load_history(factors, shrink_k: int = 20): return _default.load_history(factors, shrink_k)
+def load_history(factors, shrink_k: int = SHRINK_K): return _default.load_history(factors, shrink_k)
 def set_history(factors): return _default.set_history(factors)
-def shrink_history(factors, shrink_k: int = 20): return _default.shrink_history(factors, shrink_k)
+def shrink_history(factors, shrink_k: int = SHRINK_K): return _default.shrink_history(factors, shrink_k)
 def current_fits(): return _default.fits
 def current_history(): return dict(_default._history)
 def current_buffers(): return _default.buffers
