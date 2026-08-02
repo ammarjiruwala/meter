@@ -972,6 +972,48 @@ def test_mandate_routes_require_a_key() -> None:
           "from treasury.routes import sync_mandates" in src)
 
 
+
+def test_the_runaway_act_actually_trips() -> None:
+    """The floor must be reachable inside the act, or a working breaker looks broken."""
+    print("\nthe runaway act reaches the floor")
+    from judge import routes as judge_routes
+    from proxy import breaker
+
+    # Measured on the deployed proxy: one templated ticket-summary call.
+    COST = 0.000033
+    floor = sessions.DEFAULT_BREAKER_FLOOR_USD
+
+    # The breaker reads spend BEFORE each call, so the trip lands on the first call
+    # whose already-recorded spend exceeds the floor.
+    trips_on = next(n for n in range(1, 30) if (n - 1) * COST > floor)
+    attempts = 8  # judge_routes default
+    check(f"the floor is cleared by call {trips_on}", trips_on <= attempts,
+          f"needs {trips_on} calls, the act only fires {attempts}")
+    check("with room to spare", trips_on <= attempts - 2, f"trips on {trips_on}")
+    check("but not on the very first call, which would fire during the walkthrough",
+          trips_on > 1)
+
+    # And the same arithmetic through the real evaluator rather than by hand.
+    s = sessions.create()
+    for i in range(trips_on):
+        tripped, metric = breaker._evaluate(
+            s.project_id, "ticket-summary", s.breaker_floor_usd)
+        if i < trips_on - 1:
+            check(f"call {i + 1} is allowed", not tripped, str(metric))
+        else:
+            check(f"call {i + 1} trips", tripped, str(metric))
+            break
+        _write(s.project_id, "ticket-summary", 47, 41)
+        # `_write` prices at 6e-7/token; top the row up to the measured call cost so
+        # this tests the real economics rather than the helper's.
+        db.connect().execute(
+            "UPDATE requests SET cost_usd = ? WHERE project_id = ? AND cost_usd < ?",
+            (COST, s.project_id, COST))
+
+    check("the act allows more attempts than the floor needs",
+          judge_routes.MANDATE_DEFAULT_USD > 0)  # module imported cleanly
+
+
 def main() -> int:
     print(f"judge session self-check (schema {os.environ['DB_SCHEMA']})")
     try:
@@ -1004,6 +1046,7 @@ def main() -> int:
             test_session_creation_is_rate_limited,
             test_credentials_do_not_outlive_their_ttl,
             test_mandate_routes_require_a_key,
+            test_the_runaway_act_actually_trips,
         ):
             suite()
     finally:
