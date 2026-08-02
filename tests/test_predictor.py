@@ -572,6 +572,59 @@ def test_refresh_gate() -> None:
     check("installed factor moves toward the truth", installed < 0.6, f"{installed:.3f}")
 
 
+def test_new_project_inherits_feature_history() -> None:
+    """A project with no history of its own must still get a correction.
+
+    Measured live 2026-08-02: every installed factor was a `(project, feature)` pair —
+    not one generic `(bucket, …)` rung survived the gate — so a request on an unseen
+    project fell all the way through to 1.0, the raw heuristic. That is ~65-80% median
+    error against ~10%.
+
+    It is precisely a judge's situation. They need their own `project_id` so their wallet
+    and mandate are isolated from everyone else's, and without a cross-project rung that
+    isolation costs them every learned factor: the thing that makes their card safe makes
+    their predictions bad.
+
+    The `(feature,)` rung sits below `(project,)`, so a project with any history of its
+    own is untouched.
+    """
+    print("\nnew project inherits feature history")
+
+    p = Predictor()
+    p._history = {}
+    saved, engine._default = engine._default, p
+    try:
+        engine.set_history({
+            ("known-proj", "ticket-summary"): 0.66,
+            ("ticket-summary",): 0.66,
+        })
+
+        seen = p._history_factor("known-proj", "ticket-summary", "someone",
+                                 bucket="summary", model="gpt-4o-mini")
+        check("a known project uses its own factor", seen == 0.66, str(seen))
+
+        fresh = p._history_factor("judge-alice", "ticket-summary", "someone",
+                                  bucket="summary", model="gpt-4o-mini")
+        check("a brand-new project inherits the feature factor", fresh == 0.66,
+              str(fresh))
+
+        # The project rung must still win when both exist, or one project's traffic
+        # would be corrected by another's.
+        engine.set_history({
+            ("known-proj", "ticket-summary"): 0.40,
+            ("ticket-summary",): 0.90,
+        })
+        specific = p._history_factor("known-proj", "ticket-summary", "someone")
+        check("the project-specific rung outranks the cross-project one",
+              specific == 0.40, str(specific))
+
+        # An unknown feature on an unknown project still has nothing to go on.
+        none_ = p._history_factor("judge-alice", "never-seen", "someone")
+        check("an unknown feature still falls through to 1.0", none_ == 1.0, str(none_))
+    finally:
+        engine._default = saved
+
+
 def test_unproven_keys_keep_their_factor() -> None:
     """A key that cannot be re-validated must keep its factor, not revert to 1.0.
 
@@ -660,6 +713,7 @@ def _run() -> int:
         test_proxy_integration,
         test_ledger_migration,
         test_refresh_gate,
+        test_new_project_inherits_feature_history,
         test_unproven_keys_keep_their_factor,
     ):
         suite()

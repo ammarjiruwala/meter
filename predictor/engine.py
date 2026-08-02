@@ -357,12 +357,27 @@ class Predictor:
         (bucket, model) rungs: a particular customer's prompting style predicts their
         next request better than a pattern averaged over everybody's traffic, even
         when the generic rung has more rows behind it.
+
+        `(feature,)` is the cross-project rung, and it exists for the case where a
+        project is brand new. Measured 2026-08-02: every installed factor was a
+        `(project, feature)` pair and not one generic rung survived the gate, so a
+        request on an unseen project fell all the way through to 1.0 — the raw
+        heuristic, roughly 65-80% median error against ~10% for a known project. That is
+        exactly what a judge gets on their own `project_id`, which they need for payment
+        isolation, so the isolation that made their card safe also made their
+        predictions bad.
+
+        It sits *below* `(project,)`, so a project with any history of its own is
+        completely unaffected: this rung only fires when the first three miss. Feature
+        tags are shared vocabulary (`ticket-summary`, `commit-message`), so a new project
+        using them inherits what the rest of the traffic learned.
         """
         with self._lock:
             for key in (
                 (project, feature, actor),
                 (project, feature),
                 (project,),
+                (feature,),
                 (bucket, model),
                 (bucket,),
             ):
