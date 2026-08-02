@@ -79,8 +79,14 @@ DB_POOL_MAX = _int("DB_POOL_MAX", 10)
 # are using — the isolation a tempfile gave them for free under SQLite.
 DB_SCHEMA = _str("DB_SCHEMA", "public")
 
-# Retained only so the dashboard's own docs and any leftover tooling can still find the
-# old file. Nothing in the request path reads it.
+# Dead since the Postgres port, and kept only because `predictor/refresh.py` still takes a
+# `db_path` argument it explicitly ignores. Nothing reads the file it points at — there is
+# no file. It is NOT a fallback: `DATABASE_URL` above is the only ledger, and its absence
+# raises rather than degrading.
+#
+# It used to feed the boot log, which then announced "ledger ready at meter.db" on a
+# deployed proxy and sent whoever was debugging it looking for a local file. That line now
+# calls `db.ledger_target()`. Delete this once the predictor drops the argument.
 DB_PATH = Path(_str("METER_DB_PATH", str(REPO_ROOT / "meter.db")))
 PRICING_VERSION = _str("PRICING_VERSION", "2026-08-01")
 PRICING_DIR = REPO_ROOT / "pricing"

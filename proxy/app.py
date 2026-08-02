@@ -85,7 +85,7 @@ _HOP_BY_HOP = {
 async def lifespan(app: FastAPI):
     db.connect()
     seeded = db.seed_keys(config.METER_KEYS)
-    log.info("ledger ready at %s (%d meter key(s) seeded)", config.DB_PATH, seeded)
+    log.info("ledger ready at %s (%d meter key(s) seeded)", db.ledger_target(), seeded)
 
     # Create the treasury tables at boot rather than on first use. `treasury.db.connect()`
     # is lazy, so without this the `wallets` table does not exist until somebody happens to
