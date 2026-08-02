@@ -90,8 +90,8 @@ body {
 }
 
 /* ════════════════════════════════════════════════════════════════
-   BACKGROUND — a dot texture and one soft bloom. Fixed, inert.
-   z: texture 0 · bloom 1 · vignette 3 · content 10 · nav 100
+   BACKGROUND — an ambient network canvas under a dot texture. Fixed, inert.
+   z: network 0 · dots 1 · vignette 3 · content 10 · nav 100
    ════════════════════════════════════════════════════════════════ */
 
 /* The 4px dot field is the signature of the style — it is what stops the canvas
@@ -100,7 +100,7 @@ body {
 .bg-dots {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: 1;
   pointer-events: none;
   background-image: radial-gradient(
     rgba(234, 234, 236, 0.015) 1px,
@@ -109,37 +109,34 @@ body {
   background-size: 4px 4px;
 }
 
-/* One bloom, top-left, behind the page title. The previous design drifted four
-   coloured orbs; that belonged to a palette with a violet accent and would fight
-   the three-signal ramp now. This is static — nothing on a financial dashboard
-   needs to be in motion when the data is not. */
-.bg-bloom {
+/* The ambient network canvas. Its own base gradient rather than a transparent
+   canvas over the body: the nodes need something slightly lighter than the page
+   to glow against, and painting it here keeps that off the body element where the
+   marketing side would inherit it. */
+.bg-network {
   position: fixed;
-  inset: 0;
-  z-index: 1;
+  top: 0;
+  left: 0;
+  z-index: 0;
   pointer-events: none;
-  background:
-    radial-gradient(
-      ellipse 45% 35% at 12% 0%,
-      rgba(240, 104, 92, 0.05) 0%,
-      transparent 70%
-    ),
-    radial-gradient(
-      ellipse 40% 30% at 88% 8%,
-      rgba(110, 220, 196, 0.03) 0%,
-      transparent 70%
-    );
+  width: 100vw;
+  height: 100vh;
+  background: radial-gradient(ellipse at 20% 15%, #0d0d18 0%, #06060a 60%);
 }
 
+/* Heavier than a normal vignette, and deliberately so. It is what turns a network
+   animation into a background: the mesh stays legible in the margins and is pushed
+   well down behind the panels and the table rows, which have to stay the brightest
+   things on the page. */
 .bg-vignette {
   position: fixed;
   inset: 0;
   z-index: 3;
   pointer-events: none;
   background: radial-gradient(
-    ellipse 85% 75% at 50% 35%,
-    transparent 0%,
-    rgba(8, 8, 12, 0.55) 100%
+    ellipse 95% 85% at 50% 35%,
+    rgba(8, 8, 12, 0.1) 0%,
+    rgba(8, 8, 12, 0.7) 100%
   );
 }
 
@@ -545,29 +542,31 @@ body {
   display: none;
 }
 
-/* Narrower cards: five or six in view instead of three. These are glanceable
-   summaries, and at 340px each they were reading as full panels — which is what
-   made a rail of nineteen feel like a slideshow. */
+/* Two cards in view, with the third peeking. The rail itself is the narrow thing
+   now (it shares its row with the balances panel), so the cards go back to a size
+   that can hold a name, a bar and a figure without crowding them. */
 .budget-rail > * {
   scroll-snap-align: start;
-  flex: 0 0 clamp(196px, 20%, 236px);
+  flex: 0 0 clamp(210px, 47%, 280px);
 }
 
 .budget-card {
   border-radius: 12px;
-  padding: 14px;
+  padding: 16px;
   position: relative;
   overflow: hidden;
   border: 1px solid var(--color-border-subtle);
+  /* Opaque enough to sit on the network canvas without it reading through the
+     card. A translucent card over a moving mesh makes the figures shimmer. */
   background: linear-gradient(
     180deg,
-    rgba(234, 234, 236, 0.03),
-    rgba(234, 234, 236, 0.01)
+    rgba(20, 20, 28, 0.92),
+    rgba(14, 14, 20, 0.92)
   );
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  min-height: 148px;
+  min-height: 158px;
   /* One shared easing curve with the nav pills, so nothing on the page moves with
      a different personality. */
   transition:
@@ -580,8 +579,8 @@ body {
   border-color: var(--color-border-hover);
   background: linear-gradient(
     180deg,
-    rgba(234, 234, 236, 0.06),
-    rgba(234, 234, 236, 0.02)
+    rgba(28, 28, 38, 0.94),
+    rgba(18, 18, 26, 0.94)
   );
 }
 .budget-card::before {

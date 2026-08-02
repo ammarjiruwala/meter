@@ -91,21 +91,20 @@ export default async function Home() {
           <SpendHero metrics={headline} wallets={wallets} />
         </div>
 
-        {/* Budgets are next, as a carousel: the constraint the numbers above are
-            measured against, on one row instead of a three-row grid. */}
-        <div className="mb-[24px]">
+        {/* The budget rail takes about half the row rather than all of it — at full
+            width it fitted six cards, which is more of a constraint than anyone
+            reads at a glance, and the scrolling stopped meaning anything. Two in
+            view with a third peeking is enough to say "there are more".
+
+            Balances takes the other half, so the width the rail gave up is used
+            rather than left as dead space beside it. items-start, because these two
+            have genuinely different natural heights. */}
+        <div className="mb-[24px] grid grid-cols-1 items-start gap-[24px] lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           <TeamBudgetCard scopes={budgets} />
+          <ProviderBalancesCard wallets={wallets} />
         </div>
 
-        {/* Balances and the agent acting on them sit side by side: the panel on the
-            right is what the numbers on the left caused.
-
-            items-start, not stretch. The agent feed is a fixed-height terminal;
-            balances is one row per wallet. Stretching them to match put ~200px of
-            empty panel under a single wallet, which reads as a card that failed to
-            load rather than one with little to say. */}
-        <div className="mb-[24px] grid grid-cols-1 items-start gap-[24px] lg:grid-cols-2">
-          <ProviderBalancesCard wallets={wallets} />
+        <div className="mb-[24px]">
           <AgentLog initialEvents={treasuryEvents} />
         </div>
 
