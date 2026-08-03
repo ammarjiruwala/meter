@@ -155,6 +155,25 @@ export type Scope = string | null;
  * every existing `$1`, `$2` … keeps its number and no call site has to be renumbered —
  * which is the kind of edit that transposes a parameter and is not caught by types.
  */
+/**
+ * As `scoped`, but the public view includes judge sessions rather than excluding them.
+ *
+ * Used by the two live panels — the Request Ledger and the Treasurer Agent — because
+ * there the whole point is that something is happening *now*. A judge running the console
+ * against their own Prava merchant key produces a real settled charge on real rails, and
+ * that is the single most convincing thing this dashboard can show. Their call costs
+ * $0.000033 against $2.38 of history, so nothing it touches is distorted.
+ *
+ * The aggregate panels still use `scoped`: Team Budget would gain a card per session, and
+ * Team Spend and Cost per Outcome group by project, so judges would dilute the 1,300-call
+ * story those panels exist to tell.
+ */
+function scopedIncludingJudges(scope: Scope, nextParam: number, column = "project_id") {
+  return scope === null
+    ? { sql: "TRUE", params: [] as unknown[] }
+    : { sql: `${column} = $${nextParam}`, params: [scope] as unknown[] };
+}
+
 function scoped(scope: Scope, nextParam: number, column = "project_id") {
   return scope === null
     ? { sql: `${column} NOT LIKE 'judge-%'`, params: [] as unknown[] }
@@ -934,6 +953,22 @@ export type TreasuryDecision = {
   recommended_topup_usd?: number;
 };
 
+/**
+ * Rows where the agent declined to act for a reason that was never about the money.
+ *
+ * `no_chargeable_mandate` means nobody has connected a card yet, and `cooldown` is the
+ * agent backing off after a recent attempt. Both are the rails working, and neither is a
+ * decision about spending — but they are written on every poll, so they outnumber real
+ * charges 130 to 5 and would bury the settled transactions this panel exists to show.
+ *
+ * Deliberately narrow. `failed`, `pending` and `dry_run` all stay: a charge that reached
+ * the network and did not settle, or one the agent decided on and stopped short of, is
+ * exactly what someone auditing an autonomous spender needs to see. Only the two
+ * "nothing happened" reasons are hidden.
+ */
+const NOT_A_MONEY_DECISION =
+  "NOT (e.status = 'refused' AND e.error IN ('cooldown', 'no_chargeable_mandate'))";
+
 export async function getTreasuryEvents(limit = 40, scope: Scope = null): Promise<TreasuryEvent[]> {
   if (!(await tableExists("treasury_events"))) return [];
 
@@ -951,9 +986,8 @@ export async function getTreasuryEvents(limit = 40, scope: Scope = null): Promis
             ${joined ? "w.project_id, w.provider" : "NULL AS project_id, NULL AS provider"}
        FROM treasury_events e
        ${joined ? "LEFT JOIN wallets w ON w.id = e.wallet_id" : ""}
-      ${joined ? `WHERE ${scope === null
-            ? "(w.project_id IS NULL OR w.project_id NOT LIKE 'judge-%')"
-            : "w.project_id = $2"}` : ""}
+      WHERE ${NOT_A_MONEY_DECISION}
+        ${joined && scope !== null ? "AND w.project_id = $2" : ""}
       ORDER BY e.id DESC
       LIMIT $1`,
     joined && scope !== null ? [limit, scope] : [limit],
@@ -1028,10 +1062,10 @@ export async function getLiveLogs(limit = 50, scope: Scope = null): Promise<Live
             cost_usd,
             status
        FROM requests
-      WHERE ${scoped(scope, 2).sql}
+      WHERE ${scopedIncludingJudges(scope, 2).sql}
       ORDER BY ts DESC
       LIMIT $1`,
-    [limit, ...scoped(scope, 2).params],
+    [limit, ...scopedIncludingJudges(scope, 2).params],
   );
   return rows.map((r) => ({
     ...r,

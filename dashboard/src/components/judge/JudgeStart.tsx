@@ -48,7 +48,7 @@ export function JudgeStart() {
     <main className="relative z-10 mx-auto w-full max-w-[760px] px-[32px] pb-[60px] pt-[100px]">
       <h1 className="t-display">Try it yourself</h1>
       <div className="t-eyebrow mb-[32px] mt-[8px]">
-        Your own private session · about 10 minutes · nothing to install
+        Your own session · about 10 minutes · nothing to install
       </div>
 
       <Panel title="Start a session" tag="step 1 of 1">
@@ -108,8 +108,10 @@ export function JudgeStart() {
           </button>
 
           <p className="text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
-            Your session is private and expires in four hours. Keys are held in memory for
-            the session only and are never written to the ledger.
+            Your dashboard shows only your own calls. They also appear in the public live
+            feed under the name you enter — that feed is how anyone watching sees the
+            product working. Your keys are different: held in memory for this session
+            only, never written to the ledger, and dropped the moment you finish.
           </p>
         </div>
       </Panel>
