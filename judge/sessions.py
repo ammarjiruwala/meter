@@ -416,6 +416,14 @@ def purge_expired() -> int:
         stale = [t for t, (expires_at, _) in _vault.items() if now >= expires_at]
         for token in stale:
             del _vault[token]
+
+        # The rate-limit bookkeeping is swept on the same pass. `_check_limits` only ever
+        # prunes the IP in front of it, so an address that is seen once and never returns
+        # keeps its timestamp list forever — a slow leak keyed by attacker-chosen input,
+        # which is the kind that only shows up after the demo is over.
+        for ip in [ip for ip, seen in _recent_by_ip.items()
+                   if all(now - t >= 3600 for t in seen)]:
+            del _recent_by_ip[ip]
     if stale:
         log.info("purged %d expired judge credential set(s)", len(stale))
     return len(stale)

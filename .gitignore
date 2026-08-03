@@ -3,8 +3,16 @@
 __pycache__/
 *.pyc
 node_modules/
-.next/ 
 .next/
+.next/
+
+# Raw stdout from `scripts/overnight.py` (it redirects here by name). These were tracked
+# until 2026-08-03; they are console spew from one machine's run, they conflict on every
+# merge, and the actual results of that run are committed as data/overnight-report.md and
+# data/overnight-stages.json. Untracked with `git rm --cached`, so existing local copies
+# survive.
+overnight.log
+overnight2.log
 
 # Python virtualenvs
 .venv/

@@ -14,8 +14,11 @@ psycopg[binary,pool]>=3.2
 tiktoken>=0.5.0
 numpy>=1.24.0
 
-# predictor/calibrate.py only — measures real ratios against the OpenAI API
-openai>=1.0.0
+# `openai` is NOT here. It is a calibration-time dependency (predictor/calibrate.py,
+# predictor/measure.py, two scripts/), both of which import it inside the function that
+# uses it — nothing on the request path touches it. It lives in requirements-dev.txt so
+# the deployed image does not ship an SDK it never calls. If you are running
+# `python -m predictor.calibrate`, install that file.
 
 # CI runs `ruff check .` (.github/workflows/ci.yml). It was never installed, so that
 # step exited 127 "command not found" on every run — the backend job has never actually

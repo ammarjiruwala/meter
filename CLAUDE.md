@@ -29,10 +29,15 @@ cp .env.example .env                            # provider + Prava keys, DATABAS
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
 python tests/test_proxy.py                      # 249 checks, no framework, ~3s
-python tests/test_predictor.py                  # 131 checks, same convention
-python tests/test_treasury.py                   # 182 checks (treasury/)
-python tests/test_alerts.py                     # 46 checks (alerts/) — needs Python 3.10+
+python tests/test_predictor.py                  # 140 checks, same convention
+python tests/test_treasury.py                   # 205 checks (treasury/)
+python tests/test_alerts.py                     # 52 checks (alerts/) — needs Python 3.10+
+python tests/test_judge.py                      # 206 checks (judge/) — session-scoped tenants
 ```
+
+852 checks total (verified 2026-08-03). The counts above drift as suites grow; if yours
+disagree, the suite is right and this line is stale — update it rather than assuming a
+regression.
 
 Two measurement harnesses, neither in CI and neither a pass/fail gate on a normal change:
 
@@ -81,13 +86,14 @@ third that duplicates a route — `test_charge.py` was deleted for exactly that,
 
 ## How the pieces fit
 
-Four components. The first three are one process; all four share one Postgres:
+Five components. All but the dashboard are one process; all share one Postgres:
 
 | Component | What it is | Owner |
 | --- | --- | --- |
 | [proxy/](proxy/) | FastAPI hot path. Auth → attribute → estimate → breaker → reserve → forward → capture | Shubh |
 | [treasury/](treasury/) | Wallets, Prava mandates/charges, mock provider billing. **Routers mounted onto the proxy app** | Shivam |
 | [predictor/](predictor/) | Pre-flight `tiktoken` cost estimate. Called by the proxy at ESTIMATE | Ammar |
+| [judge/](judge/) | "Try it yourself" console API. Session-scoped tenants, judge's own Prava/Linq keys held server-side. **Routers mounted onto the proxy app** at `/judge/*` | Ammar |
 | [dashboard/](dashboard/) | Next.js 16 App Router + Tailwind. Reads the ledger **read-only** via `pg`, no API to the proxy except `/api/live-logs` | Tanay |
 
 Consequences worth knowing before you change anything:
@@ -95,7 +101,8 @@ Consequences worth knowing before you change anything:
 - **`uvicorn proxy.app:app --port 8080` starts everything.** There is no second server. Treasury
   routes sit deliberately *off* the `/v1` prefix (`/wallets`, `/mandates`, `/charge`,
   `/mock-openai/billing`) — `/v1` is the surface a caller's provider SDK targets, and control-plane
-  routes do not belong in it.
+  routes do not belong in it. **`/judge/*` routes take JSON bodies; the treasury routes beside
+  them take query strings** — deliberate, treasury's callers predate any browser (EXPERIENCE.md #38).
 - **Everything goes through [proxy/pg.py](proxy/pg.py).** One pool, per-statement autocommit,
   `?` placeholders rewritten to `%s` by `q()`. `DATABASE_URL` is required — the proxy raises at
   first query rather than degrading, because a proxy that cannot bill anyone should not serve.
