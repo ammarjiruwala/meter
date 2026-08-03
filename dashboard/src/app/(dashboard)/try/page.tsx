@@ -125,7 +125,10 @@ export default async function TryPage() {
         </div>
 
         <div className="animate-in delay-5 mb-[24px]">
-          <LiveLogsTable initialRows={liveLogs} />
+          <LiveLogsTable
+            initialRows={liveLogs}
+            emptyHint="Nothing here yet — this is your own ledger, and it starts empty. Run a prompt in the Console above and the row appears within a second, with the cost that was predicted before it ran."
+          />
         </div>
 
         <div className="grid grid-cols-1 gap-[24px] xl:grid-cols-2">

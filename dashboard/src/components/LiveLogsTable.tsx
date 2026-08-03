@@ -14,7 +14,21 @@ import { Cell, DataTable, IdentityCell, Row } from "@/components/ui/DataTable";
 
 const POLL_INTERVAL_MS = 3000;
 
-export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
+export function LiveLogsTable({
+  initialRows,
+  emptyHint,
+}: {
+  initialRows: LiveLogRow[];
+  /**
+   * What to say when there is nothing to show.
+   *
+   * The default tells you to start the proxy, which is right on the team dashboard and
+   * actively misleading in a judge's session: their proxy is running, their ledger is
+   * empty because they have not run anything yet, and being told to start a server they
+   * never started reads as the product being broken.
+   */
+  emptyHint?: string;
+}) {
   // Polls only while the tab is visible, backs off when nothing new arrives, and stops
   // once idle. See `usePoll` — the unconditional setInterval this replaced kept fetching
   // in a background window forever, which is metered on a serverless host.
@@ -52,7 +66,8 @@ export function LiveLogsTable({ initialRows }: { initialRows: LiveLogRow[] }) {
         ]}
         empty={
           <p className="t-cell text-text-secondary">
-            No requests logged yet. Start the proxy and send a call through it.
+            {emptyHint ??
+              "No requests logged yet. Start the proxy and send a call through it."}
           </p>
         }
         rows={rows.map((row) => (
