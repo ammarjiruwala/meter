@@ -27,7 +27,7 @@ import {
 export const metadata: Metadata = {
   title: "Meter — Try it yourself",
   description:
-    "Your own private session: predicted cost before every call, a runaway feature throttled, and an agent that pays its own bill.",
+    "Your own session: predicted cost before every call, a runaway feature throttled, and an agent that pays its own bill.",
 };
 
 // Reads a cookie and live ledger state, so it can never be prerendered.

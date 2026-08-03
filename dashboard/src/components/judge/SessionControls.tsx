@@ -56,7 +56,7 @@ export function EndSession({ token }: { token: string }) {
       </button>
       <p className="text-[12px]" style={{ color: "var(--color-text-tertiary)" }}>
         Your keys are dropped from memory straight away. The calls you made stay in the
-        ledger.
+        ledger and in the public feed.
       </p>
     </div>
   );
