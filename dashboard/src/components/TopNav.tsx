@@ -83,6 +83,16 @@ export function TopNav({ breaker }: { breaker: BreakerState }) {
           Meter
         </Link>
 
+        {/* Deliberately NOT in LINKS: those are in-page anchors driven by the
+            scroll spy, and a route link among them would light up wrongly and
+            never turn off. Sits beside the brand instead, where it reads as
+            "leave this page" rather than "jump down it". A judge who wants to
+            know how the prediction is computed should not have to go back to
+            the homepage to find the argument. */}
+        <Link href="/how-it-works" className="glass-pill hidden sm:inline-flex">
+          How the predictor works
+        </Link>
+
         {/* Hidden below 1024px — a hamburger is out of scope, and seven cramped
             links are worse than none on a small screen. */}
         <div className="ml-auto hidden items-center gap-[6px] lg:flex">

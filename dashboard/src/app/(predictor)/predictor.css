@@ -163,9 +163,23 @@
 .px-drop { width: 1px; height: 30px; background: linear-gradient(var(--ink-3), transparent); animation: px-drop 1.8s ease-in-out infinite; }
 @keyframes px-drop { 0%, 100% { opacity: 0.3; transform: scaleY(0.6); } 50% { opacity: 1; transform: scaleY(1); } }
 
-/* ── REVEAL (JS sets initial hidden state via gsap.from) ── */
-/* No base rule needed: gsap.from animates from y/opacity to the natural state.
-   Under reduced motion gsap is skipped, so elements render normally. */
+/* ── REVEAL ON SCROLL ─────────────────────────────────── */
+/* Gated on `.px-js`, which PredictorPage adds only once its IntersectionObserver
+   is about to be wired, and removes on unmount.
+   This gate is the whole point. The previous version let `gsap.from` stamp
+   opacity 0 onto all 48 `.reveal` elements up front and relied on ScrollTrigger
+   to bring them back. ScrollTrigger never fired, so every section below the hero
+   shipped to main invisible. Hidden-by-default in CSS would have exactly the same
+   failure mode, so the hidden state is only ever applied by the code that also
+   owns the way out of it. */
+.px-js .reveal {
+  opacity: 0;
+  transform: translateY(40px);
+  transition:
+    opacity 900ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.px-js .reveal.in { opacity: 1; transform: none; }
 
 /* ── SCATTER ──────────────────────────────────────────── */
 .px-scatter {
@@ -303,6 +317,137 @@
 .px-badge.measured { color: var(--mint); border-color: rgba(110, 220, 196, 0.3); }
 .px-badge.property { color: var(--gold); border-color: rgba(232, 181, 123, 0.3); }
 
+.px-badge.fitted { color: var(--signal); border-color: rgba(240, 104, 92, 0.3); }
+.px-badge.neutral { color: var(--ink-4); border-color: var(--rule); }
+
+/* ── ARCHITECTURE: request lifecycle ──────────────────── */
+.px-arch { margin: 8px 0 40px; }
+/* auto-fit rather than repeat(7,1fr): at 7 across each cell is ~150px, which is
+   narrower than the longest detail string and forces a mid-word break. */
+.px-arch-rail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 10px;
+}
+.px-arch-step {
+  position: relative;
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 18px 16px 16px;
+  border: 1px solid var(--rule); border-radius: 12px; background: var(--bg-2);
+  transition: border-color 300ms ease, transform 300ms cubic-bezier(0.16,1,0.3,1);
+}
+.px-arch-step:hover { transform: translateY(-3px); border-color: var(--rule-strong); }
+.px-arch-step.self {
+  border-color: rgba(240, 104, 92, 0.45);
+  background: linear-gradient(160deg, rgba(240, 104, 92, 0.12), var(--bg-2));
+  box-shadow: 0 16px 46px -26px rgba(240, 104, 92, 0.7);
+}
+.px-arch-n {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; color: var(--ink-4);
+}
+.px-arch-step.self .px-arch-n { color: var(--signal); }
+.px-arch-name { font-family: var(--cond); font-weight: 700; font-size: 1.12rem; color: var(--ink); }
+.px-arch-detail { font-family: var(--mono); font-size: 10.5px; line-height: 1.45; color: var(--ink-3); }
+.px-arch-legend { margin-top: 14px; }
+.px-arch-brace {
+  display: inline-block; font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;
+  color: var(--ink-3); border-left: 2px solid var(--signal); padding-left: 12px;
+}
+.px-arch-offpath {
+  display: flex; gap: 16px; align-items: flex-start; margin-top: 22px;
+  padding: 20px 22px; border: 1px dashed rgba(232, 181, 123, 0.32);
+  border-radius: 12px; background: rgba(232, 181, 123, 0.04);
+}
+.px-arch-offtag {
+  flex-shrink: 0; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--gold); border: 1px solid rgba(232, 181, 123, 0.3);
+  padding: 4px 9px; border-radius: 5px; margin-top: 2px; height: fit-content;
+}
+.px-arch-offpath p { margin: 0; font-size: 15px; color: var(--ink-2); line-height: 1.55; }
+
+/* Two- or three-up annotation blocks under a diagram. */
+.px-archnote {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px; margin-top: 34px;
+}
+.px-archnote > div {
+  padding: 22px; border: 1px solid var(--rule); border-radius: 14px; background: var(--card);
+}
+.px-archnote-k {
+  display: block; font-family: var(--cond); font-weight: 700; font-size: 1.05rem;
+  color: var(--ink); margin-bottom: 8px;
+}
+.px-archnote p { margin: 0; font-size: 14.5px; color: var(--ink-2); line-height: 1.55; }
+
+/* ── THE WHOLE FORMULA ────────────────────────────────── */
+.px-formula-block {
+  border: 1px solid var(--rule); border-radius: 16px; overflow: hidden;
+  background: var(--bg-2);
+}
+.px-fb-line {
+  display: grid; grid-template-columns: 130px 20px 1fr; gap: 12px; align-items: baseline;
+  padding: 20px 26px; border-bottom: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 14px; line-height: 1.7;
+}
+.px-fb-line:last-of-type { border-bottom: none; }
+.px-fb-line.result {
+  background: linear-gradient(100deg, rgba(240, 104, 92, 0.10), transparent 70%);
+  border-top: 1px solid rgba(240, 104, 92, 0.3);
+}
+.px-fb-lhs { color: var(--signal); }
+.px-fb-line.result .px-fb-lhs { color: var(--gold); font-weight: 600; }
+.px-fb-eq { color: var(--ink-4); }
+.px-fb-rhs { color: var(--ink); }
+.px-fb-rhs b { color: var(--gold); font-weight: 500; }
+.px-fb-rhs em {
+  display: block; margin-top: 7px; font-family: var(--sans); font-style: normal;
+  font-size: 13.5px; color: var(--ink-3); line-height: 1.5; max-width: 62ch;
+}
+.px-fb-ind { display: inline-block; padding-left: 2ch; color: var(--ink-2); }
+.px-fb-foot {
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 22px 26px; background: var(--bg-3); border-top: 1px solid var(--rule);
+  font-size: 14.5px; color: var(--ink-2); line-height: 1.55;
+}
+.px-fb-foot code { font-size: 13px; color: var(--mint); align-self: flex-start; }
+
+/* ── ACCURACY TABLE ───────────────────────────────────── */
+.px-acc { border: 1px solid var(--rule); border-radius: 14px; overflow: hidden; }
+.px-acc-head, .px-acc-row {
+  display: grid; grid-template-columns: 1.5fr 1fr 0.7fr 1.1fr;
+  gap: 18px; align-items: center; padding: 16px 24px;
+}
+.px-acc-head {
+  background: var(--bg-3); border-bottom: 1px solid var(--rule);
+  font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-4);
+}
+.px-acc-row { border-bottom: 1px solid var(--rule); transition: background 200ms ease; }
+.px-acc-row:last-of-type { border-bottom: none; }
+.px-acc-row:hover { background: var(--bg-2); }
+.px-acc-shape { font-size: 15px; color: var(--ink); }
+/* The bar sits under the figure rather than beside it, so the number stays the
+   thing you read first and the bar is only a shape for comparison. */
+.px-acc-median {
+  position: relative; font-family: var(--cond); font-weight: 700; font-size: 1.5rem;
+  color: var(--mint); padding-bottom: 10px; display: block;
+}
+.px-acc-bar {
+  position: absolute; left: 0; bottom: 0; height: 3px; border-radius: 2px;
+  background: linear-gradient(90deg, var(--mint), rgba(110, 220, 196, 0.2));
+}
+.px-acc-row.weak .px-acc-median { color: var(--signal); }
+.px-acc-row.weak .px-acc-bar { background: linear-gradient(90deg, var(--signal), rgba(240, 104, 92, 0.2)); }
+.px-acc-within { font-family: var(--mono); font-size: 14px; color: var(--ink-2); }
+.px-acc-n { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+.px-acc-foot {
+  margin: 0; padding: 18px 24px; background: var(--bg-3);
+  border-top: 1px solid var(--rule); font-size: 13.5px; color: var(--ink-3); line-height: 1.5;
+}
+
+/* Long compound figures ("82.6% → 28.8%") need a smaller size than a bare stat. */
+.px-stat-sm { font-size: clamp(1.5rem, 2.6vw, 2rem) !important; }
+
 /* ── LOOP RING (3D) ───────────────────────────────────── */
 .px-loop { display: grid; place-items: center; padding: 24px 0 8px; perspective: 1000px; }
 /* Height is the projection, not the radius: nodes sit at r=155 in the ring plane,
@@ -366,6 +511,10 @@
   .px-loop-ring { transform: rotateX(58deg) scale(0.8); }
   .px-pipe-layout { grid-template-columns: 1fr; }
   .px-readout { position: relative; top: 0; margin-bottom: 12px; }
+  /* The label column is sized for "scope_tokens"; below this the right-hand side
+     has too little left to hold an expression on one line. */
+  .px-fb-line { grid-template-columns: 1fr; gap: 4px; }
+  .px-fb-eq { display: none; }
 }
 @media (max-width: 640px) {
   .px-sec { padding: 80px 0; }
@@ -375,6 +524,14 @@
   .px-table-row { grid-template-columns: 1fr auto; }
   .px-table-val { grid-column: 2; }
   .px-badge { grid-column: 1 / -1; width: auto; justify-self: start; }
+  /* Four columns of numbers do not fit; stack each row into a labelled card and
+     drop the header, which has nothing left to label. */
+  .px-acc-head { display: none; }
+  .px-acc-row, .px-acc-row:hover { grid-template-columns: 1fr; gap: 6px; padding: 20px 22px; }
+  .px-acc-median { font-size: 1.9rem; }
+  .px-acc-within::before { content: "within 2x  "; color: var(--ink-4); }
+  .px-arch-offpath { flex-direction: column; gap: 12px; }
+  .px-fb-line, .px-fb-foot { padding: 18px 20px; }
   /* Touch has no hover: reveal the flip back on tap-focus instead. */
   .px-flip:focus-within .px-flip-inner { transform: rotateY(180deg); }
 }
