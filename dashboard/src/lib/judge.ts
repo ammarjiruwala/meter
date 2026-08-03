@@ -17,7 +17,7 @@
  *
  * Falls back to localhost so `npm run dev` against a local proxy needs no configuration.
  */
-export const PROXY_URL = (
+const PROXY_URL = (
   process.env.NEXT_PUBLIC_METER_PROXY_URL ?? "http://localhost:8080"
 ).replace(/\/$/, "");
 
@@ -96,20 +96,6 @@ export type JudgeStats = {
   enough_for_median: boolean;
 };
 
-export type LedgerRow = {
-  id: string;
-  ts: string;
-  feature: string | null;
-  model: string | null;
-  status: number | null;
-  output_tokens: number | null;
-  predicted_output_tokens: number | null;
-  predicted_cost_usd: number | null;
-  cost_usd: number | null;
-  history_factor: number | null;
-  output_token_error_pct: number | null;
-};
-
 /** Thrown with the status attached so a caller can tell 440 (expired) from 429 (capped). */
 export class JudgeError extends Error {
   status: number;
@@ -117,14 +103,6 @@ export class JudgeError extends Error {
     super(message);
     this.status = status;
   }
-}
-
-export function storedToken(): string | null {
-  if (typeof document === "undefined") return null;
-  const hit = document.cookie
-    .split("; ")
-    .find((c) => c.startsWith(`${TOKEN_KEY}=`));
-  return hit ? decodeURIComponent(hit.slice(TOKEN_KEY.length + 1)) : null;
 }
 
 export function rememberToken(token: string | null) {
@@ -181,12 +159,6 @@ export const judge = {
   createSession: (body: Record<string, unknown>) =>
     call<JudgeSession>("/judge/session", { method: "POST", body }),
 
-  readSession: (token: string) =>
-    call<JudgeSession>("/judge/session", { token }),
-
-  updateSession: (token: string, body: Record<string, unknown>) =>
-    call<JudgeSession>("/judge/session", { method: "PATCH", body, token }),
-
   endSession: (token: string) =>
     call<{ ok: boolean }>("/judge/session", { method: "DELETE", token }),
 
@@ -236,20 +208,7 @@ export const judge = {
       token,
     }),
 
-  ledger: (token: string) =>
-    call<{ project_id: string; rows: LedgerRow[] }>("/judge/ledger", { token }),
-
   stats: (token: string) => call<JudgeStats>("/judge/stats", { token }),
-
-  budgets: (token: string) =>
-    call<{
-      window_s: number;
-      project: { ceiling_usd: number; spend_usd: number };
-      features: { feature: string; ceiling_usd: number; spend_usd: number }[];
-    }>("/judge/budgets", { token }),
-
-  outcomes: (token: string) =>
-    call<{ rows: OutcomeRow[] }>("/judge/outcomes", { token }),
 
   treasury: (token: string) => call<TreasuryState>("/judge/treasury", { token }),
 
