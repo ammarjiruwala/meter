@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import time
-import uuid
 from typing import Any
 
 import asyncio
@@ -207,7 +206,3 @@ def _render(prompt: prompts.Prompt, response: httpx.Response,
     out["output_tokens"] = usage.get("completion_tokens")
     return out
 
-
-def new_trace() -> str:
-    """A trace id for one 'outcome' — several calls that resolved the same thing."""
-    return f"judge-{uuid.uuid4().hex[:12]}"
