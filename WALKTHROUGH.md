@@ -13,6 +13,22 @@ It is deployed and running. **You do not need to clone or install anything.**
 | **Proxy API** | https://meter-proxy.onrender.com |
 | **Meter key** | `mk_74e8201b8eb1cf6e98a1c29ab7b12bd0` |
 
+## The fastest path is the console
+
+**https://meter-three-beta.vercel.app/try** — click *Try it yourself*, give a name and an email,
+and you get **your own Control Room**: the same dashboard the team uses, showing only your session.
+Three templated prompts, a runaway feature throttled, an agent paying its own bill. Ten minutes,
+nothing installed.
+
+Bring your own keys and each one unlocks a step — an **OpenAI key** spends your credit instead of
+ours, a **Prava merchant key** settles a real charge on *your* account so it appears in *your*
+Prava dashboard, and a **Linq key plus your phone** puts the circuit-breaker alert on your device.
+All three are optional; skip them and everything still runs on ours.
+
+Everything below does the same thing from a terminal, for anyone who would rather see the wire.
+
+---
+
 Three paths, shortest first. **Path A takes two minutes and needs nothing but a browser.**
 
 > ### ⏳ First request may be slow — this is expected
