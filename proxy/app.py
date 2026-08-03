@@ -316,12 +316,67 @@ app = FastAPI(
 # It does not widen anything for the API's normal callers -- a provider SDK is not a
 # browser and never sends an Origin header, so CORS is inert on that path.
 _ORIGINS = [o.strip() for o in config.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
+
+
+def _preview_origin_regex(origins: list[str]) -> str | None:
+    """Allow *our* Vercel preview deployments, and nothing else on vercel.app.
+
+    Every push gets a preview URL of the form `<project>-<hash>-<scope>.vercel.app`, so the
+    console cannot be tested on a branch unless previews are allowed — which is why a regex
+    exists here at all rather than a fixed list.
+
+    It used to be `https://.*\\.vercel\\.app`, which matched **any** Vercel deployment. Since
+    anyone can deploy to vercel.app in about a minute, that was the wildcard the comment
+    above says it is avoiding — the exact hole, wearing a regex. Now the pattern is built
+    from the configured production origins, so it only ever widens to previews of a project
+    already named in `CORS_ALLOW_ORIGINS`.
+    """
+    projects = sorted(
+        {
+            host[: -len(".vercel.app")]
+            for o in origins
+            if (host := o.removeprefix("https://")).endswith(".vercel.app")
+        }
+    )
+    if not projects:
+        return None
+    alts = "|".join(re.escape(p) for p in projects)
+    return rf"https://(?:{alts})(?:-[a-z0-9]+)*\.vercel\.app"
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ORIGINS,
-    allow_origin_regex=r"https://.*\.vercel\.app" if "*" not in _ORIGINS else None,
+    allow_origin_regex=None if "*" in _ORIGINS else _preview_origin_regex(_ORIGINS),
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    # Enumerated rather than `*`. These are every header the console and a provider SDK
+    # actually send; `*` additionally reflects whatever a caller asks for, which is free
+    # surface area for no benefit.
+    allow_headers=[
+        "authorization",
+        "content-type",
+        "anthropic-version",
+        "x-api-key",
+        "x-judge-session",
+        "x-meter-actor",
+        "x-meter-feature",
+        "x-meter-provider",
+        "x-meter-provider-key",
+        "x-meter-request-id",
+        "x-meter-trace",
+    ],
+    # The console reads the request id off the response to link a call to its ledger row.
+    # A browser cannot see any response header that is not named here, so omitting this
+    # made `x-meter-request-id` invisible to exactly the caller that wanted it.
+    expose_headers=[
+        "x-meter-request-id",
+        "x-meter-overhead-ms",
+        "x-meter-breaker-mode",
+        "x-meter-breaker-scope",
+        "x-meter-budget-scope",
+        "x-meter-budget-spend-usd",
+        "x-meter-budget-ceiling-usd",
+    ],
     max_age=600,
 )
 

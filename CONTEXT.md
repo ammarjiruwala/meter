@@ -99,6 +99,29 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
 ## 6a. Current Status
 *(Keep this current — see `AGENTS.md` for the update policy. Update in the same turn as any scope or architecture decision, don't batch it for later.)*
 
+*   **Security audit, 2026-08-03 (Shubh) — nine fixes shipped, three questions raised.**
+    Full-codebase pass, every finding runtime-verified against a running proxy rather than
+    read off the source. **Fixed:** the CORS preview regex was `https://.*\.vercel\.app`,
+    which matched *any* Vercel deployment — anyone could publish a page that drives the
+    judge API, the exact wildcard the comment beside it claimed to avoid; it is now built
+    from the configured origins and has its own test (`test_cors_preview_origins`).
+    `POST /treasury/tick` was **unauthenticated** — the whole autonomous charging loop, on
+    demand, for anyone who could reach the port (`PROPOSALS.md` B19). The Dockerfile now
+    passes `--proxy-headers`, without which every request on Render looked like it came
+    from the edge IP and the judge per-IP session limit was one shared bucket of 8/hour for
+    the entire internet; it also runs as uid 10001 instead of root. Plus: `allow_headers`
+    enumerated rather than `*`, `/treasury/events?limit=` bounded, security headers on the
+    dashboard, an IP-bookkeeping leak swept, `openai` moved off the shipped dependency set,
+    and CI gained `pip-audit`, `npm audit`, **and `test_judge.py`, which it had never run**.
+    Suites: **867 checks** (proxy 256, treasury 213, judge 206, predictor 140, alerts 52).
+    **Raised, deliberately not actioned** — all three reverse or reconsider a human
+    decision: the treasury *read* routes are still open and now disclose judge tenants'
+    finances (B19); the judge cookie is script-readable for a sound reason whose stated cost
+    understates what the token authorises (B20); and `WALKTHROUGH.md` publishes a working
+    Meter key, which means the `/treasury/tick` fix moved that route from "anyone" to
+    "anyone who read the walkthrough" — closing it properly needs per-key scopes, which do
+    not exist. **`TREASURER_DRY_RUN` is still the real control on that endpoint.**
+
 *   **Judge experience: BUILT, NOT YET DEPLOYED** — [PITCH.md](PITCH.md) (Ammar, 2026-08-03) is
     the agreed design for asynchronous judging: a public dashboard anyone can read, plus an
     opt-in **"Try it yourself"** session scoped to `judge-<nonce>` with the judge's own

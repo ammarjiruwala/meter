@@ -9,6 +9,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Non-root. Nothing here needs to write to the image — the ledger is Postgres and
+# meter.yaml/pricing come in read-only — so the process has no reason to run as uid 0,
+# and a container escape from an HTTP handler is a much duller event without it.
+RUN useradd --create-home --uid 10001 meter && chown -R meter:meter /app
+USER meter
+
 # No volume. The ledger, wallets and treasury events used to be one SQLite file that
 # had to survive a container restart; they are now in Postgres, so this image holds no
 # state at all and DATABASE_URL comes in from the environment (`env_file: .env` in
@@ -27,4 +33,13 @@ EXPOSE 8080
 # check timing out rather than a port mismatch. Exec form would pass the literal string
 # `${PORT:-8080}` to uvicorn, so the shell has to expand it.
 # Locally and in compose, nothing sets PORT and it stays 8080.
-CMD ["sh", "-c", "uvicorn proxy.app:app --host 0.0.0.0 --port ${PORT:-8080}"]
+#
+# `--proxy-headers` is load-bearing, not hygiene. Render terminates TLS at its edge and
+# forwards, so without it every request appears to come from the edge IP — and
+# `judge/sessions.py` rate-limits new sessions per IP. One shared bucket means
+# MAX_SESSIONS_PER_IP_PER_HOUR stops being 8-per-judge and becomes 8-for-everyone: the
+# ninth judge of the hour is refused, and the limit protects nothing it was written to
+# protect. `--forwarded-allow-ips=*` is safe *here* because nothing reaches this container
+# except through Render's proxy; do not carry it to a directly-exposed deployment, where
+# it would let a caller spoof its own address.
+CMD ["sh", "-c", "uvicorn proxy.app:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*'"]

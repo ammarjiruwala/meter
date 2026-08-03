@@ -380,7 +380,7 @@ def test_treasurer_tick() -> None:
     seed("save", 4.0)
     spend("save", 8.00)
 
-    results = CLIENT.post("/treasury/tick").json()
+    results = CLIENT.post("/treasury/tick", headers=AUTH).json()
     mine = [r for r in results if r["decision"]["project_id"] == "save"][0]
     check("tick acted on the starved wallet", mine["acted"] is True)
     check("the top-up succeeded", mine["outcome"]["ok"] is True,
@@ -393,7 +393,7 @@ def test_treasurer_tick() -> None:
           "burn_usd_per_hour" in (ev["decision_inputs"] or ""))
     check("the settled row carries a prava transaction id", bool(ev["prava_txn_id"]))
 
-    results = CLIENT.post("/treasury/tick").json()
+    results = CLIENT.post("/treasury/tick", headers=AUTH).json()
     mine = [r for r in results if r["decision"]["project_id"] == "save"][0]
     check("does not top up again once healthy", mine["acted"] is False)
 
@@ -928,7 +928,7 @@ def test_integration_proxy_to_treasurer() -> None:
               f"runway={a['runway_hours']}h trigger={a['trigger']}")
 
         before = balances()["demo-project"]
-        results = CLIENT.post("/treasury/tick").json()
+        results = CLIENT.post("/treasury/tick", headers=AUTH).json()
         mine = [x for x in results
                 if x["decision"]["project_id"] == "demo-project"][0]
         check("the Treasurer acted", mine["acted"] is True)
@@ -959,6 +959,17 @@ def test_routes_present() -> None:
     # Folding the treasury onto the proxy must not have opened a hole in the metering path.
     r = CLIENT.post("/v1/chat/completions", json={"model": "gpt-4o", "messages": []})
     check("the proxy still rejects unauthenticated calls", r.status_code == 401)
+
+    # Every route that can move money refuses an anonymous caller. Asserted as a *set*
+    # rather than one-by-one because that is exactly how B19 happened: B18 authenticated a
+    # hand-written list, `/treasury/tick` was not on it, and the endpoint driving the whole
+    # charging loop stayed open for two days. A new money route added below is caught here
+    # the moment someone forgets the dependency.
+    for path in ("/wallets/seed", "/topup", "/charge", "/report", "/charge-refusal",
+                 "/mandates/create", "/mandates/sync", "/treasury/tick"):
+        rr = CLIENT.post(path)
+        check(f"{path} refuses an unauthenticated caller", rr.status_code == 401,
+              f"got {rr.status_code}")
 
 
 def test_cooldown_does_not_renew_itself() -> None:

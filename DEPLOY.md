@@ -151,7 +151,8 @@ the first thing a judge sees.
 **Run the Treasurer on demand** rather than waiting for its timer:
 
 ```bash
-curl -s -X POST https://<your-service>.onrender.com/treasury/tick | jq
+curl -s -X POST https://<your-service>.onrender.com/treasury/tick \
+  -H "Authorization: Bearer $METER_KEY" | jq
 ```
 
 **Optional:** a free uptime pinger (UptimeRobot and similar) hitting `/healthz` every 10
@@ -186,7 +187,9 @@ charge, and never on a host nobody is watching.
 
 **The treasury read routes are deliberately unauthenticated** (`PROPOSALS.md` B18
 authenticated the money moves only), so `/wallets`, `/mandates` and `/mock-openai/billing`
-are open. Fine for a demo, not for a permanent URL.
+are open. Fine for a demo, not for a permanent URL — and see `PROPOSALS.md` B19, which
+argues that judge tenants changed the stakes of that decision. `POST /treasury/tick` is
+**no longer** in that open set: it drives the charging loop and now requires a key.
 
 **Ship a `meter.yaml` ceiling.** A public proxy with no ceiling is exactly the
 unbounded-spend scenario this product exists to prevent.

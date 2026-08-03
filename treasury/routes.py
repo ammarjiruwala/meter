@@ -21,7 +21,7 @@ import logging
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from proxy import db as proxy_db
@@ -164,19 +164,33 @@ def treasury_assess(project_id: str = "demo-project", provider: str | None = Non
     return treasurer.assess(project_id, provider)
 
 
-@router.post("/treasury/tick", dependencies=[Depends(_no_body)])
+@router.post("/treasury/tick", dependencies=[Depends(_authed_key), Depends(_no_body)])
 async def treasury_tick():
     """Run one pass of the Treasurer immediately, across every wallet.
 
     The loop runs on `TREASURER_INTERVAL_S`, but a demo should not depend on a timer
     firing at the right moment in front of an audience. This is the same code path the
     loop runs, on demand.
+
+    **Authenticated**, and it was not until 2026-08-03. B18 decided "auth the money moves,
+    leave the reads open" and enumerated the write routes — this one was missed, which left
+    the single endpoint that drives the *entire* autonomous charging loop reachable by
+    anyone who could reach the port. It is a write by any reading of that decision: only
+    `TREASURER_DRY_RUN` defaulting true stood between an unauthenticated caller and a real
+    Prava charge. Applying the existing rule, not changing it.
     """
     return await treasurer.tick()
 
 
 @router.get("/treasury/events")
-def treasury_events(project_id: str = "demo-project", provider: str | None = None, limit: int = 20):
+def treasury_events(
+    project_id: str = "demo-project",
+    provider: str | None = None,
+    # Bounded. `limit` went straight into SQL's LIMIT, so `?limit=999999999` asked Postgres
+    # for the whole table and serialised it to JSON — one unauthenticated GET, and the only
+    # thing that kept it cheap was the table being small.
+    limit: int = Query(20, ge=1, le=200),
+):
     """Every top-up attempt for a wallet — backs the Agent Activity panel."""
     wallet_id = db.ensure_wallet(project_id, provider or config.TREASURER_PROVIDER)
     return db.recent_events(wallet_id, limit)

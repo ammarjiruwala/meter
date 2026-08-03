@@ -1,0 +1,19 @@
+# Dependencies for calibration and auditing — not needed to run the proxy.
+#
+#     pip install -r requirements.txt -r requirements-dev.txt
+#
+# Nothing here is imported on the request path. Keeping them out of requirements.txt is
+# what stops the deployed image carrying an OpenAI SDK it never calls and a vulnerability
+# scanner it only runs in CI.
+-r requirements.txt
+
+# Measures real prompt/completion ratios against the live OpenAI API.
+#   predictor/calibrate.py, predictor/measure.py,
+#   scripts/corpus_probe.py, scripts/templated_probe.py
+# All four import it lazily, inside the function that sends the request.
+openai>=1.0.0
+
+# Known-vulnerability scan over the installed set. CI runs this; pinned for the same
+# reason ruff is — a new advisory should be a decision, not a surprise red build on a
+# deadline.
+pip-audit==2.9.0

@@ -1707,6 +1707,43 @@ def test_ceiling_spend_one_round_trip() -> None:
         db.ceiling_spend = real
 
 
+def test_cors_preview_origins() -> None:
+    """Vercel preview URLs are allowed; the rest of vercel.app is not.
+
+    The regex here used to be `https://.*\\.vercel\\.app`. Anyone can deploy to vercel.app
+    in about a minute, so that matched an attacker's origin as readily as ours — the
+    wildcard the surrounding comment says it is avoiding. Starlette matches this with
+    `fullmatch`, which is what the last two cases below pin down: a suffix like
+    `notours.vercel.app.evil.com` must not pass, and neither must another project.
+    """
+    print("\ncors preview origins")
+    import re as _re
+
+    from proxy.app import _preview_origin_regex
+
+    pattern = _preview_origin_regex(
+        ["https://meter-three-beta.vercel.app", "http://localhost:3000"]
+    )
+    check("a regex is produced when a vercel origin is configured", pattern is not None)
+    rx = _re.compile(pattern)
+
+    def allows(origin: str) -> bool:
+        return bool(rx.fullmatch(origin))
+
+    check("the production origin matches", allows("https://meter-three-beta.vercel.app"))
+    check("our own preview deployment matches",
+          allows("https://meter-three-beta-git-shubh-abc123.vercel.app"))
+    check("an unrelated project does NOT match",
+          not allows("https://evil-attacker.vercel.app"),
+          "any vercel.app deployment could drive the judge API")
+    check("a lookalike suffix does NOT match",
+          not allows("https://meter-three-beta.vercel.app.evil.com"))
+    check("a lookalike prefix does NOT match",
+          not allows("https://evil-meter-three-beta.vercel.app"))
+    check("no regex when no vercel origin is configured",
+          _preview_origin_regex(["http://localhost:3000"]) is None)
+
+
 def main() -> int:
     try:
         return _run()
@@ -1722,6 +1759,7 @@ def main() -> int:
 
 def _run() -> int:
     for suite in (
+        test_cors_preview_origins,
         test_client_request_id,
         test_ceiling_spend_one_round_trip,
         test_soft_budget,

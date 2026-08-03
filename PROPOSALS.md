@@ -654,6 +654,80 @@ Two extras landed in the same pass, both audit findings:
 
 ---
 
+### B19 — B18's rule was applied to a list, not to a definition, and `/treasury/tick` fell outside it · **FIXED 2026-08-03; the wider question is OPEN**
+
+Found in the full-codebase audit (2026-08-03, runtime-verified against a running proxy).
+
+**The bug, fixed without asking, because it is B18's own rule and not a new one.** B18
+decided "authenticate the money moves, leave the reads open" and then enumerated the
+routes: `/wallets/seed`, `/topup`, `/charge`, `/report`, `/charge-refusal`.
+`POST /treasury/tick` is not on that list and was never authenticated — verified live,
+returns 200 with no credential. It runs `treasurer.tick()` across **every wallet**: the
+entire autonomous charging loop, on demand, for anyone who can reach the port. The only
+thing standing between an anonymous caller and a real Prava charge was
+`TREASURER_DRY_RUN` defaulting to true, which is a safety default, not an access control.
+Now carries `Depends(_authed_key)`.
+
+The lesson is the one worth writing down: B18 enumerated instead of defining, so a route
+added later inherited "read" by omission. If a route can move money, it is a write —
+regardless of which list it is on.
+
+**⚠ This fix is partial, and the gap is worth stating plainly.** `WALKTHROUGH.md` publishes
+a working Meter key (`mk_74e8…`, lines 14/67/135/153/159/227) on purpose, so a judge can
+drive the deployed proxy from a browser without being provisioned. That key now also
+satisfies `_authed_key` on `/treasury/tick`. So the route went from "anyone on the
+internet" to "anyone who read the walkthrough" — a real reduction in exposure, and not the
+one the word "authenticated" implies. Closing it properly needs something Meter does not
+have: **scopes on a key**, so the public demo key can reach `/v1` and nothing on the
+control plane. That is a design change, not a patch, so it is proposed rather than done.
+Until it exists, `TREASURER_DRY_RUN=true` remains the actual control on that endpoint, and
+it should be treated as such rather than as a default.
+
+**The open question, NOT actioned, because it reverses a decision a human made.** B18 says
+read-only treasury routes stay open. Verified still true: `/wallets`,
+`/treasury/assess`, `/treasury/events`, `/mandates/stored`, `/mandates/chargeable` all
+return 200 unauthenticated, and between them they disclose every project's balance, burn
+rate, mandate ids and remaining headroom — the complete financial position of every tenant,
+to anyone. That was defensible when the only tenant was `demo-project`. It is a different
+proposition now that `judge/` provisions tenants for strangers who bring their own cards,
+which did not exist when B18 was decided.
+
+Not changed unilaterally. Three options, in the order I would pick them:
+
+1. **Scope the reads to the caller's key** — same `_authed_key` dependency, filtered to its
+   project. Costs the unauthenticated demo curls in `SETUP.md` §440–499 and
+   `WALKTHROUGH.md` §127, which would each need a header.
+2. **Keep them open but redact cross-tenant rows** — public view shows `demo-project` only,
+   judge projects require the session. Preserves every existing curl.
+3. **Leave as-is** and accept it, with the judge-tenant exposure written down somewhere a
+   judge can see it.
+
+Owner: Shivam. Blocking nothing, but it should not ship to real customers unresolved.
+
+### B20 — The judge cookie is not `httpOnly`, and the comment justifying that understates what the token can do · OPEN
+
+`dashboard/src/lib/session.ts` sets `meter_judge_session` deliberately script-readable, and
+says why: the console also calls `/judge/*` cross-origin where cookies are not sent, so the
+browser needs to read the same value. That reasoning is sound and the alternative (storing
+it twice, keeping the copies in sync) is genuinely worse.
+
+**The stated cost is wrong, though.** The comment describes the risk as "a throwaway sandbox
+session with a call cap and a four-hour life". But `judge/sessions.py` keys the in-process
+credential vault by that same token, and `/judge/mandate` uses it to act with the judge's
+own Prava **merchant** key. So the token does not only read a sandbox — it authorises
+charges against a real card. That is a materially more expensive thing to leave readable by
+any script on the page, and the decision should be re-made knowing it rather than inherited
+from a comment that undersells it.
+
+Not changed unilaterally — the cross-origin constraint that drove the original decision is
+real, and splitting it is a design call. The cheapest fix if the team wants one: keep the
+readable cookie for reads, and require a second, `httpOnly` capability for the routes that
+touch money.
+
+Owner: Ammar.
+
+---
+
 ## C. Verification tasks
 Not design questions — things that are written down and might simply be wrong.
 
