@@ -94,6 +94,47 @@ export default async function TryPage() {
           </div>
         </div>
 
+        {/* An empty Control Room is the correct initial state and looks exactly like a
+            broken one. A judge who lands here with no context has to be told, before
+            they read anything else, that the blank cards are waiting for them rather
+            than failing — and given one obvious action that fills them. */}
+        {judge.callsUsed < 3 && (
+          <div
+            className="mb-[24px] flex flex-wrap items-center justify-between gap-[16px] rounded-[10px] p-[20px]"
+            style={{
+              background: "var(--color-surface-2)",
+              borderLeft: "3px solid var(--color-accent)",
+            }}
+          >
+            <div className="max-w-[62ch]">
+              <div
+                className="text-[15px] font-semibold"
+                style={{ color: "var(--color-text-primary)" }}
+              >
+                {judge.callsUsed === 0
+                  ? "This is your own Control Room, and it starts empty. That is correct."
+                  : `${judge.callsUsed} of 3 prompts run — keep going and the cards below fill in.`}
+              </div>
+              <div
+                className="mt-[6px] text-[13px]"
+                style={{ color: "var(--color-text-secondary)" }}
+              >
+                Every panel here is the real dashboard, showing only your session. Run the
+                three prompts in the Console below — about 90 seconds — and the spend,
+                budgets, accuracy and ledger populate as you go.{" "}
+                <a href="/dashboard" className="underline">
+                  See the team&rsquo;s dashboard
+                </a>{" "}
+                for what it looks like after 1,300 calls.
+              </div>
+            </div>
+            <a href="#console" className="judge-cta">
+              <span className="judge-cta-dot" aria-hidden />
+              Start with prompt 1
+            </a>
+          </div>
+        )}
+
         {!ledgerAvailable && (
           <div className="glass mb-[20px] p-[20px]">
             <p className="t-body text-text-primary">
@@ -112,7 +153,10 @@ export default async function TryPage() {
         </div>
 
         <div className="mb-[24px]">
-          <AgentLog initialEvents={treasuryEvents} />
+          <AgentLog
+            initialEvents={treasuryEvents}
+            emptyHint="Empty because your agent has not needed to act yet — it writes a row only when it decides to spend. Scroll to “The agent pays its own bill” below, press Check the runway, and its decision appears here."
+          />
         </div>
 
         {/* The one thing this page has that `/dashboard` does not, and it sits here on
@@ -120,7 +164,7 @@ export default async function TryPage() {
             above the ledger every call it makes lands in. Both of those are visible
             while you use it, which is the point — the console is not a separate screen,
             it is a control on the dashboard. */}
-        <div className="mb-[24px]">
+        <div id="console" className="mb-[24px] scroll-mt-[100px]">
           <JudgeConsole session={judge} />
         </div>
 
