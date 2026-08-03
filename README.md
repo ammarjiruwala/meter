@@ -10,6 +10,27 @@ Existing observability tools show you the graph. Meter can act on it, because Me
 
 ---
 
+## See it running — nothing to install
+
+| | |
+| --- | --- |
+| **▶ Try it yourself** | **https://meter-three-beta.vercel.app/try** — your own private session, your own keys, ~10 minutes |
+| **Live dashboard** | https://meter-three-beta.vercel.app/dashboard — 1,300 real calls, live |
+| **How the predictor works** | https://meter-three-beta.vercel.app/how-it-works |
+| **API** | https://meter-proxy.onrender.com |
+
+**Start with "Try it yourself."** You get your own Control Room — the same dashboard the team
+uses, showing only your session. Run three templated prompts and watch the cost get predicted
+*before* each call runs, a runaway feature get throttled while everything else keeps serving, and
+an agent top up its own balance against a payment mandate. Name and email are the only required
+fields; a provider key, a Prava merchant key and a Linq key are each optional and each unlock one
+more step.
+
+Prefer a terminal? [WALKTHROUGH.md](WALKTHROUGH.md) does the same thing with `curl`.
+Want to run the whole stack yourself? [SETUP.md](SETUP.md).
+
+---
+
 ## Why
 
 Inference is the second-largest line on most AI startups' P&L, behind payroll. It is also the only
