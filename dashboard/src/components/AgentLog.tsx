@@ -154,7 +154,18 @@ function linesFor(e: TreasuryEvent): Line[] {
   return lines;
 }
 
-export function AgentLog({ initialEvents }: { initialEvents: TreasuryEvent[] }) {
+export function AgentLog({
+  initialEvents,
+  emptyHint,
+}: {
+  initialEvents: TreasuryEvent[];
+  /**
+   * Override for the empty state. The default names `TREASURER_ENABLED`, which is the
+   * right answer for a teammate reading their own deployment and meaningless to a judge
+   * who has never seen an environment variable of ours.
+   */
+  emptyHint?: string;
+}) {
   // Polls only while the tab is visible, backs off when the feed stops changing, and
   // stops entirely once idle. See `usePoll` — an unconditional setInterval here was
   // 1,200 requests an hour from a tab nobody was looking at.
@@ -189,10 +200,14 @@ export function AgentLog({ initialEvents }: { initialEvents: TreasuryEvent[] }) 
           // No fabricated heartbeat. If the loop has not acted there is genuinely
           // nothing to show, and saying so is more convincing than a fake feed.
           <p className="t-cell text-text-secondary">
-            No top-up attempts recorded. The Treasurer writes an event only when it
-            decides to act, so this stays empty while balances are healthy — and
-            while the loop is off (
-            <span className="text-text-primary">TREASURER_ENABLED</span>).
+            {emptyHint ?? (
+              <>
+                No top-up attempts recorded. The Treasurer writes an event only when it
+                decides to act, so this stays empty while balances are healthy — and
+                while the loop is off (
+                <span className="text-text-primary">TREASURER_ENABLED</span>).
+              </>
+            )}
           </p>
         ) : (
           <div
