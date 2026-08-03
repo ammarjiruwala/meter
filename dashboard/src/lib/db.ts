@@ -628,6 +628,8 @@ export type HeadlineMetrics = {
   runway_provider: string | null;
   runway_trigger_hours: number;
   burn_usd_per_hour: number;
+  /** Which trailing window the burn rate was measured over, so the card can say so. */
+  burn_basis_s: number | null;
 };
 
 /**
@@ -658,12 +660,11 @@ export async function getHeadlineMetrics(scope: Scope = null): Promise<HeadlineM
     runway_provider: null,
     runway_trigger_hours: RUNWAY_TRIGGER_HOURS,
     burn_usd_per_hour: 0,
+    burn_basis_s: null,
   };
   if (!(await tableExists("requests"))) return empty;
 
   const cutoff = isoSecondsAgo(BUDGET_WINDOW_S);
-  const prevCutoff = isoSecondsAgo(BUDGET_WINDOW_S * 2);
-  const burnCutoff = isoSecondsAgo(BURN_WINDOW_S);
 
   const [hasProjects, hasWallets] = await Promise.all([
     tableExists("projects"),
@@ -671,17 +672,27 @@ export async function getHeadlineMetrics(scope: Scope = null): Promise<HeadlineM
   ]);
 
   const [windowRows, prevRows, ceilingRows, walletRows] = await Promise.all([
+    // All time, not a rolling window.
+    //
+    // The hero number used to be "last 24h", which is the right frame for an operations
+    // screen watched during a working day and the wrong one for a page a stranger opens
+    // whenever they happen to. Judging here runs for two weeks: any rolling window empties
+    // overnight and the first number on the page becomes $0.00, which reads as a product
+    // nobody uses rather than as a quiet Tuesday.
+    //
+    // The budget bar below still uses the real 24h window, because that one IS the ceiling
+    // and "0% of today" is a true thing to say. Only the summary widened.
     query<{ spend: number; requests: number }>(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend, COUNT(*) AS requests
-         FROM requests WHERE ts >= $1 AND ${scoped(scope, 2).sql}`,
-      [cutoff, ...scoped(scope, 2).params],
+         FROM requests WHERE ${scoped(scope, 1).sql}`,
+      scoped(scope, 1).params,
     ),
-    // The window *before* this one — bounded on both sides, or it would include
-    // the current window too and the delta would always read flat.
+    // Kept as the trailing 24h figure the budget bar reports against, not as a delta:
+    // there is no "previous window" to compare an all-time total to.
     query<{ spend: number }>(
       `SELECT COALESCE(SUM(cost_usd), 0) AS spend
-         FROM requests WHERE ts >= $1 AND ts < $2 AND ${scoped(scope, 3).sql}`,
-      [prevCutoff, cutoff, ...scoped(scope, 3).params],
+         FROM requests WHERE ts >= $1 AND ${scoped(scope, 2).sql}`,
+      [cutoff, ...scoped(scope, 2).params],
     ),
     hasProjects
       ? query<{ project_id: string; ceiling_usd_day: number }>(
@@ -727,37 +738,60 @@ export async function getHeadlineMetrics(scope: Scope = null): Promise<HeadlineM
   // the same project were asking the same question twice, and the loop awaited
   // serially — cheap today at one wallet, but it is the shape that turns into a
   // stall the moment the treasury has a few.
-  const burnBy = new Map<string, number>();
-  if (walletRows.length > 0) {
-    const burnRows = await query<{ project_id: string; spend: number }>(
-      `SELECT project_id, COALESCE(SUM(cost_usd), 0) AS spend
-         FROM requests WHERE project_id = ANY($1) AND ts >= $2
-        GROUP BY project_id`,
-      [[...new Set(walletRows.map((w) => w.project_id))], burnCutoff],
-    );
-    for (const r of burnRows) burnBy.set(r.project_id, num(r.spend));
-  }
+  // Burn is measured over the shortest of these that has any spend in it.
+  //
+  // A one-hour window is the right basis for the Treasurer, which has to react quickly,
+  // and the wrong one for a card someone reads days later: an hour with no traffic makes
+  // burn zero, and zero burn is infinite runway, so the card goes blank within sixty
+  // minutes of the last call. That is honest and useless — a dashboard that reads "—"
+  // for most of its life is not reporting anything.
+  //
+  // So it widens until it finds spend, and reports which window it used so the card can
+  // say "at the 3-day average" rather than implying it measured the last hour. The
+  // Treasurer's own trigger is untouched and still uses TREASURER_BURN_WINDOW_S: this is
+  // a reading, not a decision about money.
+  const BURN_FALLBACKS = [BURN_WINDOW_S, 86_400, 3 * 86_400, 7 * 86_400];
 
   let runwayHours: number | null = null;
   let runwayProvider: string | null = null;
   let burnRate = 0;
-  const windowHours = BURN_WINDOW_S / 3600;
-  for (const w of walletRows) {
-    const perHour =
-      windowHours > 0 ? (burnBy.get(w.project_id) ?? 0) / windowHours : 0;
-    if (perHour <= 0) continue; // No burn is infinite runway, not zero.
-    const hours = num(w.balance_usd) / perHour;
-    if (runwayHours === null || hours < runwayHours) {
-      runwayHours = hours;
-      runwayProvider = w.provider;
-      burnRate = perHour;
+  let burnBasisS: number | null = null;
+
+  if (walletRows.length > 0) {
+    const projectIds = [...new Set(walletRows.map((w) => w.project_id))];
+    for (const windowS of BURN_FALLBACKS) {
+      const burnRows = await query<{ project_id: string; spend: number }>(
+        `SELECT project_id, COALESCE(SUM(cost_usd), 0) AS spend
+           FROM requests WHERE project_id = ANY($1) AND ts >= $2
+          GROUP BY project_id`,
+        [projectIds, isoSecondsAgo(windowS)],
+      );
+      const burnBy = new Map(burnRows.map((r) => [r.project_id, num(r.spend)]));
+      const windowHours = windowS / 3600;
+
+      for (const w of walletRows) {
+        const perHour = (burnBy.get(w.project_id) ?? 0) / windowHours;
+        if (perHour <= 0) continue; // No burn is infinite runway, not zero.
+        const hours = num(w.balance_usd) / perHour;
+        if (runwayHours === null || hours < runwayHours) {
+          runwayHours = hours;
+          runwayProvider = w.provider;
+          burnRate = perHour;
+          burnBasisS = windowS;
+        }
+      }
+      // The first window with spend wins. Widening further would average real burn
+      // against quiet time and understate it.
+      if (runwayHours !== null) break;
     }
   }
 
   return {
     spend_window_usd: spend,
     spend_prev_window_usd: prevSpend,
-    spend_delta: prevSpend > 0 ? (spend - prevSpend) / prevSpend : null,
+    // No delta against an all-time total. The card shows the request count instead,
+    // which is a fact rather than a comparison that cannot be made.
+    spend_delta: null,
     request_count_window: num(windowRows[0]?.requests),
     budget_ceiling_usd: budgetCeiling,
     budget_spend_usd: budgetSpend,
@@ -765,6 +799,7 @@ export async function getHeadlineMetrics(scope: Scope = null): Promise<HeadlineM
     runway_provider: runwayProvider,
     runway_trigger_hours: RUNWAY_TRIGGER_HOURS,
     burn_usd_per_hour: burnRate,
+    burn_basis_s: burnBasisS,
   };
 }
 

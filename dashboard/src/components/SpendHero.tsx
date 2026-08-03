@@ -31,12 +31,14 @@ export function SpendHero({
   const {
     spend_window_usd,
     spend_delta,
+    request_count_window,
     budget_ceiling_usd,
     budget_spend_usd,
     runway_hours,
     runway_provider,
     runway_trigger_hours,
     burn_usd_per_hour,
+    burn_basis_s,
   } = metrics;
 
   const left =
@@ -60,21 +62,34 @@ export function SpendHero({
         [...wallets].sort((a, b) => a.balance_usd - b.balance_usd)[0]
       : null;
 
+  // Named, because a runway quoted from a 3-day average is not a claim about the last
+  // hour and the card should not imply otherwise.
+  const burnBasis =
+    burn_basis_s === null
+      ? ""
+      : burn_basis_s <= 3600
+        ? "hourly"
+        : burn_basis_s <= 86_400
+          ? "24-hour"
+          : `${Math.round(burn_basis_s / 86_400)}-day`;
+
   const runwayCritical =
     runway_hours !== null && runway_hours < runway_trigger_hours;
 
   return (
     <div className="grid grid-cols-2 gap-[16px] lg:grid-cols-4">
       <MetricCard
-        label="Spend · last 24h"
+        label="Spend · all time"
         value={formatUsdHeadline(spend_window_usd)}
         accent
         delay="delay-1"
         sub={
           spend_delta === null ? (
-            // No prior window to compare against. "+100%" off an empty baseline
-            // would invent a trend.
-            "No prior window to compare"
+            // All-time has no previous window to compare against, so the card states a
+            // fact instead of inventing a trend from an empty baseline.
+            `across ${request_count_window.toLocaleString()} request${
+              request_count_window === 1 ? "" : "s"
+            }`
           ) : (
             <>
               <span
@@ -129,8 +144,8 @@ export function SpendHero({
         tone={runwayCritical ? "bad" : undefined}
         sub={
           runway_hours === null
-            ? "No burn in the last hour"
-            : `${formatUsd(burn_usd_per_hour)}/hr burn · tops up under ${hours(
+            ? "No spend recorded to measure burn from"
+            : `${formatUsd(burn_usd_per_hour)}/hr at the ${burnBasis} average · tops up under ${hours(
                 runway_trigger_hours,
               )}`
         }
