@@ -67,27 +67,11 @@ export function Home() {
   // The CTAs are plain <a> (not next/link) on purpose: a native navigation starts the
   // real dashboard render immediately with no Next router in the way — no soft-nav, no
   // loading.tsx flash. We DON'T preventDefault; the browser keeps this page painted
-  // through the render and swaps in the dashboard when it's ready. The meter is a
-  // cosmetic fill — a hard nav gives no real progress signal, so we ease it toward 99.9
-  // and hold there; the true "done" is the browser replacing this page.
+  // through the render and swaps in the dashboard when it's ready — so the overlay
+  // needs no "done" state. ponytail: just a centered "Loading…", no progress to fake.
   const [openingDashboard, setOpeningDashboard] = useState(false);
-  const [meterPct, setMeterPct] = useState(0);
 
-  const openDashboard = useCallback(() => {
-    setOpeningDashboard(true);
-    setMeterPct(0);
-    const start = performance.now();
-    const FILL_MS = 5000; // roughly the dashboard's server render
-    const tick = () => {
-      const t = Math.min(1, (performance.now() - start) / FILL_MS);
-      const eased = 1 - Math.pow(1 - t, 2.2); // sprint early, crawl the last bit
-      setMeterPct(Math.min(99.9, eased * 100));
-      if (t < 1) requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
-  }, []);
-
-  const meterDone = meterPct >= 99.5;
+  const openDashboard = useCallback(() => setOpeningDashboard(true), []);
 
   // The hero waits on the intro's event. The scroll hint comes 400ms after the
   // wordmark, matching the design's two-stage landing.
@@ -200,20 +184,8 @@ export function Home() {
       <Intro />
 
       {openingDashboard && (
-        <div className="meter-load" role="status" aria-live="polite" aria-busy={!meterDone}>
-          <div className="meter-load__inner">
-            <div className="meter-load__wordmark">
-              <span className="meter-load__dot" />
-              METER
-            </div>
-            <div className="meter-load__gauge">
-              <div className="meter-load__fill" style={{ width: `${meterPct}%` }} />
-            </div>
-            <div className="meter-load__pct">{meterPct.toFixed(2)}%</div>
-            <div className="meter-load__label">
-              {meterDone ? "Meter loaded completely" : "of the meter loaded"}
-            </div>
-          </div>
+        <div className="meter-load" role="status" aria-live="polite" aria-busy="true">
+          <div className="meter-load__label">Loading…</div>
         </div>
       )}
 
