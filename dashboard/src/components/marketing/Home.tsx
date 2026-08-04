@@ -1,6 +1,6 @@
 "use client";
 
-import { type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Intro } from "./Intro";
 import { STEPS, CODE } from "./usage-content";
@@ -63,47 +63,29 @@ export function Home() {
   const [slideProgress, setSlideProgress] = useState(0);
   const [step, setStep] = useState(0);
   const [copied, setCopied] = useState<string | null>(null);
-  // Home and the dashboard are separate root layouts. Letting <Link> handle this
-  // flickers: Next first tries a soft nav (flashing the dashboard's loading.tsx),
-  // then discovers the root-layout boundary and does a full reload. So we take full
-  // control instead — preventDefault, drive REAL progress off `/api/dashboard-progress`
-  // (which runs the same ten queries the dashboard awaits and streams a line as each
-  // actually resolves), and do the hard navigation ourselves only once the meter is
-  // full. The warmup primes the pg pool, so that final navigation is fast, not a
-  // second render from cold. `meterPct` eases toward the true `meterTarget` fraction
-  // each frame purely for a smooth number; it never advances unless a real query did.
+  // Home and the dashboard are separate root layouts, so this is a full document load.
+  // The CTAs are plain <a> (not next/link) on purpose: a native navigation starts the
+  // real dashboard render immediately with no Next router in the way — no soft-nav, no
+  // loading.tsx flash. We DON'T preventDefault; the browser keeps this page painted
+  // through the ~5s render, and we just fill the meter in parallel off REAL progress:
+  // `/api/dashboard-progress` runs the same ten queries the dashboard awaits and
+  // streams a line as each actually resolves. Both run concurrently, so no added wait.
+  // `meterPct` eases toward the true `meterTarget` fraction each frame purely for a
+  // smooth number; it never advances unless a real query has finished.
   const [openingDashboard, setOpeningDashboard] = useState(false);
   const [meterPct, setMeterPct] = useState(0);
   const meterTarget = useRef(0);
-  const navigated = useRef(false);
 
-  const openDashboard = useCallback((e: MouseEvent) => {
-    e.preventDefault();
-    if (navigated.current) return;
+  const openDashboard = useCallback(() => {
     setOpeningDashboard(true);
     setMeterPct(0);
     meterTarget.current = 0;
 
-    const go = () => {
-      if (navigated.current) return;
-      navigated.current = true;
-      window.location.href = "/dashboard";
-    };
-
-    // Smooth the display toward whatever real fraction has been reached. Once the meter
-    // has visually caught up to a full target, do the real navigation.
     const ease = () => {
-      setMeterPct((cur) => {
-        const next = cur + (meterTarget.current - cur) * 0.18;
-        if (meterTarget.current >= 100 && next >= 99.5) go();
-        return next;
-      });
-      if (!navigated.current) requestAnimationFrame(ease);
+      setMeterPct((cur) => cur + (meterTarget.current - cur) * 0.18);
+      requestAnimationFrame(ease); // stops when the browser swaps in the dashboard
     };
     requestAnimationFrame(ease);
-
-    // Safety net: never trap the user on the loader if the warmup hangs.
-    const failsafe = setTimeout(go, 15000);
 
     (async () => {
       try {
@@ -129,9 +111,7 @@ export function Home() {
         }
         meterTarget.current = 100;
       } catch {
-        meterTarget.current = 100; // warmup unreachable — fill and go
-      } finally {
-        clearTimeout(failsafe);
+        meterTarget.current = 100; // warmup unreachable — the native nav still lands us
       }
     })();
   }, []);
@@ -288,9 +268,10 @@ export function Home() {
             </Link>
             {/* Next turns this into a full page load by itself — the dashboard is a
                 separate root layout — which is what we want: no stylesheet crosses. */}
-            <Link href="/dashboard" className="glass-cta" onClick={openDashboard}>
+            {/* Plain <a>: native hard nav, no Next soft-nav flicker. See openDashboard. */}
+            <a href="/dashboard" className="glass-cta" onClick={openDashboard}>
               Open dashboard <span className="arr">→</span>
-            </Link>
+            </a>
           </nav>
         </div>
       </div>
@@ -579,9 +560,10 @@ export function Home() {
               Meter is live for select teams. Point your first request at us today
               and see exactly where the money goes.
             </p>
-            <Link href="/dashboard" className="hero-cta" onClick={openDashboard}>
+            {/* Plain <a>: native hard nav, no Next soft-nav flicker. See openDashboard. */}
+            <a href="/dashboard" className="hero-cta" onClick={openDashboard}>
               Open dashboard <span className="arr">→</span>
-            </Link>
+            </a>
           </div>
         </section>
 
