@@ -65,9 +65,60 @@ export function Home() {
   const [copied, setCopied] = useState<string | null>(null);
   // Home and the dashboard are separate root layouts, so "Open dashboard" is a full
   // document load, not a soft nav — the dashboard's own loading.tsx never gets to
-  // paint. The browser keeps *this* page on screen through the ~5s server render, so
-  // we show the loader here, on click, and let it ride until the new document swaps in.
+  // paint, and a hard nav gives the browser no progress signal. So we drive REAL
+  // progress off `/api/dashboard-progress`, which runs the same ten queries the
+  // dashboard awaits and streams one line as each one actually resolves. `meterTarget`
+  // is that true fraction; `meterPct` eases toward it each frame only so the number
+  // ticks smoothly — it never moves unless a real query has finished. When the stream
+  // ends we navigate ourselves rather than relying on the <Link>.
   const [openingDashboard, setOpeningDashboard] = useState(false);
+  const [meterPct, setMeterPct] = useState(0);
+  const meterTarget = useRef(0);
+
+  const openDashboard = useCallback(() => {
+    // Do NOT preventDefault: the <Link> starts the real hard navigation now, and the
+    // dashboard's own server render runs the same ten queries in parallel with the
+    // fetch below. Same queries, same latency, so they finish together — the browser
+    // swaps in the page right around when the meter fills. No extra wait, real bar.
+    setOpeningDashboard(true);
+    setMeterPct(0);
+    meterTarget.current = 0;
+
+    // Smooth the display toward whatever real fraction has been reached.
+    const ease = () => {
+      setMeterPct((cur) => cur + (meterTarget.current - cur) * 0.18);
+      requestAnimationFrame(ease);
+    };
+    requestAnimationFrame(ease);
+
+    (async () => {
+      try {
+        const res = await fetch("/api/dashboard-progress", { cache: "no-store" });
+        const reader = res.body?.getReader();
+        if (!reader) return;
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+          const last = lines.filter(Boolean).pop(); // "<done>/<total>"
+          if (last) {
+            const [d, t] = last.split("/").map(Number);
+            if (t) meterTarget.current = (d / t) * 100;
+          }
+        }
+      } catch {
+        // Warmup unreachable — the browser's own navigation is still in flight and
+        // will swap the page in regardless. Fill the bar so it doesn't sit half-done.
+        meterTarget.current = 100;
+      }
+    })();
+  }, []);
+
+  const meterDone = meterPct >= 99.5;
 
   // The hero waits on the intro's event. The scroll hint comes 400ms after the
   // wordmark, matching the design's two-stage landing.
@@ -180,9 +231,20 @@ export function Home() {
       <Intro />
 
       {openingDashboard && (
-        <div className="dash-loading" role="status" aria-live="polite">
-          <div className="dash-loading__bar" />
-          <span className="dash-loading__label">Opening dashboard…</span>
+        <div className="meter-load" role="status" aria-live="polite" aria-busy={!meterDone}>
+          <div className="meter-load__inner">
+            <div className="meter-load__wordmark">
+              <span className="meter-load__dot" />
+              METER
+            </div>
+            <div className="meter-load__gauge">
+              <div className="meter-load__fill" style={{ width: `${meterPct}%` }} />
+            </div>
+            <div className="meter-load__pct">{meterPct.toFixed(2)}%</div>
+            <div className="meter-load__label">
+              {meterDone ? "Meter loaded completely" : "of the meter loaded"}
+            </div>
+          </div>
         </div>
       )}
 
@@ -208,7 +270,7 @@ export function Home() {
             </Link>
             {/* Next turns this into a full page load by itself — the dashboard is a
                 separate root layout — which is what we want: no stylesheet crosses. */}
-            <Link href="/dashboard" className="glass-cta" onClick={() => setOpeningDashboard(true)}>
+            <Link href="/dashboard" className="glass-cta" onClick={openDashboard}>
               Open dashboard <span className="arr">→</span>
             </Link>
           </nav>
@@ -499,7 +561,7 @@ export function Home() {
               Meter is live for select teams. Point your first request at us today
               and see exactly where the money goes.
             </p>
-            <Link href="/dashboard" className="hero-cta" onClick={() => setOpeningDashboard(true)}>
+            <Link href="/dashboard" className="hero-cta" onClick={openDashboard}>
               Open dashboard <span className="arr">→</span>
             </Link>
           </div>
