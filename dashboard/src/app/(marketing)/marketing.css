@@ -801,3 +801,48 @@
   .reveal.d1 { transition-delay: 80ms; } .reveal.d2 { transition-delay: 160ms; } .reveal.d3 { transition-delay: 240ms; } .reveal.d4 { transition-delay: 320ms; }
 
   a:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
+
+/* "Opening dashboard…" loader. Home and the dashboard are separate root layouts, so
+   the click is a full document load: this stays painted on the old page until the new
+   one is ready. Fixed full-screen so it reads no matter where the clicked CTA sat. */
+.dash-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.1rem;
+  background: rgba(8, 8, 12, 0.82);
+  backdrop-filter: blur(6px);
+}
+.dash-loading__bar {
+  width: min(280px, 62vw);
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  position: relative;
+}
+.dash-loading__bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: 999px;
+  background: var(--signal);
+  animation: dash-loading-slide 1.1s ease-in-out infinite;
+}
+.dash-loading__label {
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+}
+@keyframes dash-loading-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dash-loading__bar::after { animation: none; width: 100%; opacity: 0.55; }
+}

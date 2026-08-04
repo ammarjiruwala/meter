@@ -63,6 +63,11 @@ export function Home() {
   const [slideProgress, setSlideProgress] = useState(0);
   const [step, setStep] = useState(0);
   const [copied, setCopied] = useState<string | null>(null);
+  // Home and the dashboard are separate root layouts, so "Open dashboard" is a full
+  // document load, not a soft nav — the dashboard's own loading.tsx never gets to
+  // paint. The browser keeps *this* page on screen through the ~5s server render, so
+  // we show the loader here, on click, and let it ride until the new document swaps in.
+  const [openingDashboard, setOpeningDashboard] = useState(false);
 
   // The hero waits on the intro's event. The scroll hint comes 400ms after the
   // wordmark, matching the design's two-stage landing.
@@ -174,6 +179,13 @@ export function Home() {
     <>
       <Intro />
 
+      {openingDashboard && (
+        <div className="dash-loading" role="status" aria-live="polite">
+          <div className="dash-loading__bar" />
+          <span className="dash-loading__label">Opening dashboard…</span>
+        </div>
+      )}
+
       <div className="progress" style={{ width: `${progress}%` }} />
 
       <div className={`topbar${scrolled ? " scrolled" : ""}`}>
@@ -196,7 +208,7 @@ export function Home() {
             </Link>
             {/* Next turns this into a full page load by itself — the dashboard is a
                 separate root layout — which is what we want: no stylesheet crosses. */}
-            <Link href="/dashboard" className="glass-cta">
+            <Link href="/dashboard" className="glass-cta" onClick={() => setOpeningDashboard(true)}>
               Open dashboard <span className="arr">→</span>
             </Link>
           </nav>
@@ -487,7 +499,7 @@ export function Home() {
               Meter is live for select teams. Point your first request at us today
               and see exactly where the money goes.
             </p>
-            <Link href="/dashboard" className="hero-cta">
+            <Link href="/dashboard" className="hero-cta" onClick={() => setOpeningDashboard(true)}>
               Open dashboard <span className="arr">→</span>
             </Link>
           </div>

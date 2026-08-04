@@ -840,3 +840,45 @@ body {
   background: var(--color-obsidian);
   opacity: 0.55;
 }
+
+/* Route-transition loader: the dashboard's server render is a handful of network
+   round trips to a hosted ledger, so navigation from home stalls for a few seconds.
+   loading.tsx renders this instantly; Next replaces it when the page resolves. */
+.route-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  min-height: 60vh;
+  padding: 2rem;
+}
+.route-loading__bar {
+  width: min(260px, 60vw);
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  position: relative;
+}
+.route-loading__bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  border-radius: 999px;
+  background: var(--color-accent);
+  animation: route-loading-slide 1.1s ease-in-out infinite;
+}
+.route-loading__label {
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+  color: var(--color-text-tertiary);
+}
+@keyframes route-loading-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .route-loading__bar::after { animation: none; width: 100%; opacity: 0.5; }
+}
