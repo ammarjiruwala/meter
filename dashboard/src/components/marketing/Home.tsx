@@ -67,53 +67,24 @@ export function Home() {
   // The CTAs are plain <a> (not next/link) on purpose: a native navigation starts the
   // real dashboard render immediately with no Next router in the way — no soft-nav, no
   // loading.tsx flash. We DON'T preventDefault; the browser keeps this page painted
-  // through the ~5s render, and we just fill the meter in parallel off REAL progress:
-  // `/api/dashboard-progress` runs the same ten queries the dashboard awaits and
-  // streams a line as each actually resolves. Both run concurrently, so no added wait.
-  // `meterPct` eases toward the true `meterTarget` fraction each frame purely for a
-  // smooth number; it never advances unless a real query has finished.
+  // through the render and swaps in the dashboard when it's ready. The meter is a
+  // cosmetic fill — a hard nav gives no real progress signal, so we ease it toward 99.9
+  // and hold there; the true "done" is the browser replacing this page.
   const [openingDashboard, setOpeningDashboard] = useState(false);
   const [meterPct, setMeterPct] = useState(0);
-  const meterTarget = useRef(0);
 
   const openDashboard = useCallback(() => {
     setOpeningDashboard(true);
     setMeterPct(0);
-    meterTarget.current = 0;
-
-    const ease = () => {
-      setMeterPct((cur) => cur + (meterTarget.current - cur) * 0.18);
-      requestAnimationFrame(ease); // stops when the browser swaps in the dashboard
+    const start = performance.now();
+    const FILL_MS = 5000; // roughly the dashboard's server render
+    const tick = () => {
+      const t = Math.min(1, (performance.now() - start) / FILL_MS);
+      const eased = 1 - Math.pow(1 - t, 2.2); // sprint early, crawl the last bit
+      setMeterPct(Math.min(99.9, eased * 100));
+      if (t < 1) requestAnimationFrame(tick);
     };
-    requestAnimationFrame(ease);
-
-    (async () => {
-      try {
-        const res = await fetch("/api/dashboard-progress", { cache: "no-store" });
-        const reader = res.body?.getReader();
-        if (!reader) {
-          meterTarget.current = 100;
-          return;
-        }
-        const dec = new TextDecoder();
-        let buf = "";
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buf += dec.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop() ?? "";
-          const last = lines.filter(Boolean).pop(); // "<done>/<total>"
-          if (last) {
-            const [d, t] = last.split("/").map(Number);
-            if (t) meterTarget.current = (d / t) * 100;
-          }
-        }
-        meterTarget.current = 100;
-      } catch {
-        meterTarget.current = 100; // warmup unreachable — the native nav still lands us
-      }
-    })();
+    requestAnimationFrame(tick);
   }, []);
 
   const meterDone = meterPct >= 99.5;
