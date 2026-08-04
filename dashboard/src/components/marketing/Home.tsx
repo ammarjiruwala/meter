@@ -63,6 +63,15 @@ export function Home() {
   const [slideProgress, setSlideProgress] = useState(0);
   const [step, setStep] = useState(0);
   const [copied, setCopied] = useState<string | null>(null);
+  // Home and the dashboard are separate root layouts, so this is a full document load.
+  // The CTAs are plain <a> (not next/link) on purpose: a native navigation starts the
+  // real dashboard render immediately with no Next router in the way — no soft-nav, no
+  // loading.tsx flash. We DON'T preventDefault; the browser keeps this page painted
+  // through the render and swaps in the dashboard when it's ready — so the overlay
+  // needs no "done" state. ponytail: just a centered "Loading…", no progress to fake.
+  const [openingDashboard, setOpeningDashboard] = useState(false);
+
+  const openDashboard = useCallback(() => setOpeningDashboard(true), []);
 
   // The hero waits on the intro's event. The scroll hint comes 400ms after the
   // wordmark, matching the design's two-stage landing.
@@ -174,6 +183,12 @@ export function Home() {
     <>
       <Intro />
 
+      {openingDashboard && (
+        <div className="meter-load" role="status" aria-live="polite" aria-busy="true">
+          <div className="meter-load__label">Loading…</div>
+        </div>
+      )}
+
       <div className="progress" style={{ width: `${progress}%` }} />
 
       <div className={`topbar${scrolled ? " scrolled" : ""}`}>
@@ -196,9 +211,10 @@ export function Home() {
             </Link>
             {/* Next turns this into a full page load by itself — the dashboard is a
                 separate root layout — which is what we want: no stylesheet crosses. */}
-            <Link href="/dashboard" className="glass-cta">
+            {/* Plain <a>: native hard nav, no Next soft-nav flicker. See openDashboard. */}
+            <a href="/dashboard" className="glass-cta" onClick={openDashboard}>
               Open dashboard <span className="arr">→</span>
-            </Link>
+            </a>
           </nav>
         </div>
       </div>
@@ -487,9 +503,10 @@ export function Home() {
               Meter is live for select teams. Point your first request at us today
               and see exactly where the money goes.
             </p>
-            <Link href="/dashboard" className="hero-cta">
+            {/* Plain <a>: native hard nav, no Next soft-nav flicker. See openDashboard. */}
+            <a href="/dashboard" className="hero-cta" onClick={openDashboard}>
               Open dashboard <span className="arr">→</span>
-            </Link>
+            </a>
           </div>
         </section>
 
