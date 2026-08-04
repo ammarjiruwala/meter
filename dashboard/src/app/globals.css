@@ -840,3 +840,88 @@ body {
   background: var(--color-obsidian);
   opacity: 0.55;
 }
+
+/* ── The one-metre loading rule ──────────────────────────────────────────────
+   Drawn as a ruler because the product is called Meter. Pure CSS: the loading
+   state has to paint on the first frame, and anything waiting on hydration would
+   defeat the point of having one. */
+
+.meter-rule {
+  position: relative;
+  padding: 8px 0 4px;
+}
+
+/* Graduations. 101 spans laid out evenly, so a tick sits at every centimetre and
+   the labelled ones line up with the numerals underneath. */
+.meter-rule-ticks {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  height: 22px;
+  margin-bottom: 6px;
+}
+.meter-tick {
+  width: 1px;
+  height: 6px;
+  background: var(--color-rule-ink);
+  opacity: 0.55;
+}
+.meter-tick-mid { height: 11px; opacity: 0.7; }
+.meter-tick-major { height: 18px; opacity: 1; background: var(--color-text-tertiary); }
+
+.meter-rule-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--color-surface-4);
+  overflow: hidden;
+}
+
+/* Decelerating, and it stops at 92%. It is not reporting progress -- nothing here
+   knows how far along ten streaming queries are. It says "still measuring"; the
+   page replacing it is what says "done". */
+.meter-rule-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--color-accent) 0%,
+    var(--color-accent-light) 100%
+  );
+  box-shadow: 0 0 18px rgba(240, 104, 92, 0.45);
+  animation: meter-measure 6.5s cubic-bezier(0.16, 0.85, 0.3, 1) forwards;
+}
+
+@keyframes meter-measure {
+  0%   { width: 0; }
+  18%  { width: 34%; }
+  45%  { width: 62%; }
+  75%  { width: 81%; }
+  100% { width: 92%; }
+}
+
+.meter-rule-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-family: var(--font-plex-mono), ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* Respect a stated preference for less motion: hold a steady partial reading
+   rather than sweeping. Still communicates "working", without the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .meter-rule-fill { animation: none; width: 45%; }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
