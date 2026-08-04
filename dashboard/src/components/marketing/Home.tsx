@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type MouseEvent, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Intro } from "./Intro";
 import { STEPS, CODE } from "./usage-content";
@@ -63,39 +63,56 @@ export function Home() {
   const [slideProgress, setSlideProgress] = useState(0);
   const [step, setStep] = useState(0);
   const [copied, setCopied] = useState<string | null>(null);
-  // Home and the dashboard are separate root layouts, so "Open dashboard" is a full
-  // document load, not a soft nav — the dashboard's own loading.tsx never gets to
-  // paint, and a hard nav gives the browser no progress signal. So we drive REAL
-  // progress off `/api/dashboard-progress`, which runs the same ten queries the
-  // dashboard awaits and streams one line as each one actually resolves. `meterTarget`
-  // is that true fraction; `meterPct` eases toward it each frame only so the number
-  // ticks smoothly — it never moves unless a real query has finished. When the stream
-  // ends we navigate ourselves rather than relying on the <Link>.
+  // Home and the dashboard are separate root layouts. Letting <Link> handle this
+  // flickers: Next first tries a soft nav (flashing the dashboard's loading.tsx),
+  // then discovers the root-layout boundary and does a full reload. So we take full
+  // control instead — preventDefault, drive REAL progress off `/api/dashboard-progress`
+  // (which runs the same ten queries the dashboard awaits and streams a line as each
+  // actually resolves), and do the hard navigation ourselves only once the meter is
+  // full. The warmup primes the pg pool, so that final navigation is fast, not a
+  // second render from cold. `meterPct` eases toward the true `meterTarget` fraction
+  // each frame purely for a smooth number; it never advances unless a real query did.
   const [openingDashboard, setOpeningDashboard] = useState(false);
   const [meterPct, setMeterPct] = useState(0);
   const meterTarget = useRef(0);
+  const navigated = useRef(false);
 
-  const openDashboard = useCallback(() => {
-    // Do NOT preventDefault: the <Link> starts the real hard navigation now, and the
-    // dashboard's own server render runs the same ten queries in parallel with the
-    // fetch below. Same queries, same latency, so they finish together — the browser
-    // swaps in the page right around when the meter fills. No extra wait, real bar.
+  const openDashboard = useCallback((e: MouseEvent) => {
+    e.preventDefault();
+    if (navigated.current) return;
     setOpeningDashboard(true);
     setMeterPct(0);
     meterTarget.current = 0;
 
-    // Smooth the display toward whatever real fraction has been reached.
+    const go = () => {
+      if (navigated.current) return;
+      navigated.current = true;
+      window.location.href = "/dashboard";
+    };
+
+    // Smooth the display toward whatever real fraction has been reached. Once the meter
+    // has visually caught up to a full target, do the real navigation.
     const ease = () => {
-      setMeterPct((cur) => cur + (meterTarget.current - cur) * 0.18);
-      requestAnimationFrame(ease);
+      setMeterPct((cur) => {
+        const next = cur + (meterTarget.current - cur) * 0.18;
+        if (meterTarget.current >= 100 && next >= 99.5) go();
+        return next;
+      });
+      if (!navigated.current) requestAnimationFrame(ease);
     };
     requestAnimationFrame(ease);
+
+    // Safety net: never trap the user on the loader if the warmup hangs.
+    const failsafe = setTimeout(go, 15000);
 
     (async () => {
       try {
         const res = await fetch("/api/dashboard-progress", { cache: "no-store" });
         const reader = res.body?.getReader();
-        if (!reader) return;
+        if (!reader) {
+          meterTarget.current = 100;
+          return;
+        }
         const dec = new TextDecoder();
         let buf = "";
         for (;;) {
@@ -110,10 +127,11 @@ export function Home() {
             if (t) meterTarget.current = (d / t) * 100;
           }
         }
-      } catch {
-        // Warmup unreachable — the browser's own navigation is still in flight and
-        // will swap the page in regardless. Fill the bar so it doesn't sit half-done.
         meterTarget.current = 100;
+      } catch {
+        meterTarget.current = 100; // warmup unreachable — fill and go
+      } finally {
+        clearTimeout(failsafe);
       }
     })();
   }, []);
