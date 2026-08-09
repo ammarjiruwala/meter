@@ -257,6 +257,14 @@ async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
     """
     data = await list_mandates()
 
+    # Simulation is not an empty account (PROPOSALS.md M6). With `PRAVA_LIVE_MODE` off
+    # `list_mandates` returns an empty list, and falling through from here would let the
+    # expiry sweep at the bottom mark genuine `pending_approval` rows "expired" — because
+    # nothing came back from an API that was never asked. Same posture as the outage guard
+    # below: leave the local table exactly as it was.
+    if data.get("simulated"):
+        return []
+
     # A Prava outage must not take the sync down with it. `list_mandates` no longer raises
     # — transport failures come back as an error envelope — so the guard checks `_ok`
     # rather than catching. Returning empty leaves the local table untouched and lets
@@ -362,6 +370,16 @@ async def create_mandate(
         recurring_frequency=recurring_frequency,
         callback_url=config.MANDATE_CALLBACK_URL or None,
     )
+
+    # PROPOSALS.md M6. Reporting simulation as `session_create_failed` would be wrong in
+    # the expensive direction: it reads as "Prava refused us" when Prava was never called,
+    # and it is the sort of thing that gets debugged as a credentials problem on stage. No
+    # pending row is opened either — half of what M6 objected to was this route filling
+    # `mandates` with rows no approval will ever resolve.
+    if session.get("simulated"):
+        return {"ok": False, "reason": "simulated",
+                "detail": session.get("detail"),
+                "next": "Set PRAVA_LIVE_MODE=true to create a real mandate session."}
 
     session_id = session.get("session_id")
     if not session_id:

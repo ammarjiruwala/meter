@@ -1019,7 +1019,7 @@ $4.00 afterwards now yields $4.00 rather than the $0.00 it silently produced bef
 
 ---
 
-### M6 — `PRAVA_LIVE_MODE=false` does not stop calls to Prava · OPEN — found 2026-08-02
+### M6 — `PRAVA_LIVE_MODE=false` does not stop calls to Prava · **FIXED 2026-08-09 (Shubh)**
 
 The flag reads as "simulate instead of transacting", and `CONTEXT.md` §6a relies on it in
 exactly that sense: *"Demo runs on `PRAVA_LIVE_MODE=False` until this clears"*, written
@@ -1059,7 +1059,21 @@ unilaterally for that reason.
 
 Owner: Shivam (`treasury/`).
 
-### M7 — `POST /mandates/create` and `/mandates/sync` are unauthenticated writes · OPEN — found 2026-08-02
+**RESOLUTION (2026-08-09, Shubh).** Both calls are gated. The open question was what a
+simulated `list_mandates` should return; the answer is an **empty list**, never the rows in
+the local `mandates` table — a populated simulation would show mandates Prava has never
+confirmed, mid-demo, indistinguishable from ones it has. The `mandates` key stays present so
+`/mandates` renders `[]` rather than the 503 a missing key triggers, because simulation is
+not an outage. `create_mandate_session` returns no `session_id` and no `iframe_url`: a fake
+approval URL is worse than none, being a link a human will click. `/mandates/create` reports
+`reason: "simulated"` instead of `session_create_failed` — the old envelope read as "Prava
+refused us" when Prava was never asked — and opens no pending row, which was M6's second
+complaint. `_sync_project` returns early on a simulated list; without that the empty result
+fell through to the 15-minute expiry sweep and marked genuine `pending_approval` rows
+`expired`. Pinned by 14 checks in `test_treasury.py`, every one paired with a live-mode
+control, plus a mutation check confirming the guard's removal fails the suite.
+
+### M7 — `POST /mandates/create` and `/mandates/sync` are unauthenticated writes · **FIXED — recommendation applied; both carry `Depends(_authed_key)`**
 
 B18 shipped "auth on the money moves only", and `/mandates/create` genuinely moves no
 money — it returns an approval URL and authorizes nothing until a human completes a

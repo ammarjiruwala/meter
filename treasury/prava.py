@@ -296,7 +296,21 @@ async def create_mandate_session(
     `merchant_scope` is always `listed` — the scope that pins the mandate to this one
     merchant. `any` exists but is one-time only, which is the opposite of what a
     repeating treasury needs.
+
+    Gated on `PRAVA_LIVE_MODE` (PROPOSALS.md M6). This is the single endpoint Prava
+    documents a `429 TRIES_EXHAUSTED` throttle on (C3), so an ungated call here spends
+    the sandbox allowance the Treasurer depends on — while the flag that is supposed to
+    mean "no calls to Prava" reads as off.
+
+    The simulated envelope carries **no** `session_id` and **no** `iframe_url`, and that
+    is deliberate. A fake approval URL is worse than none: it is a link a human will
+    click, and it either 404s or looks real enough to wait on. Callers tell this apart
+    from a genuine failure by `simulated`, which is why it is not just an error envelope.
     """
+    if not config.PRAVA_LIVE_MODE:
+        return {"_ok": True, "simulated": True,
+                "detail": "PRAVA_LIVE_MODE is off; no mandate session was created"}
+
     amount = f"{amount_usd:.2f}"
     payload = {
         "user_id": user_id,
@@ -339,7 +353,19 @@ async def list_mandates():
     envelope with no `mandates` key, so callers must use `.get("mandates", [])` rather
     than assume the list is there — a sync that raises would take the whole status
     endpoint down every time Prava hiccups.
+
+    Gated on `PRAVA_LIVE_MODE` (PROPOSALS.md M6), and the simulated list is **empty**
+    rather than the locally stored mandates. That is the reason M6 was filed rather than
+    fixed on the spot: a list populated from the `mandates` table would show rows Prava
+    has never confirmed, mid-demo, presented identically to ones it has. An empty list is
+    the honest answer to "what does Prava say" when Prava was not asked.
+
+    The envelope still carries `mandates`, so `/mandates` renders an empty list rather
+    than the 503 a missing key produces. Simulation is not an outage.
     """
+    if not config.PRAVA_LIVE_MODE:
+        return {"_ok": True, "simulated": True, "mandates": []}
+
     return await _request("GET", "/v1/mandates", timeout=_TIMEOUT_READ)
 
 

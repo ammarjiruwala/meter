@@ -619,6 +619,95 @@ def test_pending_mandates() -> None:
           any(m["status"] == "approved" for m in db.list_stored_mandates("zeta")))
 
 
+def test_prava_live_mode_gate() -> None:
+    """PROPOSALS.md M6 — `PRAVA_LIVE_MODE=false` must mean *no calls to Prava*.
+
+    It gated `charge_mandate`, `report_charge` and `verify_credentials` but not
+    `list_mandates` or `create_mandate_session`, so the flag that reads as "off" still
+    sent traffic — including to `POST /v1/sessions`, the one endpoint Prava documents a
+    `429 TRIES_EXHAUSTED` throttle on (C3). Every check below has a live-mode control, so
+    a gate that stopped working for some *other* reason still fails this test.
+    """
+    print("\nPRAVA_LIVE_MODE gate (M6)")
+
+    calls: list[tuple[str, str]] = []
+
+    async def counting_request(method, path, json_body=None, timeout=None):
+        calls.append((method, path))
+        return {"_ok": True, "mandates": []}
+
+    real_request = prava._request
+    real_live = prava.config.PRAVA_LIVE_MODE
+    try:
+        prava._request = counting_request
+        prava.config.PRAVA_LIVE_MODE = False
+
+        out = asyncio.run(prava.list_mandates())
+        check("list_mandates sends nothing when live mode is off", calls == [], str(calls))
+        check("and says so", out.get("simulated") is True, str(out))
+        # The key must be PRESENT and empty: `/mandates` 503s on a missing `mandates`
+        # key, and simulation is not an outage.
+        check("with an empty mandate list, not an absent one", out.get("mandates") == [],
+              str(out))
+
+        out = asyncio.run(prava.create_mandate_session(
+            user_id="meter_m6", user_email="m6@example.com", amount_usd=5.0,
+            merchant_name="Meter", merchant_url="https://example.com"))
+        check("create_mandate_session sends nothing either", calls == [], str(calls))
+        check("it says so too", out.get("simulated") is True, str(out))
+        check("and invents no session id", out.get("session_id") is None, str(out))
+        check("and no approval url for a human to click", out.get("iframe_url") is None,
+              str(out))
+
+        # Negative control. If these two stop going out, the checks above pass for the
+        # wrong reason and this test is worthless.
+        prava.config.PRAVA_LIVE_MODE = True
+        asyncio.run(prava.list_mandates())
+        check("live mode ON: the read does go out", len(calls) == 1, str(calls))
+        asyncio.run(prava.create_mandate_session(
+            user_id="meter_m6", user_email="m6@example.com", amount_usd=5.0,
+            merchant_name="Meter", merchant_url="https://example.com"))
+        check("live mode ON: the session create goes out", len(calls) == 2, str(calls))
+        check("on the endpoint Prava throttles", calls[1] == ("POST", "/v1/sessions"),
+              str(calls))
+    finally:
+        prava._request = real_request
+        prava.config.PRAVA_LIVE_MODE = real_live
+
+    # The route must not dress simulation up as a Prava failure, and must open no row.
+    before = len(db.pending_mandates("m6route"))
+    r = CLIENT.post("/mandates/create", headers=AUTH,
+                    params={"project_id": "m6route", "amount_usd": 5}).json()
+    check("the route reports simulation, not session_create_failed",
+          r.get("reason") == "simulated", str(r))
+    check("and opens no pending mandate row",
+          len(db.pending_mandates("m6route")) == before, str(r))
+
+    # A simulated sync must leave the local table alone. Without the guard the empty list
+    # falls through to the 15-minute expiry sweep and marks a real pending row `expired`
+    # because an API that was never asked returned nothing.
+    db.open_pending_mandate("m6sync", "ses_m6", "openai", 500.0, "monthly", "meter_m6sync")
+    row_id = db.pending_mandates("m6sync")[0]["id"]
+    pg.execute("UPDATE mandates SET synced_at = ? WHERE id = ?",
+               (ledger.iso_seconds_ago(3600), row_id))
+
+    CLIENT.get("/mandates/status", params={"project_id": "m6sync"})
+    check("a simulated sync leaves an aged pending row pending",
+          len(db.pending_mandates("m6sync")) == 1)
+
+    # Negative control for the guard itself: the same aged row, the same empty list, but
+    # not flagged simulated -- the sweep must fire, or the check above proves nothing.
+    from treasury import routes as _routes
+    real_list = _routes.list_mandates
+    try:
+        _routes.list_mandates = lambda: asyncio.sleep(0, result={"_ok": True, "mandates": []})
+        CLIENT.get("/mandates/status", params={"project_id": "m6sync"})
+        check("an unflagged empty list DOES expire it (control)",
+              db.pending_mandates("m6sync") == [])
+    finally:
+        _routes.list_mandates = real_list
+
+
 def test_event_ledger() -> None:
     """Every attempt leaves a row, including the refusals."""
     print("\nevent ledger")
@@ -1345,6 +1434,7 @@ def _run() -> int:
             test_alert_noise,
             test_credential_preflight,
             test_pending_mandates,
+            test_prava_live_mode_gate,
             test_event_ledger,
             test_migration_from_old_schema,
             test_concurrent_writers,

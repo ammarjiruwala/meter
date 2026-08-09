@@ -196,20 +196,27 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         set (contradicting its own `connect()` note), and the marketing page still explained
         itself by a `meter.db`-on-local-disk constraint that no longer exists. Both now say
         what is true *and* what stayed true for a different reason.
-    *   ⚠ **`PRAVA_LIVE_MODE=false` does not stop calls to Prava** — `PROPOSALS.md` **M6**,
-        open. It gates `charge_mandate`, `report_charge` and `verify_credentials`, but **not**
-        `list_mandates` or `create_mandate_session`. Observed live: with the flag off, both
-        went out and returned 401, and `/mandates` answered 503. **So §6a's own
-        "demo runs on `PRAVA_LIVE_MODE=False` until the outage clears" does not achieve what
-        it says.** Worse, the ungated `POST /v1/sessions` is the one endpoint Prava documents
-        a `429 TRIES_EXHAUSTED` throttle on. Not fixed unilaterally: simulating a mandate list
-        risks showing mandates that do not exist, mid-demo.
-    *   ⚠ **`POST /mandates/create` and `/mandates/sync` take unauthenticated writes** —
-        `PROPOSALS.md` **M7**, open. Verified 200 with no key. B18 authenticated the money
-        moves and these move none, but they *spend a metered third-party quota* — the same
-        `POST /v1/sessions` above — so an unauthenticated caller can exhaust the allowance the
-        Treasurer depends on. One-line fix, but it breaks Tanay's "Connect your card" flow if
-        the browser calls it keyless, so it needs that decision first.
+    *   ✅ **Fixed: `PRAVA_LIVE_MODE=false` now stops every call to Prava** — `PROPOSALS.md`
+        **M6**, closed 2026-08-09 (Shubh). It gated `charge_mandate`, `report_charge` and
+        `verify_credentials` but **not** `list_mandates` or `create_mandate_session`, so the
+        flag that reads as off still sent traffic — including to `POST /v1/sessions`, the one
+        endpoint Prava documents a `429 TRIES_EXHAUSTED` throttle on. **So §6a's own "demo runs
+        on `PRAVA_LIVE_MODE=False`" did not achieve what it said.** Both are gated now. The
+        decision M6 was waiting on: the simulated mandate list is **empty**, never the locally
+        stored rows — a list populated from `mandates` would show rows Prava has never
+        confirmed, presented identically to ones it has. The `mandates` key is still present,
+        so `/mandates` renders `[]` rather than the 503 a missing key produces: simulation is
+        not an outage. `create_mandate_session` returns no `session_id` and no `iframe_url`
+        (a fake approval URL is a link a human clicks), and `/mandates/create` reports
+        `reason: "simulated"` rather than `session_create_failed` — and opens no pending row,
+        which was the other half of M6. `_sync_project` bails on a simulated list too;
+        without that the empty result fell through to the 15-minute expiry sweep and marked
+        genuine pending rows `expired`. 14 checks in `test_treasury.py`, each with a live-mode
+        control so a gate that stops working for another reason still fails.
+    *   ✅ **Fixed earlier: `POST /mandates/create` and `/mandates/sync` are authenticated** —
+        `PROPOSALS.md` **M7**. Both carry `Depends(_authed_key)`
+        ([treasury/routes.py](treasury/routes.py) lines 326 and 418). Recorded here because
+        §6a and M7 both described them as open long after the fix landed.
     *   **Not a bug, recorded so nobody re-chases it:** `app.routes` reports 11 entries for a
         21-route app because this FastAPI version keeps each `include_router` as one opaque
         `_IncludedRouter`. The treasury surface is fine. Use `/openapi.json`.
