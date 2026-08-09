@@ -60,14 +60,16 @@ mounted onto it, one process on one port. The dashboard (Tanay) runs separately.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt   # dev set: openai + pip-audit, CI needs it
 cp .env.example .env                              # add provider keys + DATABASE_URL
 uvicorn proxy.app:app --port 8080 --reload        # proxy + treasury + mock provider
-python tests/test_proxy.py                        # 249 checks, no framework, ~3s
-python tests/test_predictor.py                    # 131 checks, same convention
-python tests/test_treasury.py                     # 182 checks (treasury/)
-python tests/test_alerts.py                       # 46 checks (alerts/), needs Python 3.10+
+python tests/test_proxy.py                        # plain asserts, no framework, ~3s
+python tests/test_predictor.py                    # same convention
+python tests/test_treasury.py                     # treasury/
+python tests/test_alerts.py                       # alerts/
+python tests/test_judge.py                        # judge/ — session-scoped tenants
 ruff check .                                      # CI runs this; keep it clean
+pip-audit -r requirements.txt                     # CI runs this too, and it blocks
 
 cd dashboard && cp .env.example .env.local        # its own DATABASE_URL
 npm install && npm run dev                        # reads the same Postgres, read-only
@@ -77,8 +79,10 @@ npm run build && npm run lint                     # dashboard type/lint check
 Run the matching self-check before you commit: `test_proxy.py` for anything under
 `proxy/` or `treasury/`, `test_treasury.py` for `treasury/` specifically,
 `test_predictor.py` for anything under `predictor/`, `test_alerts.py` for anything under
-`alerts/`. They are plain asserts, so they need no pytest and no fixtures — if you add
-non-trivial logic, add an assertion rather than starting a second test system.
+`alerts/`, `test_judge.py` for anything under `judge/`. They are plain asserts, so they need
+no pytest and no fixtures — if you add non-trivial logic, add an assertion rather than
+starting a second test system. Per-suite check counts are in `CLAUDE.md` and only there;
+they are not repeated here, because two copies drift and the stale one wins.
 
 Two harnesses **measure** rather than gate, and are deliberately out of CI because their
 thresholds are timing-sensitive and a shared runner would make them flaky:
@@ -104,7 +108,7 @@ concluding something is missing by accident.
 
 ## How the pieces fit
 
-Five components. The backend three are one process; all of them share one Postgres
+Six components. Everything but the dashboard is one process; all of them share one Postgres
 (`DATABASE_URL`, required — see `.env.example`):
 
 | Component | What it is | Owner |
@@ -112,6 +116,7 @@ Five components. The backend three are one process; all of them share one Postgr
 | `proxy/` | FastAPI hot path. Auth → attribute → estimate → breaker → reserve → forward → capture | Shubh |
 | `treasury/` | Wallets, Prava mandates/charges, mock provider billing. **Routers mounted onto the proxy app** | Shivam |
 | `predictor/` | Pre-flight `tiktoken` cost estimate. Called by proxy at ESTIMATE | Ammar |
+| `judge/` | "Try it yourself" console API. Session-scoped tenants. **Routers mounted onto the proxy app** at `/judge/*` | Ammar |
 | `alerts/` | Poke/Linq iMessage dispatch. Called from `proxy/breaker.py` on trip | Tanay |
 | `dashboard/` | Next.js 16 App Router + Tailwind. Reads the ledger **read-only** via `pg` | Tanay |
 
