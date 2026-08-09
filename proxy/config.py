@@ -115,6 +115,21 @@ RESERVATION_TTL_S = _float("RESERVATION_TTL_S", 120.0)
 # under RESERVATION_TTL_S or a slow stream reaps its own hold mid-flight.
 RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
 
+# How long a resolved Meter key stays cached in-process. Authentication is the one query
+# every single request makes, so at a hosted ledger's RTT it is the largest fixed cost on
+# the path — and the answer almost never changes.
+#
+# The tradeoff is revocation latency, and it is smaller than it looks. Every path that can
+# revoke or re-scope a key in this process (`revoke_key`, `unrevoke_key`,
+# `set_breaker_floor`) purges the cache synchronously, so a revocation issued through Meter
+# is visible on the very next request, not after the TTL. The window only exists for a
+# change made *outside* this process — a direct UPDATE against the database, or a second
+# proxy instance, which `render.yaml` and `fly.toml` already warn must not exist because
+# the reservation lock is in-process too.
+#
+# Set to 0 to disable caching entirely and pay the round trip on every request.
+KEY_CACHE_TTL_S = _float("KEY_CACHE_TTL_S", 5.0)
+
 # Soft budgets (PROPOSALS.md D2). The hard ceiling refuses with 429; this warns before it,
 # while there is still time to act. Deliberately a background poll rather than a check in
 # the request path: crossing a threshold is a *level*, not an edge, so testing it per

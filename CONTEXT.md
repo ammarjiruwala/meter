@@ -196,6 +196,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         set (contradicting its own `connect()` note), and the marketing page still explained
         itself by a `meter.db`-on-local-disk constraint that no longer exists. Both now say
         what is true *and* what stayed true for a different reason.
+*   **Round trips on the request path: 5 -> 3 (Shubh, 2026-08-09).** Measured end to end by
+    counting `pg._Connection.execute` across a real request through a running proxy, not by
+    reading the code. The shipping configuration (breaker on + ceilings) now makes **3**
+    blocking round trips with a warm key cache and 4 cold; the minimal path makes 1 warm,
+    2 cold. Two reductions: `db.breaker_state` folds the open-breaker lookup and both spend
+    windows into one statement (3 -> 1 over the floor, 2 -> 1 quiet), and `resolve_key` is
+    cached in-process for `KEY_CACHE_TTL_S` (default 5 s). **Revocation stays immediate** —
+    `revoke_key`, `unrevoke_key` and `set_breaker_floor` purge synchronously, an epoch
+    counter stops an in-flight read from re-caching a pre-purge row, and misses are never
+    cached so a freshly minted judge key works at once. Pinned by 22 checks that count
+    statements at the connection facade, because this is the kind of win that regresses
+    with nothing failing. `proxy/README.md` has the counted table. **Still do not quote a
+    latency number until it comes from the deployed proxy** — this changes the count, not
+    the RTT, and distance is still what dominates.
+
     *   ✅ **Fixed: `PRAVA_LIVE_MODE=false` now stops every call to Prava** — `PROPOSALS.md`
         **M6**, closed 2026-08-09 (Shubh). It gated `charge_mandate`, `report_charge` and
         `verify_credentials` but **not** `list_mandates` or `create_mandate_session`, so the

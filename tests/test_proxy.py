@@ -32,7 +32,7 @@ os.environ["METER_KEYS"] = "test_key_alpha:proj-alpha:test,test_key_beta:proj-be
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from proxy import breaker, config, db, providers  # noqa: E402
+from proxy import breaker, config, db, pg, providers  # noqa: E402
 from proxy.pricing import Usage, estimate_from_bytes, price  # noqa: E402
 
 PASSED = 0
@@ -638,12 +638,15 @@ def test_revocation_fails_closed() -> None:
     config.BREAKER_ENABLED = True
     revoked_key = {"key_id": "mk_x", "project_id": "proj-gone", "revoked_at": db.now_iso()}
 
-    original = db.window_spend
+    # Patches the function the breaker actually calls. It used to be `window_spend`; the
+    # breaker now reads everything it needs through `breaker_state`, and a test that
+    # sabotages a function no longer on the path proves nothing.
+    original = db.breaker_state
 
-    def exploding_window_spend(*args, **kwargs):
+    def exploding_breaker_state(*args, **kwargs):
         raise RuntimeError("ledger unreachable")
 
-    db.window_spend = exploding_window_spend
+    db.breaker_state = exploding_breaker_state
     try:
         decision = breaker.check("proj-gone", "anything", revoked_key)
         check("revoked key blocked with the ledger down", decision.blocked is True)
@@ -655,8 +658,187 @@ def test_revocation_fails_closed() -> None:
             breaker.check("proj-gone", "anything", revoked_key).blocked is True,
         )
     finally:
-        db.window_spend = original
+        db.breaker_state = original
         config.BREAKER_ENABLED = True
+
+
+def test_breaker_round_trip_count() -> None:
+    """The breaker costs exactly ONE database round trip per request, in every branch.
+
+    It used to cost two in the quiet case (`active_breaker`, then `window_spend`) and
+    three once the floor was cleared, because `_evaluate` then went back for the baseline
+    window. Round trips on the request path are sequential, so overhead is roughly
+    count x RTT — against a hosted ledger each one is real latency on every single call,
+    which is the whole argument in `proxy/README.md`.
+
+    Counted at `pg._Connection.execute`, which is where a statement actually borrows a
+    pooled connection and crosses the network. Counting calls to `db.breaker_state`
+    instead would pass even if that function issued four queries internally.
+
+    This is the kind of win that regresses silently: nothing fails, the number just goes
+    back up.
+    """
+    print("\ncircuit breaker — round-trip count")
+    config.BREAKER_ENABLED = True
+
+    key = {"key_id": "mk_rt", "project_id": "proj-rt", "revoked_at": None,
+           "breaker_floor_usd": 0.5}
+
+    # Twelve $1 rows, one every 300s. The short window holds ~$1 at $1/300s and the
+    # baseline holds $12 at $12/3600s — the same rate, so the floor is cleared but the
+    # burst ratio is ~1 and the breaker does NOT trip. That is the branch that used to
+    # cost three round trips, and it returns without writing, so the count stays clean.
+    for i in range(12):
+        db.record_request({
+            "id": f"req-rt-{i}", "ts": db.iso_seconds_ago(i * 300 + 5),
+            "project_id": "proj-rt", "feature": "alpha", "actor": "t",
+            "model": "gpt-4o-mini", "provider": "openai",
+            "endpoint": "/v1/chat/completions", "cost_usd": 1.0, "status": 200,
+        })
+
+    scope = breaker.scope_for("proj-rt", "alpha")
+    open_row, short, base = db.breaker_state("proj-rt", "alpha", scope, 300, 3600)
+    check("the folded read agrees with window_spend on the short window",
+          abs(short - db.window_spend("proj-rt", "alpha", 300)) < 1e-9,
+          f"{short} vs {db.window_spend('proj-rt', 'alpha', 300)}")
+    check("and on the baseline window",
+          abs(base - db.window_spend("proj-rt", "alpha", 3600)) < 1e-9,
+          f"{base} vs {db.window_spend('proj-rt', 'alpha', 3600)}")
+    check("and agrees with active_breaker that nothing is open",
+          open_row is None and db.active_breaker(scope) is None)
+
+    # Untagged must still mean `feature IS NULL` and not the project total. Folding two
+    # queries into one CASE is exactly where that distinction gets quietly lost.
+    db.record_request({
+        "id": "req-rt-untagged", "ts": db.now_iso(), "project_id": "proj-rt",
+        "feature": None, "actor": "t", "model": "gpt-4o-mini", "provider": "openai",
+        "endpoint": "/v1/chat/completions", "cost_usd": 0.07, "status": 200,
+    })
+    _, untagged_short, _ = db.breaker_state(
+        "proj-rt", None, breaker.scope_for("proj-rt", None), 300, 3600)
+    check("untagged means feature IS NULL, not the project total",
+          abs(untagged_short - 0.07) < 1e-9, str(untagged_short))
+
+    statements: list[str] = []
+    real_execute = pg._Connection.execute
+
+    def counting(self, sql, params=()):
+        statements.append(sql)
+        return real_execute(self, sql, params)
+
+    pg._Connection.execute = counting
+    try:
+        statements.clear()
+        d = breaker.check("proj-rt", "alpha", key)
+        check("over the floor but steady: one round trip", len(statements) == 1,
+              f"{len(statements)} statements")
+        # metric is None on a clean pass, so it cannot be dereferenced here — check()
+        # evaluates its detail argument eagerly, pass or fail.
+        check("and it does not trip on steady spend", d.blocked is False)
+
+        # A tag far below the floor short-circuits before the burst check. Same count:
+        # the fold must not have turned the cheap path into the expensive one.
+        statements.clear()
+        d = breaker.check("proj-rt", "quiet-tag", key)
+        check("below the floor: one round trip", len(statements) == 1,
+              f"{len(statements)} statements")
+        check("and stays closed", d.blocked is False)
+
+        # An already-open breaker in cooldown answers from the same single read.
+        db.open_breaker(breaker.scope_for("proj-rt", "cooling"), "throttle",
+                        {"detector": "test"})
+        statements.clear()
+        d = breaker.check("proj-rt", "cooling", key)
+        check("open and cooling down: one round trip", len(statements) == 1,
+              f"{len(statements)} statements")
+        check("and it blocks", d.blocked is True)
+    finally:
+        pg._Connection.execute = real_execute
+
+
+def test_key_cache() -> None:
+    """Caching the auth lookup must not weaken revocation.
+
+    `resolve_key` is the one query every request makes, so at a hosted ledger's RTT it is
+    the largest fixed cost on the path. Caching it is worth a round trip per request — but
+    `revoked_at` is explicitly NOT subject to fail-open (CLAUDE.md), so a cache that let a
+    cut key keep working would be trading the wrong thing.
+
+    The checks below pin both halves: the cache saves the trip, and every in-process path
+    that changes the answer purges it synchronously.
+    """
+    print("\nmeter key cache")
+    db.seed_keys("mk_cache_probe:proj-cache:dev")
+    db.invalidate_key_cache()
+
+    statements: list[str] = []
+    real_execute = pg._Connection.execute
+
+    def counting(self, sql, params=()):
+        statements.append(sql)
+        return real_execute(self, sql, params)
+
+    real_ttl = config.KEY_CACHE_TTL_S
+    pg._Connection.execute = counting
+    try:
+        config.KEY_CACHE_TTL_S = 60.0
+
+        statements.clear()
+        first = db.resolve_key("mk_cache_probe")
+        check("a cold lookup hits the database", len(statements) == 1, str(len(statements)))
+        check("and resolves the project", first["project_id"] == "proj-cache")
+
+        statements.clear()
+        second = db.resolve_key("mk_cache_probe")
+        check("a warm lookup makes no round trip at all", statements == [],
+              str(len(statements)))
+        check("and returns the same answer", second["project_id"] == "proj-cache")
+
+        # A copy each time, or one request could edit what every later request
+        # authenticates against.
+        second["project_id"] = "tampered"
+        check("the cache hands out copies, not its own dict",
+              db.resolve_key("mk_cache_probe")["project_id"] == "proj-cache")
+
+        # The property that matters. Not "revocation is visible within the TTL" —
+        # visible on the very next call.
+        statements.clear()
+        db.revoke_key(first["key_id"])
+        revoked = db.resolve_key("mk_cache_probe")
+        check("revocation is visible immediately, not after the TTL",
+              revoked["revoked_at"] is not None, str(revoked))
+        check("because revoking purged the cache and forced a re-read",
+              any("SELECT" in st for st in statements))
+
+        db.unrevoke_key(first["key_id"])
+        check("and un-revoking is visible immediately too",
+              db.resolve_key("mk_cache_probe")["revoked_at"] is None)
+
+        # `resolve_key` joins `projects`, so a floor change must invalidate as well —
+        # this is the judge flow, where the floor is set after the key already exists.
+        db.set_breaker_floor("proj-cache", 0.25)
+        check("a breaker floor change is visible immediately",
+              db.resolve_key("mk_cache_probe")["breaker_floor_usd"] == 0.25)
+        db.set_breaker_floor("proj-cache", None)
+
+        # A miss must never be cached: a judge mints a key and uses it moments later.
+        check("an unknown key does not resolve", db.resolve_key("mk_not_yet") is None)
+        db.seed_keys("mk_not_yet:proj-cache:dev")
+        check("and a key created after that miss resolves at once, not after the TTL",
+              db.resolve_key("mk_not_yet") is not None)
+
+        # Escape hatch: TTL 0 means pay the trip every time.
+        config.KEY_CACHE_TTL_S = 0
+        db.invalidate_key_cache()
+        db.resolve_key("mk_cache_probe")
+        statements.clear()
+        db.resolve_key("mk_cache_probe")
+        check("TTL 0 disables the cache entirely", len(statements) == 1,
+              str(len(statements)))
+    finally:
+        pg._Connection.execute = real_execute
+        config.KEY_CACHE_TTL_S = real_ttl
+        db.invalidate_key_cache()
 
 
 def test_gzipped_upstream_stream() -> None:
@@ -1775,6 +1957,8 @@ def _run() -> int:
         test_breaker,
         test_burst_detection,
         test_revocation_fails_closed,
+        test_breaker_round_trip_count,
+        test_key_cache,
         test_gzipped_upstream_stream,
         test_ledger_migration,
         test_meter_yaml,

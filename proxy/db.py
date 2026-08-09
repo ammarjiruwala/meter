@@ -49,6 +49,8 @@ import contextlib
 import hashlib
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -399,6 +401,34 @@ def seed_keys(spec: str) -> int:
     return seeded
 
 
+# ── Meter key cache ──────────────────────────────────────────────────────────
+#
+# `_lock` above is a nullcontext (Postgres MVCC made the SQLite serialisation pointless),
+# so this needs a real lock: `resolve_key` runs on worker threads via `asyncio.to_thread`.
+#
+# The epoch is what makes revocation exact rather than nearly-exact. Without it there is a
+# race: a request reads the key row, a revocation lands and clears the cache, and only
+# then does the first request store what it read — reinstating a revoked key for a full
+# TTL. Storing only if the epoch is unchanged closes that window. It is a cheap guard
+# against a rare interleaving, and the thing it protects is a cut credential.
+_key_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_key_cache_epoch = 0
+_key_cache_lock = threading.Lock()
+
+
+def invalidate_key_cache() -> None:
+    """Drop every cached key. Called by anything that changes what `resolve_key` returns.
+
+    Clearing all of it rather than one entry is deliberate: revocation is rare, the map is
+    tiny, and a targeted eviction needs a `key_id`-to-hash reverse index that would be one
+    more thing to keep correct for no measurable gain.
+    """
+    global _key_cache_epoch
+    with _key_cache_lock:
+        _key_cache.clear()
+        _key_cache_epoch += 1
+
+
 def resolve_key(raw_key: str) -> dict[str, Any] | None:
     """Resolve a presented Meter key to its project, or ``None`` if unknown.
 
@@ -406,6 +436,19 @@ def resolve_key(raw_key: str) -> dict[str, Any] | None:
     from "key we cut on purpose" (403), and collapsing those two into one response
     makes a tripped breaker indistinguishable from a typo during the demo.
     """
+    cache_key = hash_key(raw_key)
+    ttl = config.KEY_CACHE_TTL_S
+    epoch = None
+    if ttl > 0:
+        with _key_cache_lock:
+            epoch = _key_cache_epoch
+            hit = _key_cache.get(cache_key)
+        if hit is not None and hit[0] > time.monotonic():
+            # A copy, always. Callers treat the resolved row as their own — the tests
+            # mutate it outright — and handing out the cached dict would let one request
+            # edit what every later request authenticates against.
+            return dict(hit[1])
+
     conn = connect()
     with _lock:
         row = conn.execute(
@@ -418,9 +461,20 @@ def resolve_key(raw_key: str) -> dict[str, Any] | None:
                       p.fail_mode, p.breaker_floor_usd
                FROM meter_keys k JOIN projects p ON p.id = k.project_id
                WHERE k.hash = ?""",
-            (hash_key(raw_key),),
+            (cache_key,),
         ).fetchone()
-    return dict(row) if row else None
+    if row is None:
+        # Misses are deliberately NOT cached. A judge session mints a key and uses it
+        # moments later; caching the "unknown" answer would reject it for a full TTL.
+        # Unknown keys are refused at the door anyway, so the cheap path is the safe one.
+        return None
+
+    resolved = dict(row)
+    if ttl > 0:
+        with _key_cache_lock:
+            if _key_cache_epoch == epoch:
+                _key_cache[cache_key] = (time.monotonic() + ttl, dict(resolved))
+    return resolved
 
 
 def set_breaker_floor(project_id: str, floor_usd: float | None) -> None:
@@ -439,6 +493,7 @@ def set_breaker_floor(project_id: str, floor_usd: float | None) -> None:
             (floor_usd, project_id),
         )
         conn.commit()
+    invalidate_key_cache()  # the floor rides along on the cached key row
 
 
 def count_breaker_overrides() -> int:
@@ -467,6 +522,7 @@ def revoke_key(key_id: str) -> None:
             (now_iso(), key_id),
         )
         conn.commit()
+    invalidate_key_cache()  # a cut key must not answer from cache
 
 
 def unrevoke_key(key_id: str) -> None:
@@ -475,6 +531,7 @@ def unrevoke_key(key_id: str) -> None:
     with _lock:
         conn.execute("UPDATE meter_keys SET revoked_at = NULL WHERE id = ?", (key_id,))
         conn.commit()
+    invalidate_key_cache()  # and a restored one must work immediately
 
 
 _REQUEST_COLUMNS = (
@@ -772,6 +829,73 @@ def active_breaker(scope: str) -> dict[str, Any] | None:
             (scope,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def breaker_state(
+    project_id: str,
+    feature: str | None,
+    scope: str,
+    window_s: float,
+    baseline_s: float,
+) -> tuple[dict[str, Any] | None, float, float]:
+    """The open breaker row and BOTH spend windows for one tag, in **one** round trip.
+
+    Returns ``(open_row_or_None, short_spend, baseline_spend)``.
+
+    `breaker.check` needed three facts before it could decide anything: is this scope
+    already open, what has the tag spent in the short window, and what has it spent in the
+    baseline window. That was `active_breaker` plus one or two `window_spend` calls — two
+    sequential round trips in the quiet case, three when the floor was cleared. Same
+    reasoning as :func:`ceiling_spend`: the trips are sequential, so overhead is roughly
+    count x RTT, and with the ledger a network away each one is added latency on every
+    request rather than the microseconds it cost under SQLite.
+
+    The short window is contained by the baseline window (`breaker._evaluate` takes
+    ``max`` of the two), so a single scan bounded by the baseline cutoff can produce both
+    sums with a CASE. `ORDER BY id DESC LIMIT 1` matches `active_breaker` exactly rather
+    than approximating it — the two must not disagree about which row is "the" open one.
+
+    Both aggregates are computed even when the caller will short-circuit below the floor,
+    deliberately and for the same reason `ceiling_spend` does it: the unused one rides
+    along in a scan that has to happen anyway, and branching to avoid it reintroduces the
+    second query on the path where the breaker is actually being exercised.
+    """
+    conn = connect()
+    short_cutoff = iso_seconds_ago(window_s)
+    baseline_cutoff = iso_seconds_ago(baseline_s)
+
+    # `feature IS NULL` keeps `window_spend`'s meaning: untagged traffic is its own scope,
+    # never the project total. Getting this wrong makes the untagged breaker trip on any
+    # tagged feature's burn -- and untagged traffic is usually production.
+    if feature is None:
+        spend_where = "project_id = ? AND feature IS NULL AND ts >= ?"
+        spend_params: tuple = (project_id, baseline_cutoff)
+    else:
+        spend_where = "project_id = ? AND feature = ? AND ts >= ?"
+        spend_params = (project_id, feature, baseline_cutoff)
+
+    sql = (
+        "SELECT b.id AS breaker_id, b.mode AS breaker_mode, b.opened_at AS breaker_opened_at, "
+        "       s.short_spend, s.baseline_spend "
+        "  FROM (SELECT 1) AS anchor "
+        "  LEFT JOIN (SELECT id, mode, opened_at FROM breaker_events "
+        "              WHERE scope = ? AND closed_at IS NULL "
+        "              ORDER BY id DESC LIMIT 1) b ON TRUE "
+        "  LEFT JOIN (SELECT COALESCE(SUM(CASE WHEN ts >= ? THEN cost_usd END), 0) AS short_spend, "
+        "                    COALESCE(SUM(cost_usd), 0) AS baseline_spend "
+        f"               FROM requests WHERE {spend_where}) s ON TRUE"
+    )
+    with _lock:
+        row = conn.execute(sql, (scope, short_cutoff) + spend_params).fetchone()
+
+    open_row = None
+    if row["breaker_id"] is not None:
+        open_row = {
+            "id": row["breaker_id"],
+            "mode": row["breaker_mode"],
+            "opened_at": row["breaker_opened_at"],
+        }
+    return open_row, float(row["short_spend"]), float(row["baseline_spend"])
 
 
 def open_breaker(scope: str, mode: str, metric: dict[str, Any]) -> int:
