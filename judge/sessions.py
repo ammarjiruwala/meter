@@ -275,9 +275,14 @@ def create(
                 (project_id, feature, feature_ceiling, order),
             )
         conn.execute(
-            "INSERT INTO meter_keys (id, project_id, hash) VALUES (?, ?, ?)"
+            # Scoped to `proxy` and nothing else (PROPOSALS.md B19). A judge's key exists
+            # to spend metered inference inside its own capped session; it has no business
+            # driving a charge, and B20 notes the session token that hands it out is
+            # script-readable on the console page. Before scopes existed this key could
+            # have hit every money route the treasury exposes.
+            "INSERT INTO meter_keys (id, project_id, hash, scopes) VALUES (?, ?, ?, ?)"
             " ON CONFLICT DO NOTHING",
-            (key_id, project_id, db.hash_key(raw_key)),
+            (key_id, project_id, db.hash_key(raw_key), db.SCOPE_PROXY),
         )
         conn.execute(
             "INSERT INTO judge_sessions "

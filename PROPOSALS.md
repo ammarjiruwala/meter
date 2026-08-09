@@ -654,7 +654,7 @@ Two extras landed in the same pass, both audit findings:
 
 ---
 
-### B19 — B18's rule was applied to a list, not to a definition, and `/treasury/tick` fell outside it · **FIXED 2026-08-03; the wider question is OPEN**
+### B19 — B18's rule was applied to a list, not to a definition, and `/treasury/tick` fell outside it · **FIXED 2026-08-03; per-key scopes shipped 2026-08-09**
 
 Found in the full-codebase audit (2026-08-03, runtime-verified against a running proxy).
 
@@ -704,6 +704,26 @@ Not changed unilaterally. Three options, in the order I would pick them:
 
 Owner: Shivam. Blocking nothing, but it should not ship to real customers unresolved.
 
+**THE WIDER QUESTION IS NOW ANSWERED (2026-08-09, Shubh).** B19 closed one route and left
+the real problem stated: a key was all-or-nothing, so "authenticated" meant "may do
+everything", and `WALKTHROUGH.md` publishes a working key. `meter_keys.scopes` now exists —
+`proxy`, `money`, `read`, comma-separated, with `NULL` meaning unrestricted. All eight
+money-moving treasury routes require `money`, asserted as a *set* so the next one added is
+covered by default rather than enumerated.
+
+`NULL` means unrestricted rather than deny-all, deliberately. Scoping arrived after keys
+were in circulation; defaulting to deny would have taken the treasury away from every
+deployment at the moment it upgraded, which is a worse failure than the one being fixed.
+The consequence is that the published walkthrough key is still unrestricted until someone
+narrows it — the mechanism is shipped, that specific decision is a one-line config change
+and belongs with whoever updates `WALKTHROUGH.md`.
+
+**Judge keys are already narrowed**, which is where the actual exposure was: a judge's key
+is issued `proxy` and nothing else, so even with B20's script-readable token the worst a
+leak reaches is metered inference inside a capped session, not a charge against a real
+card. 28 checks across `test_treasury.py` and `test_judge.py`, plus a migration probe
+confirming an existing `meter_keys` table gains the column at boot and keeps working.
+
 ### B20 — The judge cookie is not `httpOnly`, and the comment justifying that understates what the token can do · OPEN
 
 `dashboard/src/lib/session.ts` sets `meter_judge_session` deliberately script-readable, and
@@ -727,6 +747,16 @@ touch money.
 Owner: Ammar.
 
 ---
+
+**RESOLUTION.** Shipped, and not by any of the three options as written. `replace_budgets`
+exempts runtime-owned projects from the wipe, keyed on `environment = 'judge'` rather than
+option 1's `id NOT LIKE 'judge-%'` — the rule is then a property of the project rather than
+a naming convention someone can break by renaming a tenant. `projects.breaker_floor_usd`
+was already outside the wipe for the same reason, recorded in `_ADDED_COLUMNS`. Pinned by
+`test_a_boot_does_not_wipe_judge_ceilings`, which also asserts the property that made the
+wipe correct in the first place: a ceiling deleted from `meter.yaml` still stops being
+enforced. Recorded here 2026-08-09 because this section described it as open long after the
+fix landed.
 
 ## C. Verification tasks
 Not design questions — things that are written down and might simply be wrong.
@@ -1096,7 +1126,7 @@ the fix is one line plus a decision about who calls it. Not applied unilaterally
 
 Owner: Shubh (B18's author) + Tanay (the flow). Cheap either way; needs the decision first.
 
-### M8 — judge ceilings cannot live in `projects`, because every boot wipes them · OPEN — found 2026-08-03
+### M8 — judge ceilings cannot live in `projects`, because every boot wipes them · **FIXED — exemption shipped in `replace_budgets`**
 
 `replace_budgets` ([proxy/db.py](proxy/db.py)) begins each boot with
 

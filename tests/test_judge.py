@@ -407,6 +407,39 @@ def test_a_boot_does_not_wipe_judge_ceilings() -> None:
           budget.active_ceilings().get(f"project:{s.project_id}") == 0.50)
 
 
+def test_judge_key_cannot_reach_the_money_rail() -> None:
+    """PROPOSALS.md B19 — a judge's Meter key is scoped to inference and nothing else.
+
+    The key exists to spend metered inference inside a capped session. It has no business
+    driving a charge, and B20 records that the session token handing it out is deliberately
+    script-readable on the console page — so "what can this token ultimately reach" is the
+    question that matters, not "how likely is it to leak".
+
+    Before scopes, the answer was every money route the treasury exposes.
+    """
+    print("\na judge key is scoped to inference")
+    s = sessions.create()
+
+    resolved = db.resolve_key(s.meter_key)
+    check("the judge's key resolves", resolved is not None)
+    check("and is scoped to proxy only", resolved["scopes"] == db.SCOPE_PROXY,
+          str(resolved["scopes"]))
+    check("so it may meter inference", db.key_allows(resolved, db.SCOPE_PROXY))
+    check("but it may not move money", not db.key_allows(resolved, db.SCOPE_MONEY))
+
+    # Through the real HTTP surface, not just the helper.
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        for path in ("/topup", "/treasury/tick", "/charge"):
+            r = client.post(path, headers={"Authorization": f"Bearer {s.meter_key}"},
+                            params={"project_id": s.project_id})
+            check(f"{path} refuses the judge's key", r.status_code == 403,
+                  f"{path} -> {r.status_code}")
+
+
 # ── Per-judge Prava merchant key ─────────────────────────────────────────────
 
 def test_prava_key_is_per_task_not_per_process() -> None:
@@ -1032,6 +1065,7 @@ def main() -> int:
             test_floor_actually_decides_the_trip,
             test_ceilings_are_written_where_the_dashboard_reads,
             test_a_boot_does_not_wipe_judge_ceilings,
+        test_judge_key_cannot_reach_the_money_rail,
             test_prava_key_is_per_task_not_per_process,
             test_alerts_reach_the_judge_not_the_on_call_phone,
             test_routes,

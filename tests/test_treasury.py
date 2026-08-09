@@ -708,6 +708,76 @@ def test_prava_live_mode_gate() -> None:
         _routes.list_mandates = real_list
 
 
+def test_key_scopes() -> None:
+    """PROPOSALS.md B19 — a key that can read a balance must not also be able to charge.
+
+    Before this, "authenticated" meant "may do everything": the same key that reads
+    `/wallets` could drive `POST /treasury/tick`, the whole autonomous charging loop. That
+    matters specifically because `WALKTHROUGH.md` publishes a working Meter key, so the
+    B19 fix moved `/treasury/tick` from "anyone" to "anyone who read the walkthrough".
+
+    NULL scopes means unrestricted, and that is load-bearing rather than lazy: scoping
+    arrived after keys were in circulation, and defaulting to deny would have taken the
+    treasury away from every deployment the moment it upgraded.
+    """
+    print("\nper-key scopes (B19)")
+
+    check("no scopes means unrestricted", ledger.key_allows({"scopes": None}, "money"))
+    check("empty scopes means unrestricted too", ledger.key_allows({"scopes": ""}, "money"))
+    check("a named scope is honoured",
+          ledger.key_allows({"scopes": "proxy,money"}, "money"))
+    check("and one that is absent is refused",
+          not ledger.key_allows({"scopes": "proxy,read"}, "money"))
+    check("an unresolved key allows nothing", not ledger.key_allows(None, "money"))
+
+    ledger.seed_keys("mk_scope_none:scopeproj:dev")
+    ledger.seed_keys("mk_scope_proxy:scopeproj:dev:proxy")
+    ledger.seed_keys("mk_scope_money:scopeproj:dev:money|read")
+
+    check("a scoped key stores what it was given",
+          ledger.resolve_key("mk_scope_money")["scopes"] == "money,read")
+    check("an unscoped key stores NULL",
+          ledger.resolve_key("mk_scope_none")["scopes"] is None)
+
+    # A typo in a scope name must not quietly grant less than intended.
+    before = ledger.resolve_key("mk_scope_typo")
+    ledger.seed_keys("mk_scope_typo:scopeproj:dev:mony")
+    check("an unknown scope name is refused, not silently narrowed",
+          before is None and ledger.resolve_key("mk_scope_typo") is None)
+
+    money_route = {"project_id": "scopeproj", "amount_usd": 1}
+
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_scope_proxy"},
+                    params=money_route)
+    check("a proxy-scoped key is refused at a money route", r.status_code == 403,
+          f"{r.status_code} {r.text[:120]}")
+    check("and told which scope it lacks", "money" in r.text, r.text[:120])
+
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_scope_money"},
+                    params=money_route)
+    check("a money-scoped key gets through the scope check", r.status_code != 403,
+          f"{r.status_code} {r.text[:120]}")
+
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_scope_none"},
+                    params=money_route)
+    check("an unscoped key still works, or upgrading locks everyone out",
+          r.status_code != 403, f"{r.status_code} {r.text[:120]}")
+
+    # Order matters: an unknown key must not learn that scopes exist.
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_no_such_key"},
+                    params=money_route)
+    check("an unknown key is 401, not 403", r.status_code == 401, str(r.status_code))
+
+    # Every money route, as a set. B19 happened because the rule was applied to a list
+    # and `/treasury/tick` was not on it.
+    for path in ("/wallets/seed", "/topup", "/treasury/tick", "/charge", "/report",
+                 "/charge-refusal", "/mandates/create", "/mandates/sync"):
+        r = CLIENT.post(path, headers={"Authorization": "Bearer mk_scope_proxy"},
+                        params={"project_id": "scopeproj"})
+        check(f"{path} refuses a key without the money scope", r.status_code == 403,
+              f"{path} -> {r.status_code}")
+
+
 def test_event_ledger() -> None:
     """Every attempt leaves a row, including the refusals."""
     print("\nevent ledger")
@@ -1435,6 +1505,7 @@ def _run() -> int:
             test_credential_preflight,
             test_pending_mandates,
             test_prava_live_mode_gate,
+            test_key_scopes,
             test_event_ledger,
             test_migration_from_old_schema,
             test_concurrent_writers,

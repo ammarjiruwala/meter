@@ -196,6 +196,26 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         set (contradicting its own `connect()` note), and the marketing page still explained
         itself by a `meter.db`-on-local-disk constraint that no longer exists. Both now say
         what is true *and* what stayed true for a different reason.
+*   **Per-key scopes shipped (Shubh, 2026-08-09) — `PROPOSALS.md` B19's wider question.**
+    A Meter key was all-or-nothing, so "authenticated" meant "may do everything" — the same
+    key that reads a balance could drive the autonomous charging loop, and `WALKTHROUGH.md`
+    publishes a working one. `meter_keys.scopes` now carries `proxy` / `money` / `read`;
+    all eight money-moving treasury routes require `money`, asserted as a **set** so the
+    next route added is covered by default rather than enumerated. **`NULL` means
+    unrestricted**, which is deliberate: defaulting to deny would have locked every existing
+    deployment out of its own treasury on upgrade. The demo key is therefore still
+    unrestricted until someone narrows it alongside `WALKTHROUGH.md`. **Judge keys are
+    narrowed already** — issued `proxy` only, so even via B20's script-readable token a leak
+    reaches metered inference inside a capped session, never a charge. `METER_KEYS` learned
+    an optional fourth field (`key:project:env:proxy|read`) and refuses unknown scope names
+    rather than silently granting less than intended. Migration verified against a
+    pre-scopes `meter_keys`.
+*   **`PROPOSALS.md` M8 was already fixed and recorded as open.** `replace_budgets` exempts
+    `environment = 'judge'` projects from the boot wipe — keyed on the environment rather
+    than an id prefix, so it is a property of the project and not a naming convention.
+    `test_a_boot_does_not_wipe_judge_ceilings` covers it, including that a ceiling deleted
+    from `meter.yaml` still stops being enforced.
+
 *   **Round trips on the request path: 5 -> 3 (Shubh, 2026-08-09).** Measured end to end by
     counting `pg._Connection.execute` across a real request through a running proxy, not by
     reading the code. The shipping configuration (breaker on + ceilings) now makes **3**

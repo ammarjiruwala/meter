@@ -106,7 +106,12 @@ CREATE TABLE IF NOT EXISTS meter_keys (
     id          TEXT PRIMARY KEY,
     project_id  TEXT NOT NULL REFERENCES projects(id),
     hash        TEXT NOT NULL UNIQUE,
-    revoked_at  TEXT
+    revoked_at  TEXT,
+    -- Comma-separated scope names, or NULL for "unrestricted". NULL is what every key
+    -- that predates this column has, and it has to keep meaning "everything" or a
+    -- migration would lock every existing deployment out of its own treasury.
+    -- See `key_allows`.
+    scopes      TEXT
 );
 
 -- One row per "Try it yourself" judge session (PITCH.md §2). A judge gets their own
@@ -335,6 +340,11 @@ _ADDED_COLUMNS = (
     # nulls `ceiling_usd_day` and `sort_order` at every boot, so a judge's floor stored
     # there would silently vanish on the next Render cold start (PROPOSALS.md M8).
     ("projects", "breaker_floor_usd", "double precision"),
+    # Per-key authorisation scopes (PROPOSALS.md B19). NULL means unrestricted, which is
+    # every key issued before this existed -- including the one WALKTHROUGH.md publishes.
+    # A default of "deny everything" would be the safer-looking choice and the wrong one:
+    # it would take the treasury away from every deployment that upgrades, mid-demo.
+    ("meter_keys", "scopes", "TEXT"),
 )
 
 
@@ -362,9 +372,12 @@ def _migrate(conn: pg._Connection) -> None:
 def seed_keys(spec: str) -> int:
     """Seed ``projects`` and ``meter_keys`` from the ``METER_KEYS`` env format.
 
-    Format is ``key:project:environment`` triples, comma separated; environment is
-    optional and defaults to ``dev``. Idempotent, so restarting the proxy never
-    duplicates a project or invalidates a key already in use.
+    Format is ``key:project:environment:scopes``, comma separated. ``environment``
+    defaults to ``dev``; ``scopes`` is ``|``-separated (``:`` and ``,`` are both already
+    taken by this format) and defaults to unrestricted. Idempotent, so restarting the
+    proxy never duplicates a project or invalidates a key already in use.
+
+        METER_KEYS=mk_live:acme:prod:proxy|read,mk_ops:acme:prod:money
     """
     conn = connect()
     seeded = 0
@@ -379,6 +392,18 @@ def seed_keys(spec: str) -> int:
                 continue
             raw_key, project_id = parts[0], parts[1]
             environment = parts[2] if len(parts) > 2 else "dev"
+            scopes = None
+            if len(parts) > 3 and parts[3].strip():
+                named = [x.strip() for x in parts[3].split("|") if x.strip()]
+                unknown = [x for x in named if x not in ALL_SCOPES]
+                if unknown:
+                    # Refuse rather than silently granting less than intended: a typo in a
+                    # scope name is otherwise indistinguishable from a deliberate one, and
+                    # it fails at the far end as a 403 nobody can explain.
+                    log.warning("ignoring METER_KEYS entry %r: unknown scope(s) %s",
+                                entry, ", ".join(unknown))
+                    continue
+                scopes = ",".join(named)
             conn.execute(
                 # `ON CONFLICT DO NOTHING` with no conflict target, rather than
                 # `INSERT OR IGNORE`: same "skip any constraint violation" semantics, but
@@ -392,9 +417,9 @@ def seed_keys(spec: str) -> int:
                 # No conflict target on purpose: `meter_keys` can collide on either the
                 # primary key or the unique hash, and re-seeding must skip both without
                 # invalidating a key already in use.
-                "INSERT INTO meter_keys (id, project_id, hash) VALUES (?, ?, ?)"
-                " ON CONFLICT DO NOTHING",
-                (f"mk_{hash_key(raw_key)[:16]}", project_id, hash_key(raw_key)),
+                "INSERT INTO meter_keys (id, project_id, hash, scopes)"
+                " VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (f"mk_{hash_key(raw_key)[:16]}", project_id, hash_key(raw_key), scopes),
             )
             seeded += 1
         conn.commit()
@@ -457,8 +482,8 @@ def resolve_key(raw_key: str) -> dict[str, Any] | None:
             # here rather than in `breaker.check` is what keeps the floor free: another
             # query would be another sequential round trip, and overhead is round trips
             # times RTT (proxy/README.md).
-            """SELECT k.id AS key_id, k.project_id, k.revoked_at, p.environment,
-                      p.fail_mode, p.breaker_floor_usd
+            """SELECT k.id AS key_id, k.project_id, k.revoked_at, k.scopes,
+                      p.environment, p.fail_mode, p.breaker_floor_usd
                FROM meter_keys k JOIN projects p ON p.id = k.project_id
                WHERE k.hash = ?""",
             (cache_key,),
@@ -475,6 +500,36 @@ def resolve_key(raw_key: str) -> dict[str, Any] | None:
             if _key_cache_epoch == epoch:
                 _key_cache[cache_key] = (time.monotonic() + ttl, dict(resolved))
     return resolved
+
+
+# Scope names. Deliberately three, not a permission per route: the question a key needs to
+# answer is "may this move money", not "may this call /wallets/seed specifically", and a
+# per-route matrix is a thing to keep in sync forever.
+SCOPE_PROXY = "proxy"    # /v1/* -- metered inference
+SCOPE_MONEY = "money"    # anything that charges, tops up, credits or drives the Treasurer
+SCOPE_READ = "read"      # treasury reads: balances, mandates, event history
+ALL_SCOPES = (SCOPE_PROXY, SCOPE_MONEY, SCOPE_READ)
+
+
+def key_allows(key: dict[str, Any] | None, scope: str) -> bool:
+    """Whether a resolved key carries ``scope``.
+
+    ``NULL``/empty means unrestricted, and that asymmetry is the whole design. Scoping
+    arrived after keys were already in circulation — including the working key published in
+    `WALKTHROUGH.md` — so defaulting to deny would have revoked the treasury out from under
+    every existing deployment the moment it upgraded. Existing keys keep everything; new
+    ones are issued narrow, which is where the actual exposure is (a judge session acting
+    with a real card).
+
+    B19 is what this is for: before it, "authenticated" meant "may do everything", so the
+    published walkthrough key could drive the autonomous charging loop.
+    """
+    if key is None:
+        return False
+    raw = key.get("scopes")
+    if raw is None or not str(raw).strip():
+        return True
+    return scope in {s.strip() for s in str(raw).split(",") if s.strip()}
 
 
 def set_breaker_floor(project_id: str, floor_usd: float | None) -> None:
