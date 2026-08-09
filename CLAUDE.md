@@ -20,24 +20,28 @@ anything here. It is short — read it in full every session. Non-negotiables it
 
 ## Commands
 
-Backend (Python, repo root):
+Backend (Python, repo root). **Python 3.10+ is the floor for the whole backend, not just the
+alerts suite** — `proxy/breaker.py` uses `dataclass(slots=True)`, so macOS system Python 3.9 fails
+at import rather than on logic. CI runs 3.12 and `SETUP.md` asks for 3.12+; 3.10 is what actually
+imports, 3.12 is what is actually tested.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt   # dev set = openai + pip-audit; see below
 cp .env.example .env                            # provider + Prava keys, DATABASE_URL; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
 python tests/test_proxy.py                      # 249 checks, no framework, ~3s
 python tests/test_predictor.py                  # 140 checks, same convention
 python tests/test_treasury.py                   # 205 checks (treasury/)
-python tests/test_alerts.py                     # 52 checks (alerts/) — needs Python 3.10+
+python tests/test_alerts.py                     # 52 checks (alerts/)
 python tests/test_judge.py                      # 206 checks (judge/) — session-scoped tenants
 ```
 
-852 checks total (verified 2026-08-03). The counts above drift as suites grow; if yours
-disagree, the suite is right and this line is stale — update it rather than assuming a
-regression.
+852 checks total (verified 2026-08-03). **These counts live here and nowhere else** — AGENTS.md
+deliberately does not repeat them, because two copies drift apart and the stale one wins whichever
+file you read first. The counts drift as suites grow; if yours disagree, the suite is right and
+this line is stale — update it rather than assuming a regression.
 
 Two measurement harnesses, neither in CI and neither a pass/fail gate on a normal change:
 
@@ -55,13 +59,21 @@ npm install && npm run dev                      # reads the same Postgres, read-
 npm run build && npm run lint
 ```
 
-There is no pytest and no build step on the backend; linting is `ruff check .` and CI runs it. The
-test files are plain asserts run as scripts — add to the matching one rather than introducing a
-second test system. Run `test_proxy.py` before committing under [proxy/](proxy/) or
+There is no pytest and no build step on the backend. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml))
+runs three kinds of gate, all blocking: `ruff check .` (default E4/E7/E9+F, pinned explicitly in
+[ruff.toml](ruff.toml) so a ruff upgrade cannot silently widen the rule set), `pip-audit -r
+requirements.txt`, and all five suites against a `postgres:16` service container — never the hosted
+Supabase instance, so CI cannot touch the demo's data and still passes when that project is paused.
+`pip install -r requirements.txt` alone does **not** reproduce CI: `pip-audit` lives in
+[requirements-dev.txt](requirements-dev.txt), alongside the OpenAI SDK the calibration scripts
+import lazily. That split is deliberate — it keeps the deployed image from carrying an SDK it never
+calls. Note the audit covers `requirements.txt` only; a CVE in a dev-only dependency is not a CVE in
+the shipped image. The test files are plain asserts run as scripts — add to the matching one rather
+than introducing a second test system. Run `test_proxy.py` before committing under [proxy/](proxy/) or
 [treasury/](treasury/) (the treasury routers are mounted on the proxy app, so they import in that
 suite), `test_treasury.py` for [treasury/](treasury/) specifically, `test_predictor.py` for
-[predictor/](predictor/), and `test_alerts.py` for [alerts/](alerts/). None has a `-k`-style
-filter; they run whole in ~1s.
+[predictor/](predictor/), `test_alerts.py` for [alerts/](alerts/), and `test_judge.py` for
+[judge/](judge/). None has a `-k`-style filter; they run whole in ~1s.
 
 The two harnesses above are different in kind — they *measure* rather than gate, they take tens of
 seconds, and their thresholds are timing-sensitive, which is why they are deliberately out of CI.
@@ -78,6 +90,15 @@ python scripts/show_ledger.py --tables          # every table, with row counts
 python scripts/show_ledger.py --schema scratch  # a throwaway schema from a harness run
 ```
 
+[scripts/](scripts/) holds ~19 more, in four groups — **look here before writing a 20th**: demo
+setup (`seed_demo.py`, `replay_to_ledger.py`, `secure_ledger.py`, which locks the ledger against
+Supabase's public API roles and is idempotent), end-to-end drivers that hit the **running** app
+rather than importing modules (`demo_live.py`, `e2e_journey.py`, `verify_pipeline.py`), predictor
+calibration and corpus work (`corpus_probe.py`, `templated_probe.py`, `split_corpus.py`,
+`fetch_wildchat.py`, `shrinkage_sweep.py`), and evaluation (`prequential.py` — test-then-train, the
+one that answers "does the feedback loop actually learn", plus `accuracy_report.py`,
+`consistency_check.py`, `history_value.py`). `overnight.py` chains the batch of them unattended.
+
 Two one-off Prava sandbox scripts live at the repo root. They hit the live sandbox directly,
 bypassing [treasury/](treasury/): `create_mandate.py` (the **only** way to create a mandate — no
 route does this) and `check_mandates.py` (lists mandates without the server running). Don't add a
@@ -86,7 +107,7 @@ third that duplicates a route — `test_charge.py` was deleted for exactly that,
 
 ## How the pieces fit
 
-Five components. All but the dashboard are one process; all share one Postgres:
+Six components. All but the dashboard are one process; all share one Postgres:
 
 | Component | What it is | Owner |
 | --- | --- | --- |
@@ -94,6 +115,7 @@ Five components. All but the dashboard are one process; all share one Postgres:
 | [treasury/](treasury/) | Wallets, Prava mandates/charges, mock provider billing. **Routers mounted onto the proxy app** | Shivam |
 | [predictor/](predictor/) | Pre-flight `tiktoken` cost estimate. Called by the proxy at ESTIMATE | Ammar |
 | [judge/](judge/) | "Try it yourself" console API. Session-scoped tenants, judge's own Prava/Linq keys held server-side. **Routers mounted onto the proxy app** at `/judge/*` | Ammar |
+| [alerts/](alerts/) | Poke/Linq iMessage dispatch on a breaker trip or ceiling hit. **Not a router** — imported *inside the function* by [proxy/breaker.py](proxy/breaker.py) and [proxy/app.py](proxy/app.py), which keeps it an optional dependency: a missing alerts package must not fail a request | Tanay |
 | [dashboard/](dashboard/) | Next.js 16 App Router + Tailwind. Reads the ledger **read-only** via `pg`, no API to the proxy except `/api/live-logs` | Tanay |
 
 Consequences worth knowing before you change anything:
@@ -176,6 +198,18 @@ outage on credential minting, and **one purchase per payment cycle**, confirmed 
 decline, which breaks the repeat-top-up demo narrative. See `CONTEXT.md` §6a before planning a demo
 around either.
 
+Deployment: [DEPLOY.md](DEPLOY.md) is the guide, and it targets **Supabase + Render + Vercel** — all
+free tiers, no card. [fly.toml](fly.toml) and [render.yaml](render.yaml) are both live and both
+correct; Fly is the better host (and the one that would fix the latency number above by putting the
+proxy in `bom`, beside the ap-south-1 database) but it stopped being free for new accounts in 2024,
+which is why DEPLOY.md moved off it. Two constraints in `fly.toml` are load-bearing rather than
+tuning: `min_machines_running = 1` with **no scaling past it** — [proxy/budget.py](proxy/budget.py)
+serialises authorizes with an in-process `asyncio.Lock`, so a second machine means two independent
+locks both seeing the same headroom and the daily ceiling silently stops holding — and
+`auto_stop_machines = false`, because a scaled-to-zero host stops the Treasurer loop, which is the
+worst possible failure for a product pitched on topping up your provider at 3am. `METER_KEYS` must
+be overridden at deploy; its default is public in this repo.
+
 [proxy/README.md](proxy/README.md) has the module map, the request lifecycle, and an explicit table
 of what is *deliberately* unimplemented in Phase 1 and why. Read it before concluding something is
 missing by accident. [predictor/README.md](predictor/README.md) does the same for the estimator,
@@ -237,3 +271,13 @@ simplifying it away — two in particular are load-bearing and documented as suc
 - **The predictor raises `UnsupportedModelError` on Claude** rather than returning a `tiktoken`
   number that is quietly 10–20% off. Guard with `supports(model)` before calling `predict()`. It is
   deliberately biased high (`SAFETY_MARGIN = 1.15`) and never touches billing.
+- **`PRAVA_MANDATE_ID` must be the *monthly* mandate**, not a `one_time` one. Reporting a one-time
+  charge as APPROVED moves that mandate to `consumed`, and every later charge 409s — an unrecoverable
+  state mid-demo. Compounding it, Prava allows **one purchase per payment cycle** even on the monthly
+  mandate (confirmed by a live Visa decline, EXPERIENCE.md), which is the open blocker under the
+  repeat-top-up narrative above.
+- **Read Prava config through [treasury/config.py](treasury/config.py), never `os.getenv` locally.**
+  `prava.py` used to re-read the same four variables with its own parsing and compared
+  `PRAVA_LIVE_MODE == "True"`, while config's `_bool` accepts `1/true/yes/on` — so
+  `PRAVA_LIVE_MODE=true` ran the two halves of the treasury in *different* modes, one live and one
+  simulating. One source, parsed one way.
