@@ -1,5 +1,5 @@
 import { cookies } from "next/headers";
-import { query } from "@/lib/db";
+import { isoNow, query } from "@/lib/db";
 
 /**
  * Resolving a judge's session on the *server*, so the Control Room can render their data.
@@ -68,7 +68,13 @@ export async function judgeContext(): Promise<JudgeContext | null> {
          FROM judge_sessions
         WHERE token = $1 AND expires_at > $2
         LIMIT 1`,
-      [token, new Date().toISOString()],
+      // `isoNow()`, not `toISOString()`. `expires_at` is TEXT and this is a STRING
+      // comparison, so the two sides have to have the same shape: the proxy writes
+      // microseconds and a `+00:00` offset, while `toISOString()` emits milliseconds and
+      // a `Z`. `Z` sorts above every digit, so a same-second comparison decides the wrong
+      // way. `db.ts` documents the same trap for the rolling-window queries; this call
+      // predated the helper.
+      [token, isoNow()],
     );
     const row = rows[0];
     if (!row) return null;

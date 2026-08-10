@@ -25,6 +25,7 @@ import os
 import sys
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -410,6 +411,45 @@ def test_a_boot_does_not_wipe_judge_ceilings() -> None:
     budget.register_ceilings({(s.project_id, None): 0.0})
     check("a runtime caller cannot widen a ceiling to zero",
           budget.active_ceilings().get(f"project:{s.project_id}") == 0.50)
+
+
+def test_session_timestamps_are_fixed_width() -> None:
+    """Session timestamps are compared as STRINGS in SQL, so their shape is load-bearing.
+
+    `expires_at` is TEXT and three call sites compare it with `<`/`>`: the live-session
+    cap, the expiry sweep, and the dashboard's own session lookup. `datetime.isoformat()`
+    omits the microseconds field entirely when it is exactly zero, which shortens the
+    string — and a shorter string sorts BELOW every other timestamp in the same second,
+    because `+` (0x2B) precedes `.` (0x2E). One row in a million, silently treated as
+    expired early.
+
+    `proxy.db.now_iso` exists for this reason and its docstring says so; this pins that
+    the judge tables use it too.
+    """
+    print("\njudge session timestamps are fixed width")
+    s = sessions.create()
+
+    for field in ("created_at", "expires_at"):
+        value = getattr(s, field)
+        check(f"{field} carries microseconds and an explicit offset",
+              len(value) == len("2026-08-10T10:50:39.394123+00:00")
+              and value.endswith("+00:00") and value[19] == ".",
+              f"{field}={value!r}")
+
+    # The property those two share with every other timestamp in the ledger: same width,
+    # so a string comparison orders them the same way an instant comparison would.
+    check("they are the same width as the ledger's own timestamps",
+          len(s.expires_at) == len(db.now_iso()),
+          f"{len(s.expires_at)} vs {len(db.now_iso())}")
+
+    # And the zero-microsecond case that motivates it: `isoformat()` would drop the field.
+    zero = datetime(2026, 8, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+    check("isoformat() really does drop a zero microseconds field",
+          "." not in zero.isoformat(), zero.isoformat())
+    check("db.iso_at() does not", db.iso_at(zero) == "2026-08-10T12:00:00.000000+00:00",
+          db.iso_at(zero))
+    check("and the two orderings agree once it is fixed width",
+          db.iso_at(zero) > db.iso_at(zero - timedelta(microseconds=1)))
 
 
 def test_judge_key_cannot_reach_the_money_rail() -> None:
@@ -1171,6 +1211,7 @@ def main() -> int:
             test_floor_actually_decides_the_trip,
             test_ceilings_are_written_where_the_dashboard_reads,
             test_a_boot_does_not_wipe_judge_ceilings,
+        test_session_timestamps_are_fixed_width,
         test_judge_key_cannot_reach_the_money_rail,
         test_money_capability_is_not_script_readable,
         test_capability_cookie_attrs,

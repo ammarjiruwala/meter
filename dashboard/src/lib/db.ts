@@ -364,6 +364,10 @@ const BUDGET_WINDOW_S = Number(process.env.BUDGET_WINDOW_S ?? 86_400);
  * "...123456+00:00" sorts *below* a cutoff of "...123Z" ("4" < "Z") and rows inside the
  * window get dropped. Same format in, same rows out.
  */
+export function isoNow(): string {
+  return isoSecondsAgo(0);
+}
+
 function isoSecondsAgo(seconds: number): string {
   const then = new Date(Date.now() - seconds * 1000);
   const micros = String(then.getUTCMilliseconds()).padStart(3, "0") + "000";

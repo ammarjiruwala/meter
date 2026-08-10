@@ -207,7 +207,11 @@ def _check_limits(client_ip: str | None) -> None:
     conn = db.connect()
     row = conn.execute(
         "SELECT count(*) AS n FROM judge_sessions WHERE expires_at > ?",
-        (datetime.now(timezone.utc).isoformat(),),
+        # `db.now_iso()`, not `isoformat()`. This is a string comparison against a TEXT
+        # column, and `isoformat()` OMITS the microseconds field entirely when it happens
+        # to be exactly zero — which shortens the string and sorts it below every other
+        # timestamp in the same second. `now_iso` is fixed-width for that reason.
+        (db.now_iso(),),
     ).fetchone()
     if row is not None and int(dict(row)["n"]) >= MAX_LIVE_SESSIONS:
         raise TooManySessions(
@@ -262,8 +266,11 @@ def create(
     key_id = f"mk_{db.hash_key(raw_key)[:16]}"
 
     now = datetime.now(timezone.utc)
-    created_at = now.isoformat()
-    expires_at = (now + timedelta(seconds=ttl_s)).isoformat()
+    # Fixed-width, like every other timestamp the ledger stores: these two are compared
+    # as strings in SQL (`_check_limits`, `purge_expired`, and the dashboard's session
+    # lookup), and `isoformat()` drops the microseconds field when it is exactly zero.
+    created_at = db.iso_at(now)
+    expires_at = db.iso_at(now + timedelta(seconds=ttl_s))
 
     with _lock:
         conn.execute(

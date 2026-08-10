@@ -84,6 +84,16 @@ def iso_seconds_ago(seconds: float) -> str:
     return ts.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
+def iso_at(ts: datetime) -> str:
+    """Format an arbitrary instant the same fixed-width way. See :func:`now_iso`.
+
+    Exists so callers storing a *future* timestamp — a judge session's `expires_at` — do
+    not reach for `datetime.isoformat()`, which is variable width and therefore wrong for
+    a column that gets compared as a string.
+    """
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+
+
 def hash_key(raw: str) -> str:
     """Meter keys are stored hashed, never in plaintext.
 
