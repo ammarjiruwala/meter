@@ -841,6 +841,68 @@ def test_key_cache() -> None:
         db.invalidate_key_cache()
 
 
+def test_model_efficiency() -> None:
+    """The cross-model comparison the dashboard renders (PLAN.md Phase 3, B11).
+
+    Written offline by `scripts/cross_model.py --push`, never from the request path:
+    shadow-calling a second provider on live traffic doubles the customer's bill inside a
+    tool whose job is to control it, and the comparison does not need it.
+
+    The property that matters beyond "it stores rows" is that a re-push replaces a run
+    rather than doubling it. A push that dies halfway gets retried, and a doubled run does
+    not error — it silently halves every per-call cost the card displays.
+    """
+    print("\ncross-model efficiency")
+    rows = [
+        {"feature": "sql-from-question", "model": "claude-haiku-4-5",
+         "baseline_model": "gpt-4o-mini", "samples": 12,
+         "input_tokens": 900, "output_tokens": 260,
+         "baseline_input_tokens": 900, "baseline_output_tokens": 400,
+         "cost_usd": 0.0022, "baseline_cost_usd": 0.0004,
+         "pricing_version": "2026-08-01"},
+        {"feature": "ticket-summary", "model": "claude-haiku-4-5",
+         "baseline_model": "gpt-4o-mini", "samples": 9,
+         "input_tokens": 1200, "output_tokens": 300,
+         "baseline_input_tokens": 1200, "baseline_output_tokens": 300,
+         "cost_usd": 0.0025, "baseline_cost_usd": 0.0005,
+         "pricing_version": "2026-08-01"},
+    ]
+
+    check("nothing to show before a run", db.latest_model_efficiency() == [])
+
+    written = db.record_model_efficiency("cm_first", rows)
+    check("a run stores one row per feature", written == 2, str(written))
+
+    got = db.latest_model_efficiency()
+    check("and reads back", len(got) == 2, str(len(got)))
+    check("ordered by feature", [r["feature"] for r in got]
+          == ["sql-from-question", "ticket-summary"], str([r["feature"] for r in got]))
+    check("with both sides of the comparison kept apart",
+          got[0]["baseline_output_tokens"] == 400 and got[0]["output_tokens"] == 260)
+
+    # The decomposition the card exists to show: same tokens, different rate; or same
+    # rate, different verbosity. Conflating them gives a number nobody can act on.
+    verbosity = got[0]["output_tokens"] / got[0]["baseline_output_tokens"]
+    check("verbosity is derivable and below 1 here", abs(verbosity - 0.65) < 1e-9,
+          str(verbosity))
+    check("while cost is still several times higher — a rate effect, not a length one",
+          got[0]["cost_usd"] > got[0]["baseline_cost_usd"] * 4)
+
+    # Re-pushing the SAME run replaces it. A doubled run does not raise; it silently
+    # halves every per-call figure on the card.
+    db.record_model_efficiency("cm_first", rows)
+    check("re-pushing a run replaces it rather than doubling",
+          len(db.latest_model_efficiency()) == 2,
+          str(len(db.latest_model_efficiency())))
+
+    # A newer run wins outright — the card shows one comparison, not a merge of every
+    # comparison ever made against different models.
+    db.record_model_efficiency("cm_second", [dict(rows[0], feature="only-this")])
+    latest = db.latest_model_efficiency()
+    check("the newest run is the one served", [r["feature"] for r in latest] == ["only-this"],
+          str([r["feature"] for r in latest]))
+
+
 def test_gzipped_upstream_stream() -> None:
     """A compressed SSE stream must still be parsed AND forwarded readably.
 
@@ -1959,6 +2021,7 @@ def _run() -> int:
         test_revocation_fails_closed,
         test_breaker_round_trip_count,
         test_key_cache,
+        test_model_efficiency,
         test_gzipped_upstream_stream,
         test_ledger_migration,
         test_meter_yaml,

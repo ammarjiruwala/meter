@@ -196,6 +196,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         set (contradicting its own `connect()` note), and the marketing page still explained
         itself by a `meter.db`-on-local-disk constraint that no longer exists. Both now say
         what is true *and* what stayed true for a different reason.
+*   **Model Efficiency shipped, and the cross-model lane is no longer blocked (Shubh,
+    2026-08-09).** This was the one genuinely open lane. `scripts/cross_model.py` already
+    settled `PROPOSALS.md` B11 the right way — replay offline, never shadow-call a second
+    provider on live traffic, because doubling a customer's bill inside a cost-control tool
+    is indefensible. What was missing was the last hop: the script writes JSONL on the
+    proxy's host, and the dashboard reads only Postgres from another host, so the
+    comparison could not reach the view meant to render it. Added a `model_efficiency`
+    table, `--push` / `--push-only` on the script, and a **Model Efficiency** card that
+    decomposes the cost gap into **rate** (a vendor decision) and **verbosity** (usually a
+    prompt one) instead of one useless multiplier — and says on its face that it measures
+    no quality, so "cheaper" is half a trade-off. ⚠ **The live replay has not been run**: it
+    needs a funded Anthropic key and spends real money, so the card renders its empty state
+    until someone decides to. Verified by running the dashboard's literal SQL against a
+    seeded table, so the view is proven queryable rather than only typechecked.
+
 *   **Judge money routes need a second, `httpOnly` capability (Shubh, 2026-08-09) —
     `PROPOSALS.md` B20 closed.** The session token stays script-readable, which was always
     the right call: the console calls `/judge/*` cross-origin in `X-Judge-Session`, where a

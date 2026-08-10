@@ -474,7 +474,7 @@ builds, container boots, healthz 200, treasurer loop starts. The full five-servi
 version is still future work once the other components exist; the dashboard remains a
 host-side dev process reading `meter.db` read-only.
 
-### B11 — Cross-model routing doubles spend if it sits in the request path · OPEN
+### B11 — Cross-model routing doubles spend if it sits in the request path · **RESOLVED — offline, and now rendered**
 
 `CONTEXT.md` §5A says "Allow the proxy to send the same prompt to OpenAI and Anthropic to
 log efficiency differences". `PLAN.md` Phase 3 has Ammar building it as an offline *script*
@@ -485,6 +485,24 @@ customer's bill — inside a tool whose entire pitch is cost control. A judge wi
 
 **Recommendation:** correct `CONTEXT.md` §5A to describe the offline script, and keep the
 proxy single-provider per request. Owner: Ammar.
+
+**RESOLUTION (2026-08-09, Shubh).** Settled the way this entry implies: the proxy does not
+shadow-call a second provider on live traffic. `scripts/cross_model.py` replays prompts
+already measured on the baseline model and reports the delta offline.
+
+What was missing was the last hop. The script writes JSONL on the proxy's host; the
+dashboard runs somewhere else entirely and reads only Postgres, so the comparison was
+unreachable by the thing meant to display it — which is why the Model Efficiency view sat
+blocked on "there is no data to render". There is now a `model_efficiency` table,
+`--push` / `--push-only` on the script, and a card that reads it.
+
+The card decomposes the gap into **rate** and **verbosity** rather than printing one
+multiplier, and states on its face that it measures no quality at all, so "cheaper" is half
+a trade-off rather than a recommendation.
+
+⚠ **The live replay still has not been run.** It needs a funded Anthropic key and spends
+real money against a cap, so it is a deliberate decision rather than something to trigger
+in passing. Until then the card renders its empty state, which names the command.
 
 ### B12 — Nothing measured Meter's own overhead · DONE
 
