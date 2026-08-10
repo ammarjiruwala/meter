@@ -5,6 +5,7 @@ import { TeamBudgetCard } from "@/components/TeamBudgetCard";
 import { ProviderBalancesCard } from "@/components/ProviderBalancesCard";
 import { LiveLogsTable } from "@/components/LiveLogsTable";
 import { CostPerOutcomeTable } from "@/components/CostPerOutcomeTable";
+import { ModelEfficiencyTable } from "@/components/ModelEfficiencyTable";
 import { AgentLog } from "@/components/AgentLog";
 import { TryItYourself } from "@/components/judge/SessionControls";
 import {
@@ -17,6 +18,7 @@ import {
   getLiveLogs,
   getProviderBalances,
   getHeadlineMetrics,
+  getModelEfficiency,
   isLedgerAvailable,
 } from "@/lib/db";
 
@@ -41,6 +43,7 @@ export default async function Home() {
     outcomes,
     outcomeCoverage,
     headline,
+    modelEfficiency,
   ] = await Promise.all([
     isLedgerAvailable(),
     getTeamSpend(),
@@ -52,6 +55,7 @@ export default async function Home() {
     getOutcomeCosts(),
     getOutcomeCoverage(),
     getHeadlineMetrics(),
+    getModelEfficiency(),
   ]);
 
   return (
@@ -123,6 +127,8 @@ export default async function Home() {
           </div>
           <div className="animate-in delay-6">
             <CostPerOutcomeTable rows={outcomes} coverage={outcomeCoverage} />
+
+            <ModelEfficiencyTable rows={modelEfficiency} />
           </div>
         </div>
       </main>

@@ -128,9 +128,28 @@ _TRIP_COOLDOWN_S = 300.0
 
 
 def trip_state() -> dict[str, Any]:
-    """Is the Treasurer currently backed off, and for how long. Exposed on /healthz."""
+    """Is the Treasurer running, is it backed off, and is it allowed to spend.
+
+    Exposed on ``/healthz``. ``enabled`` and ``dry_run`` are here because they are the two
+    switches that decide whether a background loop can move real money, and until now
+    neither was observable on a running deployment — `render.yaml` sets them, the dashboard
+    can override them, and nothing anywhere could tell you which won.
+
+    That gap had a cost: CONTEXT.md §6a carried a standing warning that `TREASURER_ENABLED`
+    must be `false` before judges arrive with real cards, and the only way to check was to
+    open the Render console. A liveness endpoint that reports whether the payment loop is
+    armed is worth more than one that reports only whether it has already failed.
+
+    Neither field is a secret: they are booleans about posture, not credentials, and the
+    whole point is that anyone can verify the safe state from outside.
+    """
     remaining = max(0.0, _tripped_until - time.monotonic())
-    return {"tripped": remaining > 0, "cooldown_remaining_s": round(remaining, 1)}
+    return {
+        "enabled": config.TREASURER_ENABLED,
+        "dry_run": config.TREASURER_DRY_RUN,
+        "tripped": remaining > 0,
+        "cooldown_remaining_s": round(remaining, 1),
+    }
 
 
 def _trip(reason: str) -> None:

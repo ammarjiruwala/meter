@@ -81,6 +81,11 @@ _lock = asyncio.Lock()
 # put a query in front of every call and buy nothing.
 _ceilings: dict[tuple[str, str | None], float] = {}
 
+# The subset of `_ceilings` that came from meter.yaml, so `forget_project` can refuse to
+# delete one. Runtime callers already cannot *widen* a file ceiling; being able to remove
+# one through a different door would be the same hole wearing better manners.
+_file_ceilings: set[tuple[str, str | None]] = set()
+
 # (project_id, feature) -> model allowlist. Empty set (or an absent key) means the
 # feature may call any model. Same boot-time-read rationale as `_ceilings`.
 _models: dict[tuple[str, str], frozenset[str]] = {}
@@ -104,6 +109,7 @@ def load_meter_yaml(path: Path | None = None) -> int:
     """
     path = path or config.METER_YAML_PATH
     _ceilings.clear()
+    _file_ceilings.clear()
     _models.clear()
 
     if not path.exists():
@@ -202,6 +208,17 @@ def load_meter_yaml(path: Path | None = None) -> int:
 
     db.replace_budgets(budgets)
     _ceilings.update(db.load_ceilings())
+
+    # Which of those came from the FILE. Not simply "everything present at boot":
+    # `load_ceilings` reads the table, and the table also holds judge tenants' ceilings,
+    # which `replace_budgets` deliberately exempts from the wipe (PROPOSALS.md M8). Taking
+    # the boot snapshot wholesale would mark those file-declared and make them permanent.
+    # The parsed `budgets` dict is the file, exactly.
+    for project_id, (ceiling, features) in budgets.items():
+        if ceiling is not None:
+            _file_ceilings.add((project_id, None))
+        for feature in features:
+            _file_ceilings.add((project_id, feature))
     log.info(
         "meter.yaml loaded: %d project(s), %d ceiling(s) active",
         len(budgets),
@@ -225,6 +242,29 @@ def _positive(value: Any, where: str) -> float | None:
         log.error("meter.yaml: %s must be > 0 (got %s) — ignoring this ceiling", where, number)
         return None
     return number
+
+
+def forget_project(project_id: str) -> int:
+    """Drop a runtime tenant's ceilings when its session ends. Returns how many went.
+
+    `register_ceilings` only ever adds, which was right for the case it was written for
+    and wrong over time: a judge session registers its ceilings at runtime and nothing
+    ever removed them, so `_ceilings` grew with every judge who ever visited and never
+    shrank. On the deployed instance it reached 228 entries, and `soft_breaches` walks all
+    of them on every poll — an expired four-hour session was still being measured days
+    later.
+
+    **A ceiling declared in `meter.yaml` is never dropped**, whoever asks. Runtime callers
+    already cannot widen a file ceiling (`register_ceilings` refuses); being able to delete
+    one through a different door would be the same hole with better manners.
+    """
+    doomed = [
+        key for key in _ceilings
+        if key[0] == project_id and key not in _file_ceilings
+    ]
+    for key in doomed:
+        del _ceilings[key]
+    return len(doomed)
 
 
 def register_ceilings(ceilings: dict[tuple[str, str | None], float]) -> None:
@@ -266,16 +306,30 @@ def soft_breaches(ratio: float) -> list[dict[str, Any]]:
     requests trip the warning and then un-trip it as they released — an alert that
     retracts itself is worse than no alert.
 
-    Blocking SQLite reads: call it from a thread, never from the event loop.
+    **One database round trip, not one per ceiling.** This used to ask per configured
+    ceiling inside the loop below. With ceilings coming only from `meter.yaml` that was a
+    handful of queries and invisible; judge sessions register theirs at runtime, and on the
+    deployed instance the count reached 228 — 228 sequential round trips per poll, at a
+    measured ~85 ms each, which is far more than the poll interval allows and grows with
+    every judge who ever visits. `db.spend_by_scope` answers all of them at once.
+
+    Blocking reads: call it from a thread, never from the event loop.
     """
     out: list[dict[str, Any]] = []
-    for (project_id, feature), ceiling in sorted(_ceilings.items(), key=lambda kv: str(kv[0])):
-        if ceiling <= 0:
-            continue
+    scopes = [(p, f) for (p, f), c in _ceilings.items() if c > 0]
+    by_scope, totals = db.spend_by_scope(
+        sorted({p for p, _ in scopes}), config.BUDGET_WINDOW_S
+    )
+
+    for project_id, feature in sorted(scopes, key=str):
+        ceiling = _ceilings[(project_id, feature)]
+        # A feature ceiling measures that feature; a project ceiling measures every tag
+        # plus untagged. `feature is None` keeping its `window_spend` meaning here — the
+        # untagged scope — would silently change which number the warning compares.
         spend = (
-            db.window_spend(project_id, feature, config.BUDGET_WINDOW_S)
+            by_scope.get((project_id, feature), 0.0)
             if feature is not None
-            else db.project_window_spend(project_id, config.BUDGET_WINDOW_S)
+            else totals.get(project_id, 0.0)
         )
         if spend >= ceiling * ratio:
             out.append(

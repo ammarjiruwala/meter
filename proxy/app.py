@@ -327,9 +327,18 @@ def _preview_origin_regex(origins: list[str]) -> str | None:
 
     It used to be `https://.*\\.vercel\\.app`, which matched **any** Vercel deployment. Since
     anyone can deploy to vercel.app in about a minute, that was the wildcard the comment
-    above says it is avoiding — the exact hole, wearing a regex. Now the pattern is built
-    from the configured production origins, so it only ever widens to previews of a project
-    already named in `CORS_ALLOW_ORIGINS`.
+    above says it is avoiding — the exact hole, wearing a regex. The pattern is now built
+    from the configured production origins, so it cannot match an unrelated project.
+
+    ⚠ **It still matches `<project>-<anything>.vercel.app`, and it has to** — a preview URL
+    is exactly that shape and the suffix is not predictable. Since `vercel.app` subdomains
+    are first-come-first-served, someone can register `meter-three-beta-evil.vercel.app`
+    and land inside the allowlist. That is why `CORS_ALLOW_VERCEL_PREVIEWS` gates this and
+    defaults to **off** (PROPOSALS.md B22): with credentialed CORS on for the judge money
+    capability, an allowed origin gets that cookie attached automatically, and the second
+    factor protecting a leaked session token would travel somewhere an attacker owns.
+
+    Prefer naming a specific preview URL in `CORS_ALLOW_ORIGINS` over turning this on.
     """
     projects = sorted(
         {
@@ -344,10 +353,26 @@ def _preview_origin_regex(origins: list[str]) -> str | None:
     return rf"https://(?:{alts})(?:-[a-z0-9]+)*\.vercel\.app"
 
 
+# The judge money capability (PROPOSALS.md B20) is a cookie, and the console is on another
+# origin, so it only ever arrives if credentialed CORS is on.
+#
+# It is off whenever origins are wildcarded, and that is not caution — it is the only
+# coherent option. `Access-Control-Allow-Origin: *` with credentials is rejected outright
+# by every browser, so a wildcard deployment that flipped this on would get *no* cookie and
+# a console that fails on the money routes only, which reads as a backend bug. Refusing to
+# combine them keeps the failure legible: wildcard origins mean no capability, and the
+# money routes 403 with a message that says what to fix.
+_ALLOW_CREDENTIALS = "*" not in _ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ORIGINS,
-    allow_origin_regex=None if "*" in _ORIGINS else _preview_origin_regex(_ORIGINS),
+    allow_origin_regex=(
+        _preview_origin_regex(_ORIGINS)
+        if config.CORS_ALLOW_VERCEL_PREVIEWS and "*" not in _ORIGINS
+        else None
+    ),
+    allow_credentials=_ALLOW_CREDENTIALS,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     # Enumerated rather than `*`. These are every header the console and a provider SDK
     # actually send; `*` additionally reflects whatever a caller asks for, which is free

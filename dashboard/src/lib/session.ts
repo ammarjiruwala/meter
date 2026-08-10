@@ -1,5 +1,5 @@
 import { cookies } from "next/headers";
-import { query } from "@/lib/db";
+import { isoNow, query } from "@/lib/db";
 
 /**
  * Resolving a judge's session on the *server*, so the Control Room can render their data.
@@ -11,9 +11,18 @@ import { query } from "@/lib/db";
  *
  * **Deliberately not `httpOnly`.** The console also calls the proxy directly from the
  * browser (`/judge/*` on another origin, where cookies are not sent), so the client needs
- * to read the same value. The token is a capability for a throwaway sandbox session with
- * a call cap and a four-hour life — the cost of it being script-readable is small, and
- * the alternative is storing it twice and keeping the copies in sync.
+ * to read the same value. The alternative is storing it twice and keeping the copies in
+ * sync, which is genuinely worse.
+ *
+ * The cost of that is no longer "small", and PROPOSALS.md B20 is the correction: this
+ * token keys the server's credential vault, and `/judge/mandate` uses it to act with the
+ * judge's own Prava *merchant* key. A readable token is a readable licence to charge a
+ * real card, which is not what "a throwaway sandbox session" implies.
+ *
+ * So the token no longer carries that authority alone. Spending needs a second secret —
+ * `meter_judge_capability`, httpOnly, set by the proxy on the proxy's own origin, checked
+ * by `judge/routes.py::_require_capability`. This cookie stays readable and stays
+ * sufficient for every read, which is all the server-rendered page needs it for.
  */
 export const SESSION_COOKIE = "meter_judge_session";
 
@@ -59,7 +68,13 @@ export async function judgeContext(): Promise<JudgeContext | null> {
          FROM judge_sessions
         WHERE token = $1 AND expires_at > $2
         LIMIT 1`,
-      [token, new Date().toISOString()],
+      // `isoNow()`, not `toISOString()`. `expires_at` is TEXT and this is a STRING
+      // comparison, so the two sides have to have the same shape: the proxy writes
+      // microseconds and a `+00:00` offset, while `toISOString()` emits milliseconds and
+      // a `Z`. `Z` sorts above every digit, so a same-second comparison decides the wrong
+      // way. `db.ts` documents the same trap for the rolling-window queries; this call
+      // predated the helper.
+      [token, isoNow()],
     );
     const row = rows[0];
     if (!row) return null;

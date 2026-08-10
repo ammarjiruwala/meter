@@ -115,6 +115,31 @@ RESERVATION_TTL_S = _float("RESERVATION_TTL_S", 120.0)
 # under RESERVATION_TTL_S or a slow stream reaps its own hold mid-flight.
 RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
 
+# How long a resolved Meter key stays cached in-process. Authentication is the one query
+# every single request makes, so at a hosted ledger's RTT it is the largest fixed cost on
+# the path — and the answer almost never changes.
+#
+# The tradeoff is revocation latency, and it is smaller than it looks. Every path that can
+# revoke or re-scope a key in this process (`revoke_key`, `unrevoke_key`,
+# `set_breaker_floor`) purges the cache synchronously, so a revocation issued through Meter
+# is visible on the very next request, not after the TTL. The window only exists for a
+# change made *outside* this process — a direct UPDATE against the database, or a second
+# proxy instance, which `render.yaml` and `fly.toml` already warn must not exist because
+# the reservation lock is in-process too.
+#
+# Set to 0 to disable caching entirely and pay the round trip on every request.
+KEY_CACHE_TTL_S = _float("KEY_CACHE_TTL_S", 5.0)
+
+# The judge money capability (PROPOSALS.md B20) is issued as a cookie with
+# `SameSite=None; Secure`, because the console is on a different origin from the proxy and
+# a cross-site cookie is not sent otherwise. `Secure` requires HTTPS, so on a plain-HTTP
+# local dev origin the browser silently drops it and every money route 403s.
+#
+# Set this to relax the cookie to `SameSite=Lax` without `Secure` for local development
+# ONLY. It must never be set in a deployment: it is what makes the capability a
+# same-site-only secret rather than a cross-site one, and on http:// it is sent in clear.
+JUDGE_CAPABILITY_INSECURE = _bool("JUDGE_CAPABILITY_INSECURE", False)
+
 # Soft budgets (PROPOSALS.md D2). The hard ceiling refuses with 429; this warns before it,
 # while there is still time to act. Deliberately a background poll rather than a check in
 # the request path: crossing a threshold is a *level*, not an edge, so testing it per
@@ -185,6 +210,23 @@ BREAKER_COOLDOWN_S = _int("BREAKER_COOLDOWN_S", 120)
 # let any page on the internet drive somebody's live session. The default names the
 # deployed dashboard and local development, and DEPLOY.md says to update it when the
 # dashboard URL changes.
+# Whether to additionally allow Vercel PREVIEW deployments of the projects named above.
+#
+# Off by default, and that default is the security decision (PROPOSALS.md B22). The preview
+# pattern is built from the configured origins, so it cannot match an unrelated project —
+# but it necessarily allows `<project>-<anything>.vercel.app`, and `vercel.app` subdomains
+# are first-come-first-served. Anyone can register `meter-three-beta-evil.vercel.app` in
+# about a minute and be inside the allowlist.
+#
+# That was survivable when CORS carried no credentials. It is not now: the judge money
+# capability is a cookie, so a browser on a matching origin attaches it automatically, and
+# the second factor that exists to stop a leaked session token from spending would travel
+# to an origin an attacker owns.
+#
+# Turn it on only when testing the console from a branch preview, and prefer naming the
+# preview URL in CORS_ALLOW_ORIGINS instead.
+CORS_ALLOW_VERCEL_PREVIEWS = _bool("CORS_ALLOW_VERCEL_PREVIEWS", False)
+
 CORS_ALLOW_ORIGINS = _str(
     "CORS_ALLOW_ORIGINS",
     "https://meter-three-beta.vercel.app,http://localhost:3000,http://127.0.0.1:3000",

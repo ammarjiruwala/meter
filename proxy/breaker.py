@@ -136,7 +136,15 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
 
     scope = scope_for(project_id, feature)
     floor = floor_for(key)
-    open_row = db.active_breaker(scope)
+
+    # One round trip for all three facts this function needs. See `db.breaker_state`:
+    # `active_breaker` plus `_evaluate`'s own reads were two sequential trips in the quiet
+    # case and three once the floor was cleared, and sequential trips are what the
+    # overhead budget is actually made of (proxy/README.md).
+    baseline_s = max(config.BREAKER_BASELINE_WINDOW_S, config.BREAKER_WINDOW_S)
+    open_row, short_spend, baseline_spend = db.breaker_state(
+        project_id, feature, scope, config.BREAKER_WINDOW_S, baseline_s
+    )
 
     if open_row is not None:
         cooldown_left = config.BREAKER_COOLDOWN_S - _elapsed_s(open_row["opened_at"])
@@ -147,7 +155,9 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
         # verdict. The rolling window has been decaying the whole time, so a burst that
         # has genuinely stopped will now read under the threshold and the breaker closes
         # itself. Without this the demo trips the breaker once and never recovers.
-        tripped, metric = _evaluate(project_id, feature, floor)
+        tripped, metric = _evaluate(
+            project_id, feature, floor, short_spend, baseline_spend
+        )
         if not tripped:
             db.close_breaker(scope, reset_by="auto-half-open")
             log.info(
@@ -159,7 +169,7 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
         log.warning("breaker %s re-opened; %s", scope, _describe(metric))
         return _blocked(open_row["mode"], scope, config.BREAKER_COOLDOWN_S, metric)
 
-    tripped, metric = _evaluate(project_id, feature, floor)
+    tripped, metric = _evaluate(project_id, feature, floor, short_spend, baseline_spend)
     if not tripped:
         return Decision(blocked=False)
 
@@ -173,7 +183,11 @@ def check(project_id: str, feature: str | None, key: dict[str, Any]) -> Decision
 
 
 def _evaluate(
-    project_id: str, feature: str | None, floor_usd: float | None = None
+    project_id: str,
+    feature: str | None,
+    floor_usd: float | None = None,
+    short_spend: float | None = None,
+    baseline_spend: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Run both detection conditions for one attribution tag.
 
@@ -181,11 +195,19 @@ def _evaluate(
     to trip is as inspectable as a decision to trip — "why didn't the breaker fire" is a
     question someone will ask on stage.
 
-    Two indexed reads on the hot path. The floor is evaluated first and short-circuits,
-    so the common case (a quiet tag) costs one query, not two.
+    ``short_spend`` and ``baseline_spend`` are supplied by :func:`check`, which already
+    fetched them alongside the open-breaker row in a single round trip. Called without
+    them -- which the tests do, to exercise detection in isolation -- it fetches them
+    itself, still in one trip. Either way this issues at most one query where it used to
+    issue up to two.
     """
     floor = config.BREAKER_WINDOW_USD if floor_usd is None else floor_usd
-    short_spend = db.window_spend(project_id, feature, config.BREAKER_WINDOW_S)
+    baseline_s = max(config.BREAKER_BASELINE_WINDOW_S, config.BREAKER_WINDOW_S)
+    if short_spend is None or baseline_spend is None:
+        _, short_spend, baseline_spend = db.breaker_state(
+            project_id, feature, scope_for(project_id, feature),
+            config.BREAKER_WINDOW_S, baseline_s,
+        )
 
     metric: dict[str, Any] = {
         "detector": "floor_and_burst",
@@ -206,9 +228,6 @@ def _evaluate(
     if config.BREAKER_BURST_RATIO <= 0:
         metric["result"] = "floor_cleared_burst_check_disabled"
         return True, metric
-
-    baseline_s = max(config.BREAKER_BASELINE_WINDOW_S, config.BREAKER_WINDOW_S)
-    baseline_spend = db.window_spend(project_id, feature, baseline_s)
 
     # The baseline window contains the short window, so baseline_spend >= short_spend and
     # a non-zero short window guarantees a non-zero divisor. Guarded anyway: a clock skew

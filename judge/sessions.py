@@ -135,6 +135,10 @@ class Session:
     project_id: str
     key_id: str
     meter_key: str | None
+    # Returned exactly once, at creation, and never again — the row keeps only its
+    # SHA-256. The console never sees this: the route puts it straight into an httpOnly
+    # cookie (PROPOSALS.md B20).
+    capability: str | None
     display_name: str | None
     email: str | None
     created_at: str
@@ -160,13 +164,15 @@ def _parse(ts: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _row_to_session(row: Any, meter_key: str | None = None) -> Session:
+def _row_to_session(row: Any, meter_key: str | None = None,
+                    capability: str | None = None) -> Session:
     r = dict(row)
     return Session(
         token=r["token"],
         project_id=r["project_id"],
         key_id=r["key_id"],
         meter_key=meter_key,
+        capability=capability,
         display_name=r.get("display_name"),
         email=r.get("email"),
         created_at=r["created_at"],
@@ -201,7 +207,11 @@ def _check_limits(client_ip: str | None) -> None:
     conn = db.connect()
     row = conn.execute(
         "SELECT count(*) AS n FROM judge_sessions WHERE expires_at > ?",
-        (datetime.now(timezone.utc).isoformat(),),
+        # `db.now_iso()`, not `isoformat()`. This is a string comparison against a TEXT
+        # column, and `isoformat()` OMITS the microseconds field entirely when it happens
+        # to be exactly zero — which shortens the string and sorts it below every other
+        # timestamp in the same second. `now_iso` is fixed-width for that reason.
+        (db.now_iso(),),
     ).fetchone()
     if row is not None and int(dict(row)["n"]) >= MAX_LIVE_SESSIONS:
         raise TooManySessions(
@@ -250,11 +260,17 @@ def create(
     project_id = PROJECT_PREFIX + secrets.token_hex(8)
     token = "js_" + secrets.token_urlsafe(24)
     raw_key = "mk_judge_" + secrets.token_hex(16)
+    # A second, independent secret. Independent so that reading the session token — which
+    # any script on the console page can do, by design — reveals nothing about this one.
+    capability = "jc_" + secrets.token_urlsafe(32)
     key_id = f"mk_{db.hash_key(raw_key)[:16]}"
 
     now = datetime.now(timezone.utc)
-    created_at = now.isoformat()
-    expires_at = (now + timedelta(seconds=ttl_s)).isoformat()
+    # Fixed-width, like every other timestamp the ledger stores: these two are compared
+    # as strings in SQL (`_check_limits`, `purge_expired`, and the dashboard's session
+    # lookup), and `isoformat()` drops the microseconds field when it is exactly zero.
+    created_at = db.iso_at(now)
+    expires_at = db.iso_at(now + timedelta(seconds=ttl_s))
 
     with _lock:
         conn.execute(
@@ -275,17 +291,22 @@ def create(
                 (project_id, feature, feature_ceiling, order),
             )
         conn.execute(
-            "INSERT INTO meter_keys (id, project_id, hash) VALUES (?, ?, ?)"
+            # Scoped to `proxy` and nothing else (PROPOSALS.md B19). A judge's key exists
+            # to spend metered inference inside its own capped session; it has no business
+            # driving a charge, and B20 notes the session token that hands it out is
+            # script-readable on the console page. Before scopes existed this key could
+            # have hit every money route the treasury exposes.
+            "INSERT INTO meter_keys (id, project_id, hash, scopes) VALUES (?, ?, ?, ?)"
             " ON CONFLICT DO NOTHING",
-            (key_id, project_id, db.hash_key(raw_key)),
+            (key_id, project_id, db.hash_key(raw_key), db.SCOPE_PROXY),
         )
         conn.execute(
             "INSERT INTO judge_sessions "
             "(token, project_id, key_id, display_name, email, created_at, expires_at,"
-            " breaker_floor_usd, ceiling_usd_day, call_cap, calls_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            " breaker_floor_usd, ceiling_usd_day, call_cap, calls_used, capability_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
             (token, project_id, key_id, display_name, email, created_at, expires_at,
-             breaker_floor_usd, ceiling_usd_day, call_cap),
+             breaker_floor_usd, ceiling_usd_day, call_cap, db.hash_key(capability)),
         )
         conn.commit()
 
@@ -317,6 +338,7 @@ def create(
              project_id, ttl_s, call_cap, ceiling_usd_day)
     return Session(
         token=token, project_id=project_id, key_id=key_id, meter_key=raw_key,
+        capability=capability,
         display_name=display_name, email=email, created_at=created_at,
         expires_at=expires_at, breaker_floor_usd=breaker_floor_usd,
         ceiling_usd_day=ceiling_usd_day, call_cap=call_cap, calls_used=0,
@@ -338,6 +360,36 @@ def resolve(token: str) -> Session | None:
             "SELECT * FROM judge_sessions WHERE token = ?", (token,)
         ).fetchone()
     return _row_to_session(row) if row else None
+
+
+def capability_matches(token: str, capability: str | None) -> bool:
+    """Whether ``capability`` is the money capability issued with session ``token``.
+
+    PROPOSALS.md B20. The session token is script-readable on purpose — the console sends
+    it to another origin in `X-Judge-Session`, where a cookie would not go — and B20's
+    finding was that the comment justifying that undersold what the token reaches: the
+    credential vault is keyed by it, and `/judge/mandate` uses it to act with the judge's
+    own Prava *merchant* key. It authorises charges against a real card.
+
+    So the money routes want a second factor that JavaScript never sees. This one rides an
+    httpOnly cookie on the proxy's own origin, and only its SHA-256 is stored.
+
+    A session minted before this column existed has ``capability_hash`` NULL and cannot
+    spend. Failing closed is right here and costs a judge one click to start a new
+    session — the alternative is a grandfather clause on the exact routes that move money.
+    """
+    if not token or not capability:
+        return False
+    conn = db.connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT capability_hash FROM judge_sessions WHERE token = ?", (token,)
+        ).fetchone()
+    stored = dict(row).get("capability_hash") if row else None
+    if not stored:
+        return False
+    # Constant time: this is a bearer secret compared on every spend attempt.
+    return secrets.compare_digest(str(stored), db.hash_key(capability))
 
 
 def session_for_project(project_id: str) -> Session | None:
@@ -411,6 +463,10 @@ def purge_expired() -> int:
     so it is swept rather than left to be evicted lazily by whoever happens to ask.
     Session *rows* are deliberately kept: they are the audit trail of who ran what.
     """
+    # Local import, matching `create()`: keeps `proxy.budget` off this module's import
+    # graph, which is what lets `judge/` be dropped without touching anything else.
+    from proxy import budget
+
     now = time.monotonic()
     with _lock:
         stale = [t for t, (expires_at, _) in _vault.items() if now >= expires_at]
@@ -424,9 +480,30 @@ def purge_expired() -> int:
         for ip in [ip for ip, seen in _recent_by_ip.items()
                    if all(now - t >= 3600 for t in seen)]:
             del _recent_by_ip[ip]
-    if stale:
-        log.info("purged %d expired judge credential set(s)", len(stale))
+    # Ceilings registered in-process by `create()` are dropped on the same pass. Nothing
+    # removed them before, so `proxy.budget._ceilings` grew with every judge who ever
+    # visited and never shrank — 228 entries on the deployed instance — and `soft_breaches`
+    # walks all of them on every poll, so four-hour sessions were still being measured days
+    # later. Session ROWS stay: they are the audit trail of who ran what.
+    dropped = 0
+    for project_id in _expired_project_ids():
+        dropped += budget.forget_project(project_id)
+
+    if stale or dropped:
+        log.info("purged %d expired judge credential set(s), %d stale ceiling(s)",
+                 len(stale), dropped)
     return len(stale)
+
+
+def _expired_project_ids() -> list[str]:
+    """Projects whose session has expired. Read fresh: the vault may already be empty."""
+    conn = db.connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT project_id FROM judge_sessions WHERE expires_at <= ?",
+            (db.now_iso(),),
+        ).fetchall()
+    return [dict(r)["project_id"] for r in rows]
 
 
 def alert_target(project_id: str) -> tuple[str | None, str | None]:

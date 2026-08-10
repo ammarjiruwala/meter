@@ -474,7 +474,7 @@ builds, container boots, healthz 200, treasurer loop starts. The full five-servi
 version is still future work once the other components exist; the dashboard remains a
 host-side dev process reading `meter.db` read-only.
 
-### B11 — Cross-model routing doubles spend if it sits in the request path · OPEN
+### B11 — Cross-model routing doubles spend if it sits in the request path · **RESOLVED — offline, and now rendered**
 
 `CONTEXT.md` §5A says "Allow the proxy to send the same prompt to OpenAI and Anthropic to
 log efficiency differences". `PLAN.md` Phase 3 has Ammar building it as an offline *script*
@@ -485,6 +485,24 @@ customer's bill — inside a tool whose entire pitch is cost control. A judge wi
 
 **Recommendation:** correct `CONTEXT.md` §5A to describe the offline script, and keep the
 proxy single-provider per request. Owner: Ammar.
+
+**RESOLUTION (2026-08-09, Shubh).** Settled the way this entry implies: the proxy does not
+shadow-call a second provider on live traffic. `scripts/cross_model.py` replays prompts
+already measured on the baseline model and reports the delta offline.
+
+What was missing was the last hop. The script writes JSONL on the proxy's host; the
+dashboard runs somewhere else entirely and reads only Postgres, so the comparison was
+unreachable by the thing meant to display it — which is why the Model Efficiency view sat
+blocked on "there is no data to render". There is now a `model_efficiency` table,
+`--push` / `--push-only` on the script, and a card that reads it.
+
+The card decomposes the gap into **rate** and **verbosity** rather than printing one
+multiplier, and states on its face that it measures no quality at all, so "cheaper" is half
+a trade-off rather than a recommendation.
+
+⚠ **The live replay still has not been run.** It needs a funded Anthropic key and spends
+real money against a cap, so it is a deliberate decision rather than something to trigger
+in passing. Until then the card renders its empty state, which names the command.
 
 ### B12 — Nothing measured Meter's own overhead · DONE
 
@@ -654,7 +672,7 @@ Two extras landed in the same pass, both audit findings:
 
 ---
 
-### B19 — B18's rule was applied to a list, not to a definition, and `/treasury/tick` fell outside it · **FIXED 2026-08-03; the wider question is OPEN**
+### B19 — B18's rule was applied to a list, not to a definition, and `/treasury/tick` fell outside it · **FIXED 2026-08-03; per-key scopes shipped 2026-08-09**
 
 Found in the full-codebase audit (2026-08-03, runtime-verified against a running proxy).
 
@@ -704,7 +722,27 @@ Not changed unilaterally. Three options, in the order I would pick them:
 
 Owner: Shivam. Blocking nothing, but it should not ship to real customers unresolved.
 
-### B20 — The judge cookie is not `httpOnly`, and the comment justifying that understates what the token can do · OPEN
+**THE WIDER QUESTION IS NOW ANSWERED (2026-08-09, Shubh).** B19 closed one route and left
+the real problem stated: a key was all-or-nothing, so "authenticated" meant "may do
+everything", and `WALKTHROUGH.md` publishes a working key. `meter_keys.scopes` now exists —
+`proxy`, `money`, `read`, comma-separated, with `NULL` meaning unrestricted. All eight
+money-moving treasury routes require `money`, asserted as a *set* so the next one added is
+covered by default rather than enumerated.
+
+`NULL` means unrestricted rather than deny-all, deliberately. Scoping arrived after keys
+were in circulation; defaulting to deny would have taken the treasury away from every
+deployment at the moment it upgraded, which is a worse failure than the one being fixed.
+The consequence is that the published walkthrough key is still unrestricted until someone
+narrows it — the mechanism is shipped, that specific decision is a one-line config change
+and belongs with whoever updates `WALKTHROUGH.md`.
+
+**Judge keys are already narrowed**, which is where the actual exposure was: a judge's key
+is issued `proxy` and nothing else, so even with B20's script-readable token the worst a
+leak reaches is metered inference inside a capped session, not a charge against a real
+card. 28 checks across `test_treasury.py` and `test_judge.py`, plus a migration probe
+confirming an existing `meter_keys` table gains the column at boot and keeps working.
+
+### B20 — The judge cookie is not `httpOnly`, and the comment justifying that understates what the token can do · **FIXED 2026-08-09 (Shubh)**
 
 `dashboard/src/lib/session.ts` sets `meter_judge_session` deliberately script-readable, and
 says why: the console also calls `/judge/*` cross-origin where cookies are not sent, so the
@@ -727,6 +765,113 @@ touch money.
 Owner: Ammar.
 
 ---
+
+**RESOLUTION.** Shipped, and not by any of the three options as written. `replace_budgets`
+exempts runtime-owned projects from the wipe, keyed on `environment = 'judge'` rather than
+option 1's `id NOT LIKE 'judge-%'` — the rule is then a property of the project rather than
+a naming convention someone can break by renaming a tenant. `projects.breaker_floor_usd`
+was already outside the wipe for the same reason, recorded in `_ADDED_COLUMNS`. Pinned by
+`test_a_boot_does_not_wipe_judge_ceilings`, which also asserts the property that made the
+wipe correct in the first place: a ceiling deleted from `meter.yaml` still stops being
+enforced. Recorded here 2026-08-09 because this section described it as open long after the
+fix landed.
+
+**RESOLUTION.** Built as this entry proposed — keep the readable cookie for reads, require
+a second `httpOnly` capability for the routes that touch money — because the cross-origin
+constraint that drove the original decision is real and does not go away.
+
+`meter_judge_session` stays script-readable and stays sufficient for every read. A second
+secret, `meter_judge_capability`, is minted independently at session creation, stored only
+as a SHA-256 in `judge_sessions.capability_hash`, and returned exactly once — straight into
+an `httpOnly; Secure; SameSite=None; Path=/judge` cookie set by the **proxy on the proxy's
+own origin**, which is what makes it reachable cross-site while never being visible to
+JavaScript. `/judge/mandate` and `/judge/topup` require it; comparison is
+`secrets.compare_digest`.
+
+Consequences worth knowing:
+
+* `allow_credentials` is now on for CORS, but **only when origins are not wildcarded**.
+  `Access-Control-Allow-Origin: *` with credentials is rejected by every browser, so a
+  wildcard deployment that turned it on would get no cookie and money routes that 403 while
+  reads work — a failure that reads as a backend bug. Refusing the combination keeps it
+  legible.
+* A session minted before this column existed has `capability_hash` NULL and **cannot
+  spend**. Failing closed costs a judge one click to start a new session; the alternative
+  is a grandfather clause on exactly the routes that move money.
+* `JUDGE_CAPABILITY_INSECURE` relaxes the cookie for plain-http local development, where
+  `Secure` makes the browser drop it. It must never be set in a deployment, and
+  `test_capability_cookie_attrs` asserts the shipping attributes with it off.
+
+15 checks in `test_judge.py`, including that reads still work on the token alone, that a
+missing *and* a wrong capability are both refused, that one judge's capability cannot spend
+another judge's session, and that the capability never appears in the session payload.
+`dashboard/src/lib/session.ts`'s comment — the one this entry said undersold the risk — now
+states what the token actually reaches and what carries the authority instead.
+
+### B21 — ARCHITECTURE.md's `<5ms p50` is unreachable on the deployment as configured · OPEN — found 2026-08-09
+
+ARCHITECTURE.md line 14 draws the hot path as `PROXY (hot path, <5ms p50)`, and §8 treats
+that as the budget. The first measurement from the **deployed** proxy puts it at
+**p50 255 ms** (n=12, two runs agreeing within 4 ms, `scripts/bench_deployed.py`).
+
+This is not the proxy being slow. It makes **3** sequential database round trips on the
+shipping path — already reduced from 5 — and the deployment puts Render in **Singapore**
+and Supabase in **ap-south-1 (Mumbai)**. Three trips at that RTT is 255 ms, so the budget
+is missed by distance, not by code.
+
+Why this needs a human rather than an edit. Three readings, and they lead different places:
+
+1. **The budget is right and the deployment is wrong.** Colocate — proxy in `bom`, or the
+   database in Singapore — and the same three trips cost 3–6 ms, which lands at or just
+   over 5 ms. This is the cheapest fix by a wide margin and needs no code.
+2. **The budget was always about the proxy's own work, not wall time.** On that reading
+   the number to compare is the in-process figure (p50 +0.26 ms, loopback), the budget is
+   already met, and §8 should say *which* it means — because as written it reads as wall
+   time and every reader has taken it that way.
+3. **The budget is wrong.** A hosted ledger a network away cannot be single-digit
+   milliseconds at any trip count above zero, so a proxy that must read before forwarding
+   has a floor set by geography. If that is accepted, §8 should state a budget in *round
+   trips* rather than milliseconds, which is the thing the code can actually control.
+
+Not edited unilaterally, per this file's own rule: ARCHITECTURE.md is a source-of-truth
+document and the reading chosen changes what "done" means for the request path.
+
+**Recommendation: 1, then restate §8 as 3.** Colocation is a deployment change with no code
+risk and it is the only option that makes the current number defensible. Restating the
+budget in round trips afterwards records what was actually learned — that the count is the
+engineering lever and the RTT is a hosting decision.
+
+Owner: Shubh (proxy), with whoever owns the hosting call.
+
+### B22 — The CORS preview regex still admits an attacker-registrable origin, and credentials made that matter · **FIXED 2026-08-09 (Shubh) — default changed**
+
+B19's fix replaced `https://.*\.vercel\.app` with a pattern built from the configured
+origins, so it can no longer match an unrelated project. It still matches
+`<project>-<anything>.vercel.app`, and **it has to**: that is the shape of a Vercel preview
+URL and the suffix is not predictable.
+
+`vercel.app` subdomains are first-come-first-served, so `meter-three-beta-evil.vercel.app`
+is registrable by anyone in about a minute. Verified against the actual pattern, with
+Starlette's `fullmatch` semantics:
+
+    MATCH   https://meter-three-beta-abc123-team.vercel.app   (a real preview)
+    MATCH   https://meter-three-beta-evil.vercel.app          (anyone can register this)
+    reject  https://evil-meter-three-beta.vercel.app
+    reject  https://meter-three-beta.vercel.app.evil.com
+
+That was survivable while CORS carried no credentials — a matching origin could send a
+session token it had somehow obtained, and nothing else. **B20 changed the stakes**: the
+judge money capability is a cookie, `allow_credentials` is now on, so a browser on any
+matching origin attaches it *automatically*. The second factor that exists specifically to
+stop a leaked session token from spending would be delivered to an origin an attacker owns.
+
+**Fix: `CORS_ALLOW_VERCEL_PREVIEWS`, default off.** Previews are a developer convenience;
+a credential-bearing wildcard is not a reasonable price for it. Naming a specific preview
+URL in `CORS_ALLOW_ORIGINS` still works and is the recommended route.
+
+⚠ **Behaviour change:** testing the judge console from a branch preview now requires either
+setting the flag or listing that preview URL explicitly. Worth knowing before someone spends
+an afternoon on a CORS error that is doing its job.
 
 ## C. Verification tasks
 Not design questions — things that are written down and might simply be wrong.
@@ -1019,7 +1164,7 @@ $4.00 afterwards now yields $4.00 rather than the $0.00 it silently produced bef
 
 ---
 
-### M6 — `PRAVA_LIVE_MODE=false` does not stop calls to Prava · OPEN — found 2026-08-02
+### M6 — `PRAVA_LIVE_MODE=false` does not stop calls to Prava · **FIXED 2026-08-09 (Shubh)**
 
 The flag reads as "simulate instead of transacting", and `CONTEXT.md` §6a relies on it in
 exactly that sense: *"Demo runs on `PRAVA_LIVE_MODE=False` until this clears"*, written
@@ -1059,7 +1204,21 @@ unilaterally for that reason.
 
 Owner: Shivam (`treasury/`).
 
-### M7 — `POST /mandates/create` and `/mandates/sync` are unauthenticated writes · OPEN — found 2026-08-02
+**RESOLUTION (2026-08-09, Shubh).** Both calls are gated. The open question was what a
+simulated `list_mandates` should return; the answer is an **empty list**, never the rows in
+the local `mandates` table — a populated simulation would show mandates Prava has never
+confirmed, mid-demo, indistinguishable from ones it has. The `mandates` key stays present so
+`/mandates` renders `[]` rather than the 503 a missing key triggers, because simulation is
+not an outage. `create_mandate_session` returns no `session_id` and no `iframe_url`: a fake
+approval URL is worse than none, being a link a human will click. `/mandates/create` reports
+`reason: "simulated"` instead of `session_create_failed` — the old envelope read as "Prava
+refused us" when Prava was never asked — and opens no pending row, which was M6's second
+complaint. `_sync_project` returns early on a simulated list; without that the empty result
+fell through to the 15-minute expiry sweep and marked genuine `pending_approval` rows
+`expired`. Pinned by 14 checks in `test_treasury.py`, every one paired with a live-mode
+control, plus a mutation check confirming the guard's removal fails the suite.
+
+### M7 — `POST /mandates/create` and `/mandates/sync` are unauthenticated writes · **FIXED — recommendation applied; both carry `Depends(_authed_key)`**
 
 B18 shipped "auth on the money moves only", and `/mandates/create` genuinely moves no
 money — it returns an approval URL and authorizes nothing until a human completes a
@@ -1082,7 +1241,7 @@ the fix is one line plus a decision about who calls it. Not applied unilaterally
 
 Owner: Shubh (B18's author) + Tanay (the flow). Cheap either way; needs the decision first.
 
-### M8 — judge ceilings cannot live in `projects`, because every boot wipes them · OPEN — found 2026-08-03
+### M8 — judge ceilings cannot live in `projects`, because every boot wipes them · **FIXED — exemption shipped in `replace_budgets`**
 
 `replace_budgets` ([proxy/db.py](proxy/db.py)) begins each boot with
 

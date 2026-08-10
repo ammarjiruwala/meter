@@ -364,6 +364,10 @@ const BUDGET_WINDOW_S = Number(process.env.BUDGET_WINDOW_S ?? 86_400);
  * "...123456+00:00" sorts *below* a cutoff of "...123Z" ("4" < "Z") and rows inside the
  * window get dropped. Same format in, same rows out.
  */
+export function isoNow(): string {
+  return isoSecondsAgo(0);
+}
+
 function isoSecondsAgo(seconds: number): string {
   const then = new Date(Date.now() - seconds * 1000);
   const micros = String(then.getUTCMilliseconds()).padStart(3, "0") + "000";
@@ -533,7 +537,7 @@ export async function getBudgets(scope: Scope = null): Promise<BudgetScope[] | n
 
   // ORDER BY above fixes the actor order; these preserve it, because Map keeps
   // insertion order and the rows arrive already sorted by spend.
-  const key = (p: string, f: string) => `${p} ${f}`;
+  const key = (p: string, f: string) => `${p}\0${f}`;
 
   const projectSpendBy = new Map(
     projectSpendRows.map((r) => [r.project_id, num(r.spend)]),
@@ -961,6 +965,50 @@ export async function getOutcomeCoverage(scope: Scope = null): Promise<OutcomeCo
  * decides nothing writes nothing — so the panel is quiet whenever the Treasurer is
  * healthy, and says so rather than inventing heartbeat lines.
  */
+// ── Model efficiency ─────────────────────────────────────────────────────────
+
+export type ModelEfficiencyRow = {
+  feature: string;
+  model: string;
+  baseline_model: string;
+  samples: number;
+  output_tokens: number;
+  baseline_output_tokens: number;
+  cost_usd: number;
+  baseline_cost_usd: number;
+};
+
+/**
+ * The most recent cross-model comparison, or `null` if none has been run.
+ *
+ * `null` and `[]` mean different things here and the card renders them differently: no
+ * table at all means the comparison has never been pushed, which is the normal state of a
+ * fresh database, while an empty run would mean it was pushed and produced nothing.
+ *
+ * Guarded on the table existing, like every other query in this file — either side can
+ * create the schema with only its own half of the tables, and this one is written by an
+ * offline script that may never have been run.
+ */
+export async function getModelEfficiency(): Promise<ModelEfficiencyRow[] | null> {
+  if (!(await tableExists("model_efficiency"))) return null;
+  const rows = await query<ModelEfficiencyRow>(
+    `SELECT feature, model, baseline_model, samples,
+            output_tokens, baseline_output_tokens, cost_usd, baseline_cost_usd
+       FROM model_efficiency
+      WHERE run_id = (SELECT run_id FROM model_efficiency
+                       ORDER BY ts DESC, id DESC LIMIT 1)
+      ORDER BY feature`,
+  );
+  return rows.map((r) => ({
+    ...r,
+    samples: num(r.samples),
+    output_tokens: num(r.output_tokens),
+    baseline_output_tokens: num(r.baseline_output_tokens),
+    cost_usd: num(r.cost_usd),
+    baseline_cost_usd: num(r.baseline_cost_usd),
+  }));
+}
+
 export type TreasuryEvent = {
   id: number;
   wallet_id: string;

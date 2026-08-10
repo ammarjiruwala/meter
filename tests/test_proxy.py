@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 import tempfile
 import uuid
 from pathlib import Path
@@ -32,7 +33,7 @@ os.environ["METER_KEYS"] = "test_key_alpha:proj-alpha:test,test_key_beta:proj-be
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from proxy import breaker, config, db, providers  # noqa: E402
+from proxy import breaker, config, db, pg, providers  # noqa: E402
 from proxy.pricing import Usage, estimate_from_bytes, price  # noqa: E402
 
 PASSED = 0
@@ -638,12 +639,15 @@ def test_revocation_fails_closed() -> None:
     config.BREAKER_ENABLED = True
     revoked_key = {"key_id": "mk_x", "project_id": "proj-gone", "revoked_at": db.now_iso()}
 
-    original = db.window_spend
+    # Patches the function the breaker actually calls. It used to be `window_spend`; the
+    # breaker now reads everything it needs through `breaker_state`, and a test that
+    # sabotages a function no longer on the path proves nothing.
+    original = db.breaker_state
 
-    def exploding_window_spend(*args, **kwargs):
+    def exploding_breaker_state(*args, **kwargs):
         raise RuntimeError("ledger unreachable")
 
-    db.window_spend = exploding_window_spend
+    db.breaker_state = exploding_breaker_state
     try:
         decision = breaker.check("proj-gone", "anything", revoked_key)
         check("revoked key blocked with the ledger down", decision.blocked is True)
@@ -655,8 +659,376 @@ def test_revocation_fails_closed() -> None:
             breaker.check("proj-gone", "anything", revoked_key).blocked is True,
         )
     finally:
-        db.window_spend = original
+        db.breaker_state = original
         config.BREAKER_ENABLED = True
+
+
+def test_breaker_round_trip_count() -> None:
+    """The breaker costs exactly ONE database round trip per request, in every branch.
+
+    It used to cost two in the quiet case (`active_breaker`, then `window_spend`) and
+    three once the floor was cleared, because `_evaluate` then went back for the baseline
+    window. Round trips on the request path are sequential, so overhead is roughly
+    count x RTT — against a hosted ledger each one is real latency on every single call,
+    which is the whole argument in `proxy/README.md`.
+
+    Counted at `pg._Connection.execute`, which is where a statement actually borrows a
+    pooled connection and crosses the network. Counting calls to `db.breaker_state`
+    instead would pass even if that function issued four queries internally.
+
+    This is the kind of win that regresses silently: nothing fails, the number just goes
+    back up.
+    """
+    print("\ncircuit breaker — round-trip count")
+    config.BREAKER_ENABLED = True
+
+    key = {"key_id": "mk_rt", "project_id": "proj-rt", "revoked_at": None,
+           "breaker_floor_usd": 0.5}
+
+    # Twelve $1 rows, one every 300s. The short window holds ~$1 at $1/300s and the
+    # baseline holds $12 at $12/3600s — the same rate, so the floor is cleared but the
+    # burst ratio is ~1 and the breaker does NOT trip. That is the branch that used to
+    # cost three round trips, and it returns without writing, so the count stays clean.
+    for i in range(12):
+        db.record_request({
+            "id": f"req-rt-{i}", "ts": db.iso_seconds_ago(i * 300 + 5),
+            "project_id": "proj-rt", "feature": "alpha", "actor": "t",
+            "model": "gpt-4o-mini", "provider": "openai",
+            "endpoint": "/v1/chat/completions", "cost_usd": 1.0, "status": 200,
+        })
+
+    scope = breaker.scope_for("proj-rt", "alpha")
+    open_row, short, base = db.breaker_state("proj-rt", "alpha", scope, 300, 3600)
+    check("the folded read agrees with window_spend on the short window",
+          abs(short - db.window_spend("proj-rt", "alpha", 300)) < 1e-9,
+          f"{short} vs {db.window_spend('proj-rt', 'alpha', 300)}")
+    check("and on the baseline window",
+          abs(base - db.window_spend("proj-rt", "alpha", 3600)) < 1e-9,
+          f"{base} vs {db.window_spend('proj-rt', 'alpha', 3600)}")
+    check("and agrees with active_breaker that nothing is open",
+          open_row is None and db.active_breaker(scope) is None)
+
+    # Untagged must still mean `feature IS NULL` and not the project total. Folding two
+    # queries into one CASE is exactly where that distinction gets quietly lost.
+    db.record_request({
+        "id": "req-rt-untagged", "ts": db.now_iso(), "project_id": "proj-rt",
+        "feature": None, "actor": "t", "model": "gpt-4o-mini", "provider": "openai",
+        "endpoint": "/v1/chat/completions", "cost_usd": 0.07, "status": 200,
+    })
+    _, untagged_short, _ = db.breaker_state(
+        "proj-rt", None, breaker.scope_for("proj-rt", None), 300, 3600)
+    check("untagged means feature IS NULL, not the project total",
+          abs(untagged_short - 0.07) < 1e-9, str(untagged_short))
+
+    statements: list[str] = []
+    real_execute = pg._Connection.execute
+
+    def counting(self, sql, params=()):
+        statements.append(sql)
+        return real_execute(self, sql, params)
+
+    pg._Connection.execute = counting
+    try:
+        statements.clear()
+        d = breaker.check("proj-rt", "alpha", key)
+        check("over the floor but steady: one round trip", len(statements) == 1,
+              f"{len(statements)} statements")
+        # metric is None on a clean pass, so it cannot be dereferenced here — check()
+        # evaluates its detail argument eagerly, pass or fail.
+        check("and it does not trip on steady spend", d.blocked is False)
+
+        # A tag far below the floor short-circuits before the burst check. Same count:
+        # the fold must not have turned the cheap path into the expensive one.
+        statements.clear()
+        d = breaker.check("proj-rt", "quiet-tag", key)
+        check("below the floor: one round trip", len(statements) == 1,
+              f"{len(statements)} statements")
+        check("and stays closed", d.blocked is False)
+
+        # An already-open breaker in cooldown answers from the same single read.
+        db.open_breaker(breaker.scope_for("proj-rt", "cooling"), "throttle",
+                        {"detector": "test"})
+        statements.clear()
+        d = breaker.check("proj-rt", "cooling", key)
+        check("open and cooling down: one round trip", len(statements) == 1,
+              f"{len(statements)} statements")
+        check("and it blocks", d.blocked is True)
+    finally:
+        pg._Connection.execute = real_execute
+
+
+def test_key_cache() -> None:
+    """Caching the auth lookup must not weaken revocation.
+
+    `resolve_key` is the one query every request makes, so at a hosted ledger's RTT it is
+    the largest fixed cost on the path. Caching it is worth a round trip per request — but
+    `revoked_at` is explicitly NOT subject to fail-open (CLAUDE.md), so a cache that let a
+    cut key keep working would be trading the wrong thing.
+
+    The checks below pin both halves: the cache saves the trip, and every in-process path
+    that changes the answer purges it synchronously.
+    """
+    print("\nmeter key cache")
+    db.seed_keys("mk_cache_probe:proj-cache:dev")
+    db.invalidate_key_cache()
+
+    statements: list[str] = []
+    real_execute = pg._Connection.execute
+
+    def counting(self, sql, params=()):
+        statements.append(sql)
+        return real_execute(self, sql, params)
+
+    real_ttl = config.KEY_CACHE_TTL_S
+    pg._Connection.execute = counting
+    try:
+        config.KEY_CACHE_TTL_S = 60.0
+
+        statements.clear()
+        first = db.resolve_key("mk_cache_probe")
+        check("a cold lookup hits the database", len(statements) == 1, str(len(statements)))
+        check("and resolves the project", first["project_id"] == "proj-cache")
+
+        statements.clear()
+        second = db.resolve_key("mk_cache_probe")
+        check("a warm lookup makes no round trip at all", statements == [],
+              str(len(statements)))
+        check("and returns the same answer", second["project_id"] == "proj-cache")
+
+        # A copy each time, or one request could edit what every later request
+        # authenticates against.
+        second["project_id"] = "tampered"
+        check("the cache hands out copies, not its own dict",
+              db.resolve_key("mk_cache_probe")["project_id"] == "proj-cache")
+
+        # The property that matters. Not "revocation is visible within the TTL" —
+        # visible on the very next call.
+        statements.clear()
+        db.revoke_key(first["key_id"])
+        revoked = db.resolve_key("mk_cache_probe")
+        check("revocation is visible immediately, not after the TTL",
+              revoked["revoked_at"] is not None, str(revoked))
+        check("because revoking purged the cache and forced a re-read",
+              any("SELECT" in st for st in statements))
+
+        db.unrevoke_key(first["key_id"])
+        check("and un-revoking is visible immediately too",
+              db.resolve_key("mk_cache_probe")["revoked_at"] is None)
+
+        # `resolve_key` joins `projects`, so a floor change must invalidate as well —
+        # this is the judge flow, where the floor is set after the key already exists.
+        db.set_breaker_floor("proj-cache", 0.25)
+        check("a breaker floor change is visible immediately",
+              db.resolve_key("mk_cache_probe")["breaker_floor_usd"] == 0.25)
+        db.set_breaker_floor("proj-cache", None)
+
+        # A miss must never be cached: a judge mints a key and uses it moments later.
+        check("an unknown key does not resolve", db.resolve_key("mk_not_yet") is None)
+        db.seed_keys("mk_not_yet:proj-cache:dev")
+        check("and a key created after that miss resolves at once, not after the TTL",
+              db.resolve_key("mk_not_yet") is not None)
+
+        # Expired entries must LEAVE, not merely be ignored on read. A judge session
+        # mints a key each, so a map that only ignores stale entries grows for the life
+        # of the process — the same accumulation that left 228 ceilings registered.
+        db.invalidate_key_cache()
+        config.KEY_CACHE_TTL_S = 0.01
+        for i in range(db._KEY_CACHE_SWEEP_AT + 4):
+            db.seed_keys(f"mk_sweep_{i}:proj-cache:dev")
+            db.resolve_key(f"mk_sweep_{i}")
+        time.sleep(0.05)
+        config.KEY_CACHE_TTL_S = 60.0
+        db.resolve_key("mk_cache_probe")   # one insert past the threshold sweeps
+        check("expired entries are evicted, not just ignored",
+              len(db._key_cache) < db._KEY_CACHE_SWEEP_AT,
+              f"{len(db._key_cache)} entries still cached")
+
+        # Escape hatch: TTL 0 means pay the trip every time.
+        config.KEY_CACHE_TTL_S = 0
+        db.invalidate_key_cache()
+        db.resolve_key("mk_cache_probe")
+        statements.clear()
+        db.resolve_key("mk_cache_probe")
+        check("TTL 0 disables the cache entirely", len(statements) == 1,
+              str(len(statements)))
+    finally:
+        pg._Connection.execute = real_execute
+        config.KEY_CACHE_TTL_S = real_ttl
+        db.invalidate_key_cache()
+
+
+def test_model_efficiency() -> None:
+    """The cross-model comparison the dashboard renders (PLAN.md Phase 3, B11).
+
+    Written offline by `scripts/cross_model.py --push`, never from the request path:
+    shadow-calling a second provider on live traffic doubles the customer's bill inside a
+    tool whose job is to control it, and the comparison does not need it.
+
+    The property that matters beyond "it stores rows" is that a re-push replaces a run
+    rather than doubling it. A push that dies halfway gets retried, and a doubled run does
+    not error — it silently halves every per-call cost the card displays.
+    """
+    print("\ncross-model efficiency")
+    rows = [
+        {"feature": "sql-from-question", "model": "claude-haiku-4-5",
+         "baseline_model": "gpt-4o-mini", "samples": 12,
+         "input_tokens": 900, "output_tokens": 260,
+         "baseline_input_tokens": 900, "baseline_output_tokens": 400,
+         "cost_usd": 0.0022, "baseline_cost_usd": 0.0004,
+         "pricing_version": "2026-08-01"},
+        {"feature": "ticket-summary", "model": "claude-haiku-4-5",
+         "baseline_model": "gpt-4o-mini", "samples": 9,
+         "input_tokens": 1200, "output_tokens": 300,
+         "baseline_input_tokens": 1200, "baseline_output_tokens": 300,
+         "cost_usd": 0.0025, "baseline_cost_usd": 0.0005,
+         "pricing_version": "2026-08-01"},
+    ]
+
+    check("nothing to show before a run", db.latest_model_efficiency() == [])
+
+    written = db.record_model_efficiency("cm_first", rows)
+    check("a run stores one row per feature", written == 2, str(written))
+
+    got = db.latest_model_efficiency()
+    check("and reads back", len(got) == 2, str(len(got)))
+    check("ordered by feature", [r["feature"] for r in got]
+          == ["sql-from-question", "ticket-summary"], str([r["feature"] for r in got]))
+    check("with both sides of the comparison kept apart",
+          got[0]["baseline_output_tokens"] == 400 and got[0]["output_tokens"] == 260)
+
+    # The decomposition the card exists to show: same tokens, different rate; or same
+    # rate, different verbosity. Conflating them gives a number nobody can act on.
+    verbosity = got[0]["output_tokens"] / got[0]["baseline_output_tokens"]
+    check("verbosity is derivable and below 1 here", abs(verbosity - 0.65) < 1e-9,
+          str(verbosity))
+    check("while cost is still several times higher — a rate effect, not a length one",
+          got[0]["cost_usd"] > got[0]["baseline_cost_usd"] * 4)
+
+    # Re-pushing the SAME run replaces it. A doubled run does not raise; it silently
+    # halves every per-call figure on the card.
+    db.record_model_efficiency("cm_first", rows)
+    check("re-pushing a run replaces it rather than doubling",
+          len(db.latest_model_efficiency()) == 2,
+          str(len(db.latest_model_efficiency())))
+
+    # A newer run wins outright — the card shows one comparison, not a merge of every
+    # comparison ever made against different models.
+    db.record_model_efficiency("cm_second", [dict(rows[0], feature="only-this")])
+    latest = db.latest_model_efficiency()
+    check("the newest run is the one served", [r["feature"] for r in latest] == ["only-this"],
+          str([r["feature"] for r in latest]))
+
+
+def test_soft_breaches_is_one_round_trip() -> None:
+    """The soft-budget poll must not scale its query count with the ceiling count.
+
+    It asked per configured ceiling, inside a loop. With ceilings coming only from
+    meter.yaml that was a handful of queries a minute and invisible. Judge sessions
+    register theirs at runtime, and the deployed instance reached 228 — 228 sequential
+    round trips every poll, at a measured ~85 ms each, which is far more work than the
+    60-second interval allows and grows with every judge who ever visits.
+
+    Nothing failed while that was true. It just got slower forever, which is why the check
+    is on the query COUNT rather than on the result.
+    """
+    print("\nsoft budget poll — round-trip count")
+    from proxy import budget
+
+    budget._ceilings.clear()
+    budget._file_ceilings.clear()
+    try:
+        for i in range(12):
+            pid = f"proj-soft-{i}"
+            budget.register_ceilings({(pid, None): 1.0, (pid, "alpha"): 0.5})
+            db.record_request({
+                "id": f"req-soft-{i}", "ts": db.now_iso(), "project_id": pid,
+                "feature": "alpha", "actor": "t", "model": "gpt-4o-mini",
+                "provider": "openai", "endpoint": "/v1/chat/completions",
+                "cost_usd": 0.9, "status": 200,
+            })
+
+        check("24 ceilings are configured", len(budget.active_ceilings()) == 24,
+              str(len(budget.active_ceilings())))
+
+        statements: list[str] = []
+        real_execute = pg._Connection.execute
+
+        def counting(self, sql, params=()):
+            statements.append(sql)
+            return real_execute(self, sql, params)
+
+        pg._Connection.execute = counting
+        try:
+            breaches = budget.soft_breaches(0.8)
+        finally:
+            pg._Connection.execute = real_execute
+
+        check("24 ceilings still cost exactly one round trip", len(statements) == 1,
+              f"{len(statements)} statements for 24 ceilings")
+        # The fold must not have changed which number each scope is compared against.
+        by_scope = {b["scope"]: b for b in breaches}
+        check("a feature ceiling is measured on that feature",
+              abs(by_scope["feature:proj-soft-0/alpha"]["spend_usd"] - 0.9) < 1e-9,
+              str(by_scope.get("feature:proj-soft-0/alpha")))
+        check("a project ceiling is measured on the whole project",
+              abs(by_scope["project:proj-soft-0"]["spend_usd"] - 0.9) < 1e-9,
+              str(by_scope.get("project:proj-soft-0")))
+        check("every breaching scope is reported", len(breaches) == 24, str(len(breaches)))
+
+        # Untagged spend counts towards the project ceiling but not a feature's.
+        db.record_request({
+            "id": "req-soft-untagged", "ts": db.now_iso(), "project_id": "proj-soft-0",
+            "feature": None, "actor": "t", "model": "gpt-4o-mini", "provider": "openai",
+            "endpoint": "/v1/chat/completions", "cost_usd": 0.05, "status": 200,
+        })
+        again = {b["scope"]: b for b in budget.soft_breaches(0.8)}
+        check("untagged spend raises the project total",
+              abs(again["project:proj-soft-0"]["spend_usd"] - 0.95) < 1e-9,
+              str(again["project:proj-soft-0"]))
+        check("but leaves the feature's own number alone",
+              abs(again["feature:proj-soft-0/alpha"]["spend_usd"] - 0.9) < 1e-9,
+              str(again["feature:proj-soft-0/alpha"]))
+    finally:
+        budget._ceilings.clear()
+        budget._file_ceilings.clear()
+
+
+def test_runtime_ceilings_are_reclaimed() -> None:
+    """A runtime tenant's ceilings go when its session does — but a file's never do.
+
+    `register_ceilings` only ever added, so `_ceilings` grew with every judge session and
+    never shrank. An expired four-hour session was still being measured days later, and
+    `soft_breaches` walked it on every poll.
+    """
+    print("\nruntime ceilings are reclaimed")
+    from proxy import budget
+
+    budget._ceilings.clear()
+    budget._file_ceilings.clear()
+    try:
+        budget.register_ceilings({("judge-gone", None): 0.5,
+                                  ("judge-gone", "alpha"): 0.1})
+        budget.register_ceilings({("file-proj", None): 3.0})
+        budget._file_ceilings.add(("file-proj", None))
+
+        check("both tenants are registered", len(budget.active_ceilings()) == 3)
+
+        dropped = budget.forget_project("judge-gone")
+        check("the runtime tenant's ceilings are dropped", dropped == 2, str(dropped))
+        check("and are gone from the active set",
+              "project:judge-gone" not in budget.active_ceilings())
+
+        # The important half. A runtime caller cannot widen a file ceiling; it must not be
+        # able to delete one through a different door either.
+        check("a meter.yaml ceiling is refused", budget.forget_project("file-proj") == 0)
+        check("and is still enforced",
+              budget.active_ceilings().get("project:file-proj") == 3.0)
+
+        check("forgetting an unknown project is a no-op",
+              budget.forget_project("never-existed") == 0)
+    finally:
+        budget._ceilings.clear()
+        budget._file_ceilings.clear()
 
 
 def test_gzipped_upstream_stream() -> None:
@@ -1707,6 +2079,42 @@ def test_ceiling_spend_one_round_trip() -> None:
         db.ceiling_spend = real
 
 
+def test_cors_previews_are_opt_in() -> None:
+    """Preview origins are off unless someone turns them on (PROPOSALS.md B22).
+
+    The preview pattern is built from the configured origins, so it cannot match an
+    unrelated project — but it necessarily matches `<project>-<anything>.vercel.app`,
+    because that is the shape of a preview URL and the suffix is not predictable. Since
+    `vercel.app` subdomains are first-come-first-served, someone can register
+    `meter-three-beta-evil.vercel.app` and be inside the allowlist.
+
+    That was survivable while CORS carried no credentials. With the judge money capability
+    riding a cookie, an allowed origin now gets it attached automatically — so the second
+    factor that exists to stop a leaked session token from spending would be delivered to
+    an origin an attacker owns. Hence: off by default.
+    """
+    print("\nCORS preview origins are opt-in")
+    from proxy.app import _preview_origin_regex
+
+    origins = ["https://meter-three-beta.vercel.app"]
+    rx = _preview_origin_regex(origins)
+    check("the pattern still exists for those who opt in", rx is not None)
+
+    import re as _re
+    pat = _re.compile(rx)
+    check("a genuine preview matches",
+          pat.fullmatch("https://meter-three-beta-abc123-team.vercel.app") is not None)
+    # The reason it is opt-in, asserted rather than argued.
+    check("but so does an attacker-registrable lookalike",
+          pat.fullmatch("https://meter-three-beta-evil.vercel.app") is not None)
+    check("an unrelated project is still refused",
+          pat.fullmatch("https://evil-meter-three-beta.vercel.app") is None)
+
+    check("and the flag that gates it defaults to off",
+          config.CORS_ALLOW_VERCEL_PREVIEWS is False,
+          str(config.CORS_ALLOW_VERCEL_PREVIEWS))
+
+
 def test_cors_preview_origins() -> None:
     """Vercel preview URLs are allowed; the rest of vercel.app is not.
 
@@ -1760,6 +2168,7 @@ def main() -> int:
 def _run() -> int:
     for suite in (
         test_cors_preview_origins,
+        test_cors_previews_are_opt_in,
         test_client_request_id,
         test_ceiling_spend_one_round_trip,
         test_soft_budget,
@@ -1775,6 +2184,11 @@ def _run() -> int:
         test_breaker,
         test_burst_detection,
         test_revocation_fails_closed,
+        test_breaker_round_trip_count,
+        test_key_cache,
+        test_model_efficiency,
+        test_soft_breaches_is_one_round_trip,
+        test_runtime_ceilings_are_reclaimed,
         test_gzipped_upstream_stream,
         test_ledger_migration,
         test_meter_yaml,

@@ -25,12 +25,18 @@ import os
 import sys
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Must be set before proxy.config is imported — it reads the environment once, at import.
 os.environ["DB_SCHEMA"] = "test_judge_" + uuid.uuid4().hex[:8]
+# The money capability ships as `SameSite=None; Secure`, which a browser — and httpx's
+# cookie jar — correctly refuses to send over the TestClient's plain-http `testserver`
+# origin. This is the same switch local development uses. `test_capability_cookie_attrs`
+# turns it back off to assert the production attributes.
+os.environ["JUDGE_CAPABILITY_INSECURE"] = "true"
 
 from judge import ledger, sessions  # noqa: E402
 from judge import prompts as prompts_mod  # noqa: E402
@@ -405,6 +411,179 @@ def test_a_boot_does_not_wipe_judge_ceilings() -> None:
     budget.register_ceilings({(s.project_id, None): 0.0})
     check("a runtime caller cannot widen a ceiling to zero",
           budget.active_ceilings().get(f"project:{s.project_id}") == 0.50)
+
+
+def test_session_timestamps_are_fixed_width() -> None:
+    """Session timestamps are compared as STRINGS in SQL, so their shape is load-bearing.
+
+    `expires_at` is TEXT and three call sites compare it with `<`/`>`: the live-session
+    cap, the expiry sweep, and the dashboard's own session lookup. `datetime.isoformat()`
+    omits the microseconds field entirely when it is exactly zero, which shortens the
+    string — and a shorter string sorts BELOW every other timestamp in the same second,
+    because `+` (0x2B) precedes `.` (0x2E). One row in a million, silently treated as
+    expired early.
+
+    `proxy.db.now_iso` exists for this reason and its docstring says so; this pins that
+    the judge tables use it too.
+    """
+    print("\njudge session timestamps are fixed width")
+    s = sessions.create()
+
+    for field in ("created_at", "expires_at"):
+        value = getattr(s, field)
+        check(f"{field} carries microseconds and an explicit offset",
+              len(value) == len("2026-08-10T10:50:39.394123+00:00")
+              and value.endswith("+00:00") and value[19] == ".",
+              f"{field}={value!r}")
+
+    # The property those two share with every other timestamp in the ledger: same width,
+    # so a string comparison orders them the same way an instant comparison would.
+    check("they are the same width as the ledger's own timestamps",
+          len(s.expires_at) == len(db.now_iso()),
+          f"{len(s.expires_at)} vs {len(db.now_iso())}")
+
+    # And the zero-microsecond case that motivates it: `isoformat()` would drop the field.
+    zero = datetime(2026, 8, 10, 12, 0, 0, 0, tzinfo=timezone.utc)
+    check("isoformat() really does drop a zero microseconds field",
+          "." not in zero.isoformat(), zero.isoformat())
+    check("db.iso_at() does not", db.iso_at(zero) == "2026-08-10T12:00:00.000000+00:00",
+          db.iso_at(zero))
+    check("and the two orderings agree once it is fixed width",
+          db.iso_at(zero) > db.iso_at(zero - timedelta(microseconds=1)))
+
+
+def test_judge_key_cannot_reach_the_money_rail() -> None:
+    """PROPOSALS.md B19 — a judge's Meter key is scoped to inference and nothing else.
+
+    The key exists to spend metered inference inside a capped session. It has no business
+    driving a charge, and B20 records that the session token handing it out is deliberately
+    script-readable on the console page — so "what can this token ultimately reach" is the
+    question that matters, not "how likely is it to leak".
+
+    Before scopes, the answer was every money route the treasury exposes.
+    """
+    print("\na judge key is scoped to inference")
+    s = sessions.create()
+
+    resolved = db.resolve_key(s.meter_key)
+    check("the judge's key resolves", resolved is not None)
+    check("and is scoped to proxy only", resolved["scopes"] == db.SCOPE_PROXY,
+          str(resolved["scopes"]))
+    check("so it may meter inference", db.key_allows(resolved, db.SCOPE_PROXY))
+    check("but it may not move money", not db.key_allows(resolved, db.SCOPE_MONEY))
+
+    # Through the real HTTP surface, not just the helper.
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+
+    with TestClient(app) as client:
+        for path in ("/topup", "/treasury/tick", "/charge"):
+            r = client.post(path, headers={"Authorization": f"Bearer {s.meter_key}"},
+                            params={"project_id": s.project_id})
+            check(f"{path} refuses the judge's key", r.status_code == 403,
+                  f"{path} -> {r.status_code}")
+
+
+def test_money_capability_is_not_script_readable() -> None:
+    """PROPOSALS.md B20 — spending needs a second factor the console cannot read.
+
+    The session token stays script-readable, and that decision was right: the console
+    calls this origin cross-site in `X-Judge-Session`, where a cookie is not sent. What B20
+    found is that the comment justifying it undersold the token — the credential vault is
+    keyed by it and `/judge/mandate` acts with the judge's own Prava *merchant* key, so it
+    authorises charges against a real card.
+
+    Reads keep working on the token alone. Money routes need the httpOnly capability too.
+    """
+    print("\nthe judge money capability (B20)")
+    from fastapi.testclient import TestClient
+
+    from proxy.app import app
+    from judge.routes import CAPABILITY_COOKIE
+
+    # This test needs three sessions and the per-IP limit is 8/hour, so without this it
+    # spends budget a later test is relying on. Same reset the limiter's own test does.
+    sessions._recent_by_ip.clear()
+
+    with TestClient(app) as client:
+        made = client.post("/judge/session",
+                           json={"name": "Cap", "email": "cap@example.com"}).json()
+        auth = {"X-Judge-Session": made["token"]}
+
+        check("the capability is never in the session payload",
+              not any("capab" in k.lower() for k in made), str(list(made))[:200])
+        check("but the browser was given one", CAPABILITY_COOKIE in client.cookies,
+              str(dict(client.cookies)))
+
+        # Reads are unaffected — the whole point is that only spending is gated.
+        check("a read still works on the token alone",
+              client.get("/judge/treasury", headers=auth).status_code == 200)
+        check("and so does the ledger",
+              client.get("/judge/ledger", headers=auth).status_code == 200)
+
+        held = client.cookies.get(CAPABILITY_COOKIE)
+        del client.cookies[CAPABILITY_COOKIE]
+        r = client.post("/judge/mandate", headers=auth, json={"amount_usd": 15})
+        check("without the capability a mandate is refused", r.status_code == 403,
+              f"{r.status_code} {r.text[:120]}")
+        check("403, not 401 — the session is fine, the action is not",
+              r.status_code == 403)
+        r = client.post("/judge/topup", headers=auth, json={"amount_usd": 5})
+        check("and so is a top-up", r.status_code == 403, str(r.status_code))
+
+        client.cookies.set(CAPABILITY_COOKIE, "jc_not_the_right_one")
+        r = client.post("/judge/topup", headers=auth, json={"amount_usd": 5})
+        check("a wrong capability is refused too, not just a missing one",
+              r.status_code == 403, str(r.status_code))
+
+        # And with it back, the route gets past the gate to its own logic.
+        client.cookies.set(CAPABILITY_COOKIE, held)
+        r = client.post("/judge/topup", headers=auth, json={"amount_usd": 5})
+        check("with the capability the gate lets it through", r.status_code != 403,
+              f"{r.status_code} {r.text[:160]}")
+
+        # One judge's capability must not spend another judge's session.
+        other = client.post("/judge/session",
+                            json={"name": "Other", "email": "other@example.com"}).json()
+        client.cookies.set(CAPABILITY_COOKIE, held)
+        r = client.post("/judge/topup", headers={"X-Judge-Session": other["token"]},
+                        json={"amount_usd": 5})
+        check("a capability is bound to its own session, not to any session",
+              r.status_code == 403, str(r.status_code))
+
+
+def test_capability_cookie_attrs() -> None:
+    """The cookie must be httpOnly and cross-site capable, or it is not a fix.
+
+    Asserted against the shipping configuration, with the local-development relaxation
+    turned off — the rest of this suite runs with it on because TestClient speaks http.
+    """
+    print("\nthe capability cookie's attributes")
+    from fastapi.testclient import TestClient
+
+    from proxy import config as pconfig
+    from proxy.app import app
+
+    sessions._recent_by_ip.clear()
+
+    real = pconfig.JUDGE_CAPABILITY_INSECURE
+    try:
+        pconfig.JUDGE_CAPABILITY_INSECURE = False
+        with TestClient(app) as client:
+            r = client.post("/judge/session",
+                            json={"name": "Attrs", "email": "attrs@example.com"})
+            raw = r.headers.get("set-cookie", "")
+            check("the capability is set as a cookie", "meter_judge_capability=" in raw, raw)
+            check("httpOnly, so no script on the page can read it",
+                  "httponly" in raw.lower(), raw)
+            check("Secure, which SameSite=None requires", "secure" in raw.lower(), raw)
+            check("SameSite=None, or it never reaches this origin from the console",
+                  "samesite=none" in raw.lower().replace(" ", ""), raw)
+            check("scoped to /judge, not sent with metered inference",
+                  "path=/judge" in raw.lower().replace(" ", ""), raw)
+    finally:
+        pconfig.JUDGE_CAPABILITY_INSECURE = real
 
 
 # ── Per-judge Prava merchant key ─────────────────────────────────────────────
@@ -1032,6 +1211,10 @@ def main() -> int:
             test_floor_actually_decides_the_trip,
             test_ceilings_are_written_where_the_dashboard_reads,
             test_a_boot_does_not_wipe_judge_ceilings,
+        test_session_timestamps_are_fixed_width,
+        test_judge_key_cannot_reach_the_money_rail,
+        test_money_capability_is_not_script_readable,
+        test_capability_cookie_attrs,
             test_prava_key_is_per_task_not_per_process,
             test_alerts_reach_the_judge_not_the_on_call_phone,
             test_routes,

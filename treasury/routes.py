@@ -74,6 +74,36 @@ async def _authed_key(request: Request) -> dict:
     return key
 
 
+def _requires(scope: str):
+    """Build a dependency that authenticates AND checks one scope.
+
+    B19: before per-key scopes, "authenticated" meant "may do everything", so any key that
+    could read a balance could also drive the autonomous charging loop — and
+    `WALKTHROUGH.md` publishes a working key. Splitting the two is what makes closing that
+    a configuration change rather than a code change.
+
+    The scope check runs *after* authentication so an unknown key still gets 401 rather
+    than 403: telling an anonymous caller "your key lacks a scope" would confirm the key
+    exists.
+    """
+
+    async def dependency(request: Request) -> dict:
+        key = await _authed_key(request)
+        if not proxy_db.key_allows(key, scope):
+            raise HTTPException(
+                403,
+                detail=f"This Meter key does not carry the '{scope}' scope.",
+            )
+        return key
+
+    return dependency
+
+
+# Module-level so FastAPI sees one dependency object per scope rather than a new one per
+# route definition.
+_MONEY = _requires(proxy_db.SCOPE_MONEY)
+
+
 async def _no_body(request: Request) -> None:
     """Reject a request body on routes that take query parameters.
 
@@ -118,7 +148,7 @@ def wallets():
     return db.list_wallets()
 
 
-@router.post("/wallets/seed", dependencies=[Depends(_authed_key), Depends(_no_body)])
+@router.post("/wallets/seed", dependencies=[Depends(_MONEY), Depends(_no_body)])
 def seed_wallet(
     project_id: str = "demo-project",
     provider: str = "openai",
@@ -140,7 +170,7 @@ def seed_wallet(
 # ── Top-up ───────────────────────────────────────────────────────────────────
 
 
-@router.post("/topup", dependencies=[Depends(_authed_key), Depends(_no_body)])
+@router.post("/topup", dependencies=[Depends(_MONEY), Depends(_no_body)])
 async def topup(
     project_id: str = "demo-project", provider: str | None = None, amount_usd: float = 50.00
 ):
@@ -164,7 +194,7 @@ def treasury_assess(project_id: str = "demo-project", provider: str | None = Non
     return treasurer.assess(project_id, provider)
 
 
-@router.post("/treasury/tick", dependencies=[Depends(_authed_key), Depends(_no_body)])
+@router.post("/treasury/tick", dependencies=[Depends(_MONEY), Depends(_no_body)])
 async def treasury_tick():
     """Run one pass of the Treasurer immediately, across every wallet.
 
@@ -257,6 +287,14 @@ async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
     """
     data = await list_mandates()
 
+    # Simulation is not an empty account (PROPOSALS.md M6). With `PRAVA_LIVE_MODE` off
+    # `list_mandates` returns an empty list, and falling through from here would let the
+    # expiry sweep at the bottom mark genuine `pending_approval` rows "expired" — because
+    # nothing came back from an API that was never asked. Same posture as the outage guard
+    # below: leave the local table exactly as it was.
+    if data.get("simulated"):
+        return []
+
     # A Prava outage must not take the sync down with it. `list_mandates` no longer raises
     # — transport failures come back as an error envelope — so the guard checks `_ok`
     # rather than catching. Returning empty leaves the local table untouched and lets
@@ -324,7 +362,7 @@ async def _sync_project(project_id: str, ext_uid: str) -> list[dict]:
 
 
 @router.post("/mandates/create",
-             dependencies=[Depends(_authed_key), Depends(_no_body)])
+             dependencies=[Depends(_MONEY), Depends(_no_body)])
 async def create_mandate(
     project_id: str = "demo-project",
     amount_usd: float | None = None,
@@ -362,6 +400,16 @@ async def create_mandate(
         recurring_frequency=recurring_frequency,
         callback_url=config.MANDATE_CALLBACK_URL or None,
     )
+
+    # PROPOSALS.md M6. Reporting simulation as `session_create_failed` would be wrong in
+    # the expensive direction: it reads as "Prava refused us" when Prava was never called,
+    # and it is the sort of thing that gets debugged as a credentials problem on stage. No
+    # pending row is opened either — half of what M6 objected to was this route filling
+    # `mandates` with rows no approval will ever resolve.
+    if session.get("simulated"):
+        return {"ok": False, "reason": "simulated",
+                "detail": session.get("detail"),
+                "next": "Set PRAVA_LIVE_MODE=true to create a real mandate session."}
 
     session_id = session.get("session_id")
     if not session_id:
@@ -416,7 +464,7 @@ async def mandate_status(project_id: str = "demo-project",
 
 
 @router.post("/mandates/sync",
-             dependencies=[Depends(_authed_key), Depends(_no_body)])
+             dependencies=[Depends(_MONEY), Depends(_no_body)])
 async def sync_mandates(project_id: str = "demo-project",
                         external_user_id: str | None = None):
     """Refresh this project's mandates from Prava.
@@ -447,12 +495,12 @@ def chargeable(project_id: str = "demo-project", amount_usd: float | None = None
     return db.chargeable_mandate(project_id, config.TREASURER_PROVIDER, amount_usd)
 
 
-@router.post("/charge", dependencies=[Depends(_authed_key), Depends(_no_body)])
+@router.post("/charge", dependencies=[Depends(_MONEY), Depends(_no_body)])
 async def charge(amount: float = 2.00):
     return await charge_mandate(amount, f"api_{uuid.uuid4().hex[:8]}")
 
 
-@router.post("/report", dependencies=[Depends(_authed_key), Depends(_no_body)])
+@router.post("/report", dependencies=[Depends(_MONEY), Depends(_no_body)])
 async def report(transaction_id: str, approved: bool = True):
     """Settle a charge. `transactionId` comes from the /charge response.
 
@@ -465,7 +513,7 @@ async def report(transaction_id: str, approved: bool = True):
     return await report_charge(transaction_id, approved)
 
 
-@router.post("/charge-refusal", dependencies=[Depends(_authed_key), Depends(_no_body)])
+@router.post("/charge-refusal", dependencies=[Depends(_MONEY), Depends(_no_body)])
 async def charge_refusal():
     """Over the cap. Visa declines. This is the demo beat."""
     return await charge_mandate(999.00, f"refuse_{uuid.uuid4().hex[:8]}")

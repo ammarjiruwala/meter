@@ -619,6 +619,188 @@ def test_pending_mandates() -> None:
           any(m["status"] == "approved" for m in db.list_stored_mandates("zeta")))
 
 
+def test_healthz_reports_treasurer_posture() -> None:
+    """The two switches that decide whether a loop can spend must be observable.
+
+    `/healthz` reported only whether the Treasurer had already tripped. Whether it was
+    running at all, and whether it was allowed to move real money, were invisible on a
+    deployment — `render.yaml` sets them and the host's dashboard can override it, and
+    nothing could tell you which won. CONTEXT.md §6a carried a standing warning that
+    `TREASURER_ENABLED` had to be off before judges arrived with real cards, and the only
+    way to check was to open the Render console.
+    """
+    print("\n/healthz reports the Treasurer's posture")
+    body = CLIENT.get("/healthz").json()
+    tre = body.get("treasurer") or {}
+    check("healthz still reports the trip state", "tripped" in tre, str(tre))
+    check("and now whether the loop is running at all", "enabled" in tre, str(tre))
+    check("and whether it may move real money", "dry_run" in tre, str(tre))
+    check("they report the live configuration",
+          tre["enabled"] == config.TREASURER_ENABLED
+          and tre["dry_run"] == config.TREASURER_DRY_RUN, str(tre))
+    check("both are booleans, so a check can assert on them",
+          isinstance(tre["enabled"], bool) and isinstance(tre["dry_run"], bool), str(tre))
+
+
+def test_prava_live_mode_gate() -> None:
+    """PROPOSALS.md M6 — `PRAVA_LIVE_MODE=false` must mean *no calls to Prava*.
+
+    It gated `charge_mandate`, `report_charge` and `verify_credentials` but not
+    `list_mandates` or `create_mandate_session`, so the flag that reads as "off" still
+    sent traffic — including to `POST /v1/sessions`, the one endpoint Prava documents a
+    `429 TRIES_EXHAUSTED` throttle on (C3). Every check below has a live-mode control, so
+    a gate that stopped working for some *other* reason still fails this test.
+    """
+    print("\nPRAVA_LIVE_MODE gate (M6)")
+
+    calls: list[tuple[str, str]] = []
+
+    async def counting_request(method, path, json_body=None, timeout=None):
+        calls.append((method, path))
+        return {"_ok": True, "mandates": []}
+
+    real_request = prava._request
+    real_live = prava.config.PRAVA_LIVE_MODE
+    try:
+        prava._request = counting_request
+        prava.config.PRAVA_LIVE_MODE = False
+
+        out = asyncio.run(prava.list_mandates())
+        check("list_mandates sends nothing when live mode is off", calls == [], str(calls))
+        check("and says so", out.get("simulated") is True, str(out))
+        # The key must be PRESENT and empty: `/mandates` 503s on a missing `mandates`
+        # key, and simulation is not an outage.
+        check("with an empty mandate list, not an absent one", out.get("mandates") == [],
+              str(out))
+
+        out = asyncio.run(prava.create_mandate_session(
+            user_id="meter_m6", user_email="m6@example.com", amount_usd=5.0,
+            merchant_name="Meter", merchant_url="https://example.com"))
+        check("create_mandate_session sends nothing either", calls == [], str(calls))
+        check("it says so too", out.get("simulated") is True, str(out))
+        check("and invents no session id", out.get("session_id") is None, str(out))
+        check("and no approval url for a human to click", out.get("iframe_url") is None,
+              str(out))
+
+        # Negative control. If these two stop going out, the checks above pass for the
+        # wrong reason and this test is worthless.
+        prava.config.PRAVA_LIVE_MODE = True
+        asyncio.run(prava.list_mandates())
+        check("live mode ON: the read does go out", len(calls) == 1, str(calls))
+        asyncio.run(prava.create_mandate_session(
+            user_id="meter_m6", user_email="m6@example.com", amount_usd=5.0,
+            merchant_name="Meter", merchant_url="https://example.com"))
+        check("live mode ON: the session create goes out", len(calls) == 2, str(calls))
+        check("on the endpoint Prava throttles", calls[1] == ("POST", "/v1/sessions"),
+              str(calls))
+    finally:
+        prava._request = real_request
+        prava.config.PRAVA_LIVE_MODE = real_live
+
+    # The route must not dress simulation up as a Prava failure, and must open no row.
+    before = len(db.pending_mandates("m6route"))
+    r = CLIENT.post("/mandates/create", headers=AUTH,
+                    params={"project_id": "m6route", "amount_usd": 5}).json()
+    check("the route reports simulation, not session_create_failed",
+          r.get("reason") == "simulated", str(r))
+    check("and opens no pending mandate row",
+          len(db.pending_mandates("m6route")) == before, str(r))
+
+    # A simulated sync must leave the local table alone. Without the guard the empty list
+    # falls through to the 15-minute expiry sweep and marks a real pending row `expired`
+    # because an API that was never asked returned nothing.
+    db.open_pending_mandate("m6sync", "ses_m6", "openai", 500.0, "monthly", "meter_m6sync")
+    row_id = db.pending_mandates("m6sync")[0]["id"]
+    pg.execute("UPDATE mandates SET synced_at = ? WHERE id = ?",
+               (ledger.iso_seconds_ago(3600), row_id))
+
+    CLIENT.get("/mandates/status", params={"project_id": "m6sync"})
+    check("a simulated sync leaves an aged pending row pending",
+          len(db.pending_mandates("m6sync")) == 1)
+
+    # Negative control for the guard itself: the same aged row, the same empty list, but
+    # not flagged simulated -- the sweep must fire, or the check above proves nothing.
+    from treasury import routes as _routes
+    real_list = _routes.list_mandates
+    try:
+        _routes.list_mandates = lambda: asyncio.sleep(0, result={"_ok": True, "mandates": []})
+        CLIENT.get("/mandates/status", params={"project_id": "m6sync"})
+        check("an unflagged empty list DOES expire it (control)",
+              db.pending_mandates("m6sync") == [])
+    finally:
+        _routes.list_mandates = real_list
+
+
+def test_key_scopes() -> None:
+    """PROPOSALS.md B19 — a key that can read a balance must not also be able to charge.
+
+    Before this, "authenticated" meant "may do everything": the same key that reads
+    `/wallets` could drive `POST /treasury/tick`, the whole autonomous charging loop. That
+    matters specifically because `WALKTHROUGH.md` publishes a working Meter key, so the
+    B19 fix moved `/treasury/tick` from "anyone" to "anyone who read the walkthrough".
+
+    NULL scopes means unrestricted, and that is load-bearing rather than lazy: scoping
+    arrived after keys were in circulation, and defaulting to deny would have taken the
+    treasury away from every deployment the moment it upgraded.
+    """
+    print("\nper-key scopes (B19)")
+
+    check("no scopes means unrestricted", ledger.key_allows({"scopes": None}, "money"))
+    check("empty scopes means unrestricted too", ledger.key_allows({"scopes": ""}, "money"))
+    check("a named scope is honoured",
+          ledger.key_allows({"scopes": "proxy,money"}, "money"))
+    check("and one that is absent is refused",
+          not ledger.key_allows({"scopes": "proxy,read"}, "money"))
+    check("an unresolved key allows nothing", not ledger.key_allows(None, "money"))
+
+    ledger.seed_keys("mk_scope_none:scopeproj:dev")
+    ledger.seed_keys("mk_scope_proxy:scopeproj:dev:proxy")
+    ledger.seed_keys("mk_scope_money:scopeproj:dev:money|read")
+
+    check("a scoped key stores what it was given",
+          ledger.resolve_key("mk_scope_money")["scopes"] == "money,read")
+    check("an unscoped key stores NULL",
+          ledger.resolve_key("mk_scope_none")["scopes"] is None)
+
+    # A typo in a scope name must not quietly grant less than intended.
+    before = ledger.resolve_key("mk_scope_typo")
+    ledger.seed_keys("mk_scope_typo:scopeproj:dev:mony")
+    check("an unknown scope name is refused, not silently narrowed",
+          before is None and ledger.resolve_key("mk_scope_typo") is None)
+
+    money_route = {"project_id": "scopeproj", "amount_usd": 1}
+
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_scope_proxy"},
+                    params=money_route)
+    check("a proxy-scoped key is refused at a money route", r.status_code == 403,
+          f"{r.status_code} {r.text[:120]}")
+    check("and told which scope it lacks", "money" in r.text, r.text[:120])
+
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_scope_money"},
+                    params=money_route)
+    check("a money-scoped key gets through the scope check", r.status_code != 403,
+          f"{r.status_code} {r.text[:120]}")
+
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_scope_none"},
+                    params=money_route)
+    check("an unscoped key still works, or upgrading locks everyone out",
+          r.status_code != 403, f"{r.status_code} {r.text[:120]}")
+
+    # Order matters: an unknown key must not learn that scopes exist.
+    r = CLIENT.post("/topup", headers={"Authorization": "Bearer mk_no_such_key"},
+                    params=money_route)
+    check("an unknown key is 401, not 403", r.status_code == 401, str(r.status_code))
+
+    # Every money route, as a set. B19 happened because the rule was applied to a list
+    # and `/treasury/tick` was not on it.
+    for path in ("/wallets/seed", "/topup", "/treasury/tick", "/charge", "/report",
+                 "/charge-refusal", "/mandates/create", "/mandates/sync"):
+        r = CLIENT.post(path, headers={"Authorization": "Bearer mk_scope_proxy"},
+                        params={"project_id": "scopeproj"})
+        check(f"{path} refuses a key without the money scope", r.status_code == 403,
+              f"{path} -> {r.status_code}")
+
+
 def test_event_ledger() -> None:
     """Every attempt leaves a row, including the refusals."""
     print("\nevent ledger")
@@ -1345,6 +1527,9 @@ def _run() -> int:
             test_alert_noise,
             test_credential_preflight,
             test_pending_mandates,
+            test_healthz_reports_treasurer_posture,
+            test_prava_live_mode_gate,
+            test_key_scopes,
             test_event_ledger,
             test_migration_from_old_schema,
             test_concurrent_writers,

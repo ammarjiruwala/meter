@@ -212,6 +212,35 @@ It should improve sharply with the proxy colocated with the database on Fly.io, 
 nobody has measured that yet — do not put a latency number on a slide until it comes from
 the deployed proxy.**
 
+### The deployed number, measured at last (2026-08-09)
+
+`p50 255 ms of proxy overhead`, n=12, against **https://meter-proxy.onrender.com**. Two
+independent runs agreed within 4 ms (255.3 and 259.3), and the spread inside a run was
+254–263 ms — tight enough that this is a systematic cost, not noise. Produced by
+`scripts/bench_deployed.py`, which is the only thing that can produce it:
+`bench_overhead.py` runs the app in-process against a loopback upstream and therefore
+measures the proxy's CPU work with the database microseconds away.
+
+It is **18% of a 1,428 ms request** — the rest is the provider.
+
+**Why it is 255 ms and not 5 ms: the deployment is not colocated.** Render runs the proxy
+in **Singapore**; Supabase holds the ledger in **ap-south-1 (Mumbai)**. Three sequential
+round trips at a Singapore↔Mumbai RTT lands almost exactly here, which is the count model
+below predicting the measurement rather than being fitted to it.
+
+Two things follow, and they are the whole story:
+
+* **Colocation is now the single highest-value change available.** At an in-region 1–2 ms
+  RTT the same three trips cost 3–6 ms, which is at or just over ARCHITECTURE.md §8's
+  5 ms budget. Nothing else on the request path is within two orders of magnitude of this.
+* **The trip reduction was worth ~170 ms per request on this deployment.** Five trips at
+  this RTT would be ~425 ms. That is the reduction below, priced at the RTT that actually
+  applies rather than the one the benchmark assumed.
+
+⚠ The old laptop figure of ~53 ms was measured from outside both regions and is **not**
+comparable — it is not "the deployed number improved", it is a different measurement of a
+different path. The rule stands: quote 255 ms, from the deployed proxy, or quote nothing.
+
 ### It is not one round trip — it is a *count*, and the count depends on your config
 
 The 52.7 ms above was measured on the **minimal** path, which `bench_overhead.py` used to
@@ -224,27 +253,53 @@ loopback latency the timings cannot separate three round trips from five):
 
 | Configuration | DB round trips per request | at ~50 ms RTT |
 | --- | --- | --- |
-| Minimal — breaker off, no ceilings | 2 (1 blocking + the capture write) | ~50 ms |
-| Breaker on, no ceilings | 4 | ~150 ms |
-| **Breaker on + ceilings — what ships** | **5** *(was 6)* | **~200 ms** |
+| Minimal — breaker off, no ceilings | **1** *(was 2)* | ~50 ms |
+| **Breaker on + ceilings — what ships** | **3** *(was 5, and 6 before that)* | **~150 ms** |
+
+Both figures are with a warm key cache, which is the steady state — a cold cache adds one
+trip back (2 and 4 respectively), and only the first request after a restart or a
+revocation pays it. Re-measured end to end 2026-08-09 by counting `pg._Connection.execute`
+across a real request through the running proxy, not by adding up what the code looks like
+it should do.
 
 So the honest reading of 52.7 ms is that it is the **best case**, and the default
 production configuration is several times worse. Region alone does not fix that: at an
-in-region 1–2 ms RTT, five sequential trips is still 5–10 ms, which is at or over the 5 ms
-budget ARCHITECTURE.md §8 sets.
+in-region 1–2 ms RTT, three sequential trips is 3–6 ms, which is at or just over the 5 ms
+budget ARCHITECTURE.md §8 sets — better than the 5–10 ms five trips implied, and still not
+a number to quote until it comes from the deployed proxy.
 
-**One trip has been removed** (2026-08-02): `budget.authorize` asked for feature spend and
-project spend as two separate queries — same table, same project, same window, differing
-only by a feature filter. `db.ceiling_spend` now returns both from one scan. Under SQLite
-that saved microseconds and would not have been worth writing; with the ledger 50 ms away
-it is 50 ms off every enforced request. `test_proxy.py` asserts `authorize` makes exactly
-one call, because this is the kind of thing that silently regresses.
+**Three trips have been removed, in three passes.**
 
-The remaining three are the breaker's open-breaker lookup, the breaker's rolling-window
-sum, and `resolve_key`. Folding the breaker's two into one query, or caching `resolve_key`
-briefly, are the next reductions if the deployed number still disappoints — measure before
-building either. `--breaker` on `bench_overhead.py` exists so the shipping configuration is
-measurable at all.
+1. *2026-08-02* — `budget.authorize` asked for feature spend and project spend as two
+   separate queries: same table, same project, same window, differing only by a feature
+   filter. `db.ceiling_spend` returns both from one scan. Under SQLite that saved
+   microseconds and would not have been worth writing; with the ledger 50 ms away it is
+   50 ms off every enforced request.
+
+2. *2026-08-09* — the breaker made two reads in the quiet case (`active_breaker`, then the
+   rolling-window sum) and **three** once the floor was cleared, because `_evaluate` went
+   back for the baseline window. The short window is contained by the baseline window, so
+   one scan bounded by the baseline cutoff yields both sums with a `CASE`, and the
+   open-breaker row joins onto the same statement. `db.breaker_state` returns all three.
+   Measured 3 → 1 on the over-floor path and 2 → 1 when quiet.
+
+3. *2026-08-09* — `resolve_key` is the one query **every** request makes, and its answer
+   almost never changes. It is now cached in-process for `KEY_CACHE_TTL_S` (default 5 s).
+   The reason this does not weaken revocation: every path that can change the answer —
+   `revoke_key`, `unrevoke_key`, `set_breaker_floor` — purges the cache synchronously, so
+   a revocation issued through Meter is visible on the *next* request rather than after
+   the TTL. An epoch counter stops an in-flight read from re-caching a row it fetched
+   before the purge. Misses are never cached, because a judge session mints a key and uses
+   it moments later. `KEY_CACHE_TTL_S=0` disables it.
+
+Each reduction is pinned by a test that counts statements at `pg._Connection.execute`
+rather than counting calls to the helper — a helper that quietly issued four queries would
+pass the weaker check. These regress silently: nothing fails, the number just goes back up.
+
+What is left is the irreducible floor for an enforced request: one read for the breaker,
+one for the ceiling, one write for the ledger row. Removing more means removing a feature
+or batching the capture write, not folding queries. `--breaker` on `bench_overhead.py`
+exists so the shipping configuration is measurable at all.
 
 The pre-Postgres figures, which are the measurement of the proxy's own work: p50
 +0.26 ms wall-clock (minimal path) / +0.35 ms (enforced path), self-reported in-process,

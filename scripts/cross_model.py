@@ -136,6 +136,65 @@ def report(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def aggregate(rows: list[dict]) -> list[dict]:
+    """Collapse matched pairs into one row per feature, costed on both sides.
+
+    The same arithmetic `report()` prints, returned as data so it can be stored. Kept
+    separate from `report()` rather than folded into it because one renders and the other
+    persists, and a function that does both ends up formatting strings into a database.
+    """
+    import numpy as np
+
+    from proxy import config as pconfig
+    from proxy.pricing import Usage, price
+
+    out = []
+    for feat in sorted({r["feature"] for r in rows}):
+        sub = [r for r in rows if r["feature"] == feat]
+        base_cost = float(np.mean([
+            price(Usage(input_tokens=r["baseline_input_tokens"],
+                        output_tokens=r["baseline_output_tokens"]),
+                  r["baseline_model"])[0] for r in sub]))
+        cand_cost = float(np.mean([
+            price(Usage(input_tokens=r["input_tokens"], output_tokens=r["output_tokens"]),
+                  r["model"])[0] for r in sub]))
+        out.append({
+            "feature": feat,
+            "model": sub[0]["model"],
+            "baseline_model": sub[0]["baseline_model"],
+            "samples": len(sub),
+            # Medians, not means: one pathological completion should not move the
+            # verbosity ratio the whole comparison rests on.
+            "input_tokens": int(np.median([r["input_tokens"] for r in sub])),
+            "output_tokens": int(np.median([r["output_tokens"] for r in sub])),
+            "baseline_input_tokens": int(np.median([r["baseline_input_tokens"] for r in sub])),
+            "baseline_output_tokens": int(np.median([r["baseline_output_tokens"] for r in sub])),
+            # Costs stay means: these are summed into a total, and a median of per-task
+            # costs does not add up to what a run actually costs.
+            "cost_usd": cand_cost,
+            "baseline_cost_usd": base_cost,
+            "pricing_version": pconfig.PRICING_VERSION,
+        })
+    return out
+
+
+def push(rows: list[dict], run_id: str | None = None) -> str:
+    """Aggregate and store a run so the dashboard's Model Efficiency view can read it."""
+    from proxy import db
+
+    run_id = run_id or f"cm_{datetime.now(timezone.utc):%Y%m%dT%H%M%S}"
+    written = db.record_model_efficiency(run_id, aggregate(rows))
+    print(f"pushed {written} feature rows as run {run_id}")
+    return run_id
+
+
+def load_results() -> list[dict]:
+    """Matched pairs from previous runs, so a push does not require re-spending."""
+    if not OUT.exists():
+        return []
+    return [json.loads(line) for line in OUT.read_text().splitlines() if line.strip()]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -145,7 +204,20 @@ def main() -> int:
     ap.add_argument("--cap-usd", type=float, default=2.0)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--push", action="store_true",
+                    help="after the run, store the aggregate for the dashboard")
+    ap.add_argument("--push-only", action="store_true",
+                    help="store what previous runs already measured and send nothing")
     args = ap.parse_args()
+
+    # Storing what is already measured costs nothing and sends nothing, so it happens
+    # before every guard below. The live replay is the expensive half; this is not.
+    if args.push_only:
+        existing = load_results()
+        if not existing:
+            sys.exit(f"nothing to push — {OUT} does not exist yet. Run without --push-only.")
+        push(existing)
+        return 0
 
     base = load_baseline()
     plan = sample(base, args.per_tag)
@@ -185,6 +257,8 @@ def main() -> int:
     if results:
         print()
         print(report(results))
+        if args.push:
+            push(results)
         return 0
     print("no matched pairs produced — treating as failure", file=sys.stderr)
     return 1

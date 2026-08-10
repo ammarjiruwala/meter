@@ -46,6 +46,13 @@ def _within_cooldown(scope: str, now: float | None = None) -> bool:
         last = _last_sent.get(scope)
         if last is not None and (now - last) < config.POKE_COOLDOWN_S:
             return True
+        # Drop scopes whose cooldown has long since lapsed. They can never suppress
+        # anything again, and the scope string contains a project id — so with judge
+        # sessions minting a project each, this map otherwise grows for the life of the
+        # process. Swept here rather than on a timer because this is the only writer.
+        cutoff = config.POKE_COOLDOWN_S * 2
+        for stale in [s for s, t in _last_sent.items() if now - t > cutoff]:
+            del _last_sent[stale]
         _last_sent[scope] = now
         return False
 

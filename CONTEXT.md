@@ -196,20 +196,143 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         set (contradicting its own `connect()` note), and the marketing page still explained
         itself by a `meter.db`-on-local-disk constraint that no longer exists. Both now say
         what is true *and* what stayed true for a different reason.
-    *   ⚠ **`PRAVA_LIVE_MODE=false` does not stop calls to Prava** — `PROPOSALS.md` **M6**,
-        open. It gates `charge_mandate`, `report_charge` and `verify_credentials`, but **not**
-        `list_mandates` or `create_mandate_session`. Observed live: with the flag off, both
-        went out and returned 401, and `/mandates` answered 503. **So §6a's own
-        "demo runs on `PRAVA_LIVE_MODE=False` until the outage clears" does not achieve what
-        it says.** Worse, the ungated `POST /v1/sessions` is the one endpoint Prava documents
-        a `429 TRIES_EXHAUSTED` throttle on. Not fixed unilaterally: simulating a mandate list
-        risks showing mandates that do not exist, mid-demo.
-    *   ⚠ **`POST /mandates/create` and `/mandates/sync` take unauthenticated writes** —
-        `PROPOSALS.md` **M7**, open. Verified 200 with no key. B18 authenticated the money
-        moves and these move none, but they *spend a metered third-party quota* — the same
-        `POST /v1/sessions` above — so an unauthenticated caller can exhaust the allowance the
-        Treasurer depends on. One-line fix, but it breaks Tanay's "Connect your card" flow if
-        the browser calls it keyless, so it needs that decision first.
+*   **Model Efficiency shipped, and the cross-model lane is no longer blocked (Shubh,
+    2026-08-09).** This was the one genuinely open lane. `scripts/cross_model.py` already
+    settled `PROPOSALS.md` B11 the right way — replay offline, never shadow-call a second
+    provider on live traffic, because doubling a customer's bill inside a cost-control tool
+    is indefensible. What was missing was the last hop: the script writes JSONL on the
+    proxy's host, and the dashboard reads only Postgres from another host, so the
+    comparison could not reach the view meant to render it. Added a `model_efficiency`
+    table, `--push` / `--push-only` on the script, and a **Model Efficiency** card that
+    decomposes the cost gap into **rate** (a vendor decision) and **verbosity** (usually a
+    prompt one) instead of one useless multiplier — and says on its face that it measures
+    no quality, so "cheaper" is half a trade-off. ⚠ **The live replay has not been run**: it
+    needs a funded Anthropic key and spends real money, so the card renders its empty state
+    until someone decides to. Verified by running the dashboard's literal SQL against a
+    seeded table, so the view is proven queryable rather than only typechecked.
+
+*   **Judge money routes need a second, `httpOnly` capability (Shubh, 2026-08-09) —
+    `PROPOSALS.md` B20 closed.** The session token stays script-readable, which was always
+    the right call: the console calls `/judge/*` cross-origin in `X-Judge-Session`, where a
+    cookie is not sent. What B20 found is that the token reaches more than its comment
+    admitted — it keys the credential vault and `/judge/mandate` acts with the judge's own
+    Prava **merchant** key, so a readable token was a readable licence to charge a real
+    card. Now `/judge/mandate` and `/judge/topup` also require `meter_judge_capability`:
+    minted independently, stored only as a SHA-256, set by the **proxy on its own origin**
+    as `httpOnly; Secure; SameSite=None; Path=/judge`, compared with `compare_digest`.
+    Reads are untouched. CORS gained `allow_credentials`, **off whenever origins are
+    wildcarded** — `*` plus credentials is rejected by browsers, and silently getting no
+    cookie would present as a backend bug. Sessions predating the column fail closed.
+    `JUDGE_CAPABILITY_INSECURE` exists for plain-http local dev only and must never be set
+    in a deployment.
+
+*   **Per-key scopes shipped (Shubh, 2026-08-09) — `PROPOSALS.md` B19's wider question.**
+    A Meter key was all-or-nothing, so "authenticated" meant "may do everything" — the same
+    key that reads a balance could drive the autonomous charging loop, and `WALKTHROUGH.md`
+    publishes a working one. `meter_keys.scopes` now carries `proxy` / `money` / `read`;
+    all eight money-moving treasury routes require `money`, asserted as a **set** so the
+    next route added is covered by default rather than enumerated. **`NULL` means
+    unrestricted**, which is deliberate: defaulting to deny would have locked every existing
+    deployment out of its own treasury on upgrade. The demo key is therefore still
+    unrestricted until someone narrows it alongside `WALKTHROUGH.md`. **Judge keys are
+    narrowed already** — issued `proxy` only, so even via B20's script-readable token a leak
+    reaches metered inference inside a capped session, never a charge. `METER_KEYS` learned
+    an optional fourth field (`key:project:env:proxy|read`) and refuses unknown scope names
+    rather than silently granting less than intended. Migration verified against a
+    pre-scopes `meter_keys`.
+*   **`PROPOSALS.md` M8 was already fixed and recorded as open.** `replace_budgets` exempts
+    `environment = 'judge'` projects from the boot wipe — keyed on the environment rather
+    than an id prefix, so it is a property of the project and not a naming convention.
+    `test_a_boot_does_not_wipe_judge_ceilings` covers it, including that a ceiling deleted
+    from `meter.yaml` still stops being enforced.
+
+*   **`/healthz` now reports the Treasurer's posture (Shubh, 2026-08-09).** It reported
+    only whether the loop had already tripped. Whether it was *running*, and whether it was
+    allowed to move real money, were invisible on a deployment: `render.yaml` sets
+    `TREASURER_ENABLED` and `TREASURER_DRY_RUN`, the Render dashboard can override either,
+    and nothing anywhere told you which won. This section carried a standing warning that
+    `TREASURER_ENABLED` must be `false` before judges arrive with real cards — and the only
+    way to check was to open the Render console. `treasurer.enabled` and
+    `treasurer.dry_run` are on `/healthz` now, so the safe state is verifiable from outside
+    by anyone. **`render.yaml` sets both safely; confirm against the live service before a
+    demo, because the blueprint is not the running configuration.**
+
+*   **CORS preview origins are opt-in now — `PROPOSALS.md` B22 (Shubh, 2026-08-09).** B19's
+    fix stopped the preview regex matching *unrelated* projects, but it still has to match
+    `<project>-<anything>.vercel.app`, and `vercel.app` subdomains are first-come-first-served
+    — `meter-three-beta-evil.vercel.app` is registrable by anyone. Survivable until B20 turned
+    on credentialed CORS: the money capability is a cookie, so a matching origin now receives
+    it **automatically**, and the second factor guarding a leaked session token would land on
+    an origin an attacker owns. `CORS_ALLOW_VERCEL_PREVIEWS` defaults to **off**.
+    ⚠ Testing the console from a branch preview now needs the flag, or that preview URL named
+    in `CORS_ALLOW_ORIGINS`.
+
+*   **Filed `PROPOSALS.md` B21: ARCHITECTURE.md's `<5ms p50` is unreachable as deployed.**
+    The measured 255 ms is distance, not code — 3 round trips at a Singapore↔Mumbai RTT.
+    Three readings lead different places (colocate; or the budget always meant the proxy's
+    own work; or restate the budget in *round trips*, which is the thing code controls), so
+    it is filed rather than edited: ARCHITECTURE.md is a source-of-truth doc and the reading
+    chosen changes what "done" means for the request path. Recommendation is colocate, then
+    restate §8 in round trips.
+
+*   **The deployed overhead number exists now: p50 255 ms (Shubh, 2026-08-09).** The
+    measurement §6a has been withholding permission to quote since the Postgres port.
+    `scripts/bench_deployed.py` provisions a **judge session** and drives that, so every row
+    it writes is tenanted to a throwaway `judge-<nonce>` project and **demo-project is
+    untouched** — it also needs no Meter key, because a judge's key never leaves the server.
+    n=12 across three sessions, two independent runs agreeing within 4 ms, spread 254–263 ms.
+    **18% of a 1,428 ms request**; the rest is the provider.
+    **The cause is that the deployment is not colocated** — proxy on Render in **Singapore**,
+    ledger on Supabase in **ap-south-1 (Mumbai)**. Three sequential round trips at that RTT
+    lands where it lands, so the count model predicted the measurement rather than being
+    fitted to it. **Colocating is now the highest-value change available anywhere in the
+    system**: the same three trips in-region are 3–6 ms, at or just over ARCHITECTURE.md §8's
+    5 ms budget. It also prices the trip reduction above at **~170 ms per request** here.
+    ⚠ The old ~53 ms laptop figure is **not** comparable — different path, measured from
+    outside both regions. Quote 255 ms or quote nothing.
+    ⚠ One trap this measurement walked into first, recorded so nobody repeats it: a judge's
+    breaker floor is deliberately tiny so judges can *watch* it trip, so a run of any length
+    is mostly **refusals**. A refused request never calls a provider — it writes
+    `latency_ms = 0` and an `overhead_ms` that is the entire refusal — and averaging those in
+    produced a confident **129 ms** that describes neither path. The script now excludes any
+    row that did not forward, and says how many it dropped.
+
+*   **Round trips on the request path: 5 -> 3 (Shubh, 2026-08-09).** Measured end to end by
+    counting `pg._Connection.execute` across a real request through a running proxy, not by
+    reading the code. The shipping configuration (breaker on + ceilings) now makes **3**
+    blocking round trips with a warm key cache and 4 cold; the minimal path makes 1 warm,
+    2 cold. Two reductions: `db.breaker_state` folds the open-breaker lookup and both spend
+    windows into one statement (3 -> 1 over the floor, 2 -> 1 quiet), and `resolve_key` is
+    cached in-process for `KEY_CACHE_TTL_S` (default 5 s). **Revocation stays immediate** —
+    `revoke_key`, `unrevoke_key` and `set_breaker_floor` purge synchronously, an epoch
+    counter stops an in-flight read from re-caching a pre-purge row, and misses are never
+    cached so a freshly minted judge key works at once. Pinned by 22 checks that count
+    statements at the connection facade, because this is the kind of win that regresses
+    with nothing failing. `proxy/README.md` has the counted table. **Still do not quote a
+    latency number until it comes from the deployed proxy** — this changes the count, not
+    the RTT, and distance is still what dominates.
+
+    *   ✅ **Fixed: `PRAVA_LIVE_MODE=false` now stops every call to Prava** — `PROPOSALS.md`
+        **M6**, closed 2026-08-09 (Shubh). It gated `charge_mandate`, `report_charge` and
+        `verify_credentials` but **not** `list_mandates` or `create_mandate_session`, so the
+        flag that reads as off still sent traffic — including to `POST /v1/sessions`, the one
+        endpoint Prava documents a `429 TRIES_EXHAUSTED` throttle on. **So §6a's own "demo runs
+        on `PRAVA_LIVE_MODE=False`" did not achieve what it said.** Both are gated now. The
+        decision M6 was waiting on: the simulated mandate list is **empty**, never the locally
+        stored rows — a list populated from `mandates` would show rows Prava has never
+        confirmed, presented identically to ones it has. The `mandates` key is still present,
+        so `/mandates` renders `[]` rather than the 503 a missing key produces: simulation is
+        not an outage. `create_mandate_session` returns no `session_id` and no `iframe_url`
+        (a fake approval URL is a link a human clicks), and `/mandates/create` reports
+        `reason: "simulated"` rather than `session_create_failed` — and opens no pending row,
+        which was the other half of M6. `_sync_project` bails on a simulated list too;
+        without that the empty result fell through to the 15-minute expiry sweep and marked
+        genuine pending rows `expired`. 14 checks in `test_treasury.py`, each with a live-mode
+        control so a gate that stops working for another reason still fails.
+    *   ✅ **Fixed earlier: `POST /mandates/create` and `/mandates/sync` are authenticated** —
+        `PROPOSALS.md` **M7**. Both carry `Depends(_authed_key)`
+        ([treasury/routes.py](treasury/routes.py) lines 326 and 418). Recorded here because
+        §6a and M7 both described them as open long after the fix landed.
     *   **Not a bug, recorded so nobody re-chases it:** `app.routes` reports 11 entries for a
         21-route app because this FastAPI version keeps each `include_router` as one opaque
         `_IncludedRouter`. The treasury surface is fine. Use `/openapi.json`.
