@@ -808,6 +808,41 @@ another judge's session, and that the capability never appears in the session pa
 `dashboard/src/lib/session.ts`'s comment — the one this entry said undersold the risk — now
 states what the token actually reaches and what carries the authority instead.
 
+### B21 — ARCHITECTURE.md's `<5ms p50` is unreachable on the deployment as configured · OPEN — found 2026-08-09
+
+ARCHITECTURE.md line 14 draws the hot path as `PROXY (hot path, <5ms p50)`, and §8 treats
+that as the budget. The first measurement from the **deployed** proxy puts it at
+**p50 255 ms** (n=12, two runs agreeing within 4 ms, `scripts/bench_deployed.py`).
+
+This is not the proxy being slow. It makes **3** sequential database round trips on the
+shipping path — already reduced from 5 — and the deployment puts Render in **Singapore**
+and Supabase in **ap-south-1 (Mumbai)**. Three trips at that RTT is 255 ms, so the budget
+is missed by distance, not by code.
+
+Why this needs a human rather than an edit. Three readings, and they lead different places:
+
+1. **The budget is right and the deployment is wrong.** Colocate — proxy in `bom`, or the
+   database in Singapore — and the same three trips cost 3–6 ms, which lands at or just
+   over 5 ms. This is the cheapest fix by a wide margin and needs no code.
+2. **The budget was always about the proxy's own work, not wall time.** On that reading
+   the number to compare is the in-process figure (p50 +0.26 ms, loopback), the budget is
+   already met, and §8 should say *which* it means — because as written it reads as wall
+   time and every reader has taken it that way.
+3. **The budget is wrong.** A hosted ledger a network away cannot be single-digit
+   milliseconds at any trip count above zero, so a proxy that must read before forwarding
+   has a floor set by geography. If that is accepted, §8 should state a budget in *round
+   trips* rather than milliseconds, which is the thing the code can actually control.
+
+Not edited unilaterally, per this file's own rule: ARCHITECTURE.md is a source-of-truth
+document and the reading chosen changes what "done" means for the request path.
+
+**Recommendation: 1, then restate §8 as 3.** Colocation is a deployment change with no code
+risk and it is the only option that makes the current number defensible. Restating the
+budget in round trips afterwards records what was actually learned — that the count is the
+engineering lever and the RTT is a hosting decision.
+
+Owner: Shubh (proxy), with whoever owns the hosting call.
+
 ## C. Verification tasks
 Not design questions — things that are written down and might simply be wrong.
 

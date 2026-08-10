@@ -257,6 +257,14 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     by anyone. **`render.yaml` sets both safely; confirm against the live service before a
     demo, because the blueprint is not the running configuration.**
 
+*   **Filed `PROPOSALS.md` B21: ARCHITECTURE.md's `<5ms p50` is unreachable as deployed.**
+    The measured 255 ms is distance, not code — 3 round trips at a Singapore↔Mumbai RTT.
+    Three readings lead different places (colocate; or the budget always meant the proxy's
+    own work; or restate the budget in *round trips*, which is the thing code controls), so
+    it is filed rather than edited: ARCHITECTURE.md is a source-of-truth doc and the reading
+    chosen changes what "done" means for the request path. Recommendation is colocate, then
+    restate §8 in round trips.
+
 *   **The deployed overhead number exists now: p50 255 ms (Shubh, 2026-08-09).** The
     measurement §6a has been withholding permission to quote since the Postgres port.
     `scripts/bench_deployed.py` provisions a **judge session** and drives that, so every row

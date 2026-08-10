@@ -735,6 +735,13 @@ def window_spend(project_id: str, feature: str | None, window_s: float) -> float
     that has not been instrumented yet — i.e. production.
 
     For a project-wide total (the daily ceiling), use :func:`project_window_spend`.
+
+    **No production caller remains** — `breaker_state`, `ceiling_spend` and
+    `spend_by_scope` each fold this into a larger query. It is kept deliberately, as the
+    obvious one-scope-at-a-time implementation the folded queries are asserted against in
+    `test_proxy.py`. Deleting it as dead code would remove the only independent check that
+    a `CASE`/`GROUP BY` fold still means what it replaced, which is exactly where those
+    folds go wrong.
     """
     conn = connect()
     cutoff = iso_seconds_ago(window_s)
@@ -1025,6 +1032,13 @@ def latest_model_efficiency() -> list[dict[str, Any]]:
 
 
 def active_breaker(scope: str) -> dict[str, Any] | None:
+    """The open breaker event for a scope, or None.
+
+    **No production caller remains**: `breaker_state` returns this alongside the spend
+    windows in one round trip. Kept as the reference `breaker_state` is asserted to agree
+    with — the two must not disagree about which row is "the" open one, and this is what
+    pins that. See :func:`window_spend` for the same note.
+    """
     conn = connect()
     with _lock:
         row = conn.execute(
