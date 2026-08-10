@@ -246,6 +246,28 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     `test_a_boot_does_not_wipe_judge_ceilings` covers it, including that a ceiling deleted
     from `meter.yaml` still stops being enforced.
 
+*   **The deployed overhead number exists now: p50 255 ms (Shubh, 2026-08-09).** The
+    measurement §6a has been withholding permission to quote since the Postgres port.
+    `scripts/bench_deployed.py` provisions a **judge session** and drives that, so every row
+    it writes is tenanted to a throwaway `judge-<nonce>` project and **demo-project is
+    untouched** — it also needs no Meter key, because a judge's key never leaves the server.
+    n=12 across three sessions, two independent runs agreeing within 4 ms, spread 254–263 ms.
+    **18% of a 1,428 ms request**; the rest is the provider.
+    **The cause is that the deployment is not colocated** — proxy on Render in **Singapore**,
+    ledger on Supabase in **ap-south-1 (Mumbai)**. Three sequential round trips at that RTT
+    lands where it lands, so the count model predicted the measurement rather than being
+    fitted to it. **Colocating is now the highest-value change available anywhere in the
+    system**: the same three trips in-region are 3–6 ms, at or just over ARCHITECTURE.md §8's
+    5 ms budget. It also prices the trip reduction above at **~170 ms per request** here.
+    ⚠ The old ~53 ms laptop figure is **not** comparable — different path, measured from
+    outside both regions. Quote 255 ms or quote nothing.
+    ⚠ One trap this measurement walked into first, recorded so nobody repeats it: a judge's
+    breaker floor is deliberately tiny so judges can *watch* it trip, so a run of any length
+    is mostly **refusals**. A refused request never calls a provider — it writes
+    `latency_ms = 0` and an `overhead_ms` that is the entire refusal — and averaging those in
+    produced a confident **129 ms** that describes neither path. The script now excludes any
+    row that did not forward, and says how many it dropped.
+
 *   **Round trips on the request path: 5 -> 3 (Shubh, 2026-08-09).** Measured end to end by
     counting `pg._Connection.execute` across a real request through a running proxy, not by
     reading the code. The shipping configuration (breaker on + ceilings) now makes **3**

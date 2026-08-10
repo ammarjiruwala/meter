@@ -212,6 +212,35 @@ It should improve sharply with the proxy colocated with the database on Fly.io, 
 nobody has measured that yet — do not put a latency number on a slide until it comes from
 the deployed proxy.**
 
+### The deployed number, measured at last (2026-08-09)
+
+`p50 255 ms of proxy overhead`, n=12, against **https://meter-proxy.onrender.com**. Two
+independent runs agreed within 4 ms (255.3 and 259.3), and the spread inside a run was
+254–263 ms — tight enough that this is a systematic cost, not noise. Produced by
+`scripts/bench_deployed.py`, which is the only thing that can produce it:
+`bench_overhead.py` runs the app in-process against a loopback upstream and therefore
+measures the proxy's CPU work with the database microseconds away.
+
+It is **18% of a 1,428 ms request** — the rest is the provider.
+
+**Why it is 255 ms and not 5 ms: the deployment is not colocated.** Render runs the proxy
+in **Singapore**; Supabase holds the ledger in **ap-south-1 (Mumbai)**. Three sequential
+round trips at a Singapore↔Mumbai RTT lands almost exactly here, which is the count model
+below predicting the measurement rather than being fitted to it.
+
+Two things follow, and they are the whole story:
+
+* **Colocation is now the single highest-value change available.** At an in-region 1–2 ms
+  RTT the same three trips cost 3–6 ms, which is at or just over ARCHITECTURE.md §8's
+  5 ms budget. Nothing else on the request path is within two orders of magnitude of this.
+* **The trip reduction was worth ~170 ms per request on this deployment.** Five trips at
+  this RTT would be ~425 ms. That is the reduction below, priced at the RTT that actually
+  applies rather than the one the benchmark assumed.
+
+⚠ The old laptop figure of ~53 ms was measured from outside both regions and is **not**
+comparable — it is not "the deployed number improved", it is a different measurement of a
+different path. The rule stands: quote 255 ms, from the deployed proxy, or quote nothing.
+
 ### It is not one round trip — it is a *count*, and the count depends on your config
 
 The 52.7 ms above was measured on the **minimal** path, which `bench_overhead.py` used to
