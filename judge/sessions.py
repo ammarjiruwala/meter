@@ -456,6 +456,10 @@ def purge_expired() -> int:
     so it is swept rather than left to be evicted lazily by whoever happens to ask.
     Session *rows* are deliberately kept: they are the audit trail of who ran what.
     """
+    # Local import, matching `create()`: keeps `proxy.budget` off this module's import
+    # graph, which is what lets `judge/` be dropped without touching anything else.
+    from proxy import budget
+
     now = time.monotonic()
     with _lock:
         stale = [t for t, (expires_at, _) in _vault.items() if now >= expires_at]
@@ -469,9 +473,30 @@ def purge_expired() -> int:
         for ip in [ip for ip, seen in _recent_by_ip.items()
                    if all(now - t >= 3600 for t in seen)]:
             del _recent_by_ip[ip]
-    if stale:
-        log.info("purged %d expired judge credential set(s)", len(stale))
+    # Ceilings registered in-process by `create()` are dropped on the same pass. Nothing
+    # removed them before, so `proxy.budget._ceilings` grew with every judge who ever
+    # visited and never shrank — 228 entries on the deployed instance — and `soft_breaches`
+    # walks all of them on every poll, so four-hour sessions were still being measured days
+    # later. Session ROWS stay: they are the audit trail of who ran what.
+    dropped = 0
+    for project_id in _expired_project_ids():
+        dropped += budget.forget_project(project_id)
+
+    if stale or dropped:
+        log.info("purged %d expired judge credential set(s), %d stale ceiling(s)",
+                 len(stale), dropped)
     return len(stale)
+
+
+def _expired_project_ids() -> list[str]:
+    """Projects whose session has expired. Read fresh: the vault may already be empty."""
+    conn = db.connect()
+    with _lock:
+        rows = conn.execute(
+            "SELECT project_id FROM judge_sessions WHERE expires_at <= ?",
+            (db.now_iso(),),
+        ).fetchall()
+    return [dict(r)["project_id"] for r in rows]
 
 
 def alert_target(project_id: str) -> tuple[str | None, str | None]:

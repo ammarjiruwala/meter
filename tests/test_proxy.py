@@ -903,6 +903,118 @@ def test_model_efficiency() -> None:
           str([r["feature"] for r in latest]))
 
 
+def test_soft_breaches_is_one_round_trip() -> None:
+    """The soft-budget poll must not scale its query count with the ceiling count.
+
+    It asked per configured ceiling, inside a loop. With ceilings coming only from
+    meter.yaml that was a handful of queries a minute and invisible. Judge sessions
+    register theirs at runtime, and the deployed instance reached 228 — 228 sequential
+    round trips every poll, at a measured ~85 ms each, which is far more work than the
+    60-second interval allows and grows with every judge who ever visits.
+
+    Nothing failed while that was true. It just got slower forever, which is why the check
+    is on the query COUNT rather than on the result.
+    """
+    print("\nsoft budget poll — round-trip count")
+    from proxy import budget
+
+    budget._ceilings.clear()
+    budget._file_ceilings.clear()
+    try:
+        for i in range(12):
+            pid = f"proj-soft-{i}"
+            budget.register_ceilings({(pid, None): 1.0, (pid, "alpha"): 0.5})
+            db.record_request({
+                "id": f"req-soft-{i}", "ts": db.now_iso(), "project_id": pid,
+                "feature": "alpha", "actor": "t", "model": "gpt-4o-mini",
+                "provider": "openai", "endpoint": "/v1/chat/completions",
+                "cost_usd": 0.9, "status": 200,
+            })
+
+        check("24 ceilings are configured", len(budget.active_ceilings()) == 24,
+              str(len(budget.active_ceilings())))
+
+        statements: list[str] = []
+        real_execute = pg._Connection.execute
+
+        def counting(self, sql, params=()):
+            statements.append(sql)
+            return real_execute(self, sql, params)
+
+        pg._Connection.execute = counting
+        try:
+            breaches = budget.soft_breaches(0.8)
+        finally:
+            pg._Connection.execute = real_execute
+
+        check("24 ceilings still cost exactly one round trip", len(statements) == 1,
+              f"{len(statements)} statements for 24 ceilings")
+        # The fold must not have changed which number each scope is compared against.
+        by_scope = {b["scope"]: b for b in breaches}
+        check("a feature ceiling is measured on that feature",
+              abs(by_scope["feature:proj-soft-0/alpha"]["spend_usd"] - 0.9) < 1e-9,
+              str(by_scope.get("feature:proj-soft-0/alpha")))
+        check("a project ceiling is measured on the whole project",
+              abs(by_scope["project:proj-soft-0"]["spend_usd"] - 0.9) < 1e-9,
+              str(by_scope.get("project:proj-soft-0")))
+        check("every breaching scope is reported", len(breaches) == 24, str(len(breaches)))
+
+        # Untagged spend counts towards the project ceiling but not a feature's.
+        db.record_request({
+            "id": "req-soft-untagged", "ts": db.now_iso(), "project_id": "proj-soft-0",
+            "feature": None, "actor": "t", "model": "gpt-4o-mini", "provider": "openai",
+            "endpoint": "/v1/chat/completions", "cost_usd": 0.05, "status": 200,
+        })
+        again = {b["scope"]: b for b in budget.soft_breaches(0.8)}
+        check("untagged spend raises the project total",
+              abs(again["project:proj-soft-0"]["spend_usd"] - 0.95) < 1e-9,
+              str(again["project:proj-soft-0"]))
+        check("but leaves the feature's own number alone",
+              abs(again["feature:proj-soft-0/alpha"]["spend_usd"] - 0.9) < 1e-9,
+              str(again["feature:proj-soft-0/alpha"]))
+    finally:
+        budget._ceilings.clear()
+        budget._file_ceilings.clear()
+
+
+def test_runtime_ceilings_are_reclaimed() -> None:
+    """A runtime tenant's ceilings go when its session does — but a file's never do.
+
+    `register_ceilings` only ever added, so `_ceilings` grew with every judge session and
+    never shrank. An expired four-hour session was still being measured days later, and
+    `soft_breaches` walked it on every poll.
+    """
+    print("\nruntime ceilings are reclaimed")
+    from proxy import budget
+
+    budget._ceilings.clear()
+    budget._file_ceilings.clear()
+    try:
+        budget.register_ceilings({("judge-gone", None): 0.5,
+                                  ("judge-gone", "alpha"): 0.1})
+        budget.register_ceilings({("file-proj", None): 3.0})
+        budget._file_ceilings.add(("file-proj", None))
+
+        check("both tenants are registered", len(budget.active_ceilings()) == 3)
+
+        dropped = budget.forget_project("judge-gone")
+        check("the runtime tenant's ceilings are dropped", dropped == 2, str(dropped))
+        check("and are gone from the active set",
+              "project:judge-gone" not in budget.active_ceilings())
+
+        # The important half. A runtime caller cannot widen a file ceiling; it must not be
+        # able to delete one through a different door either.
+        check("a meter.yaml ceiling is refused", budget.forget_project("file-proj") == 0)
+        check("and is still enforced",
+              budget.active_ceilings().get("project:file-proj") == 3.0)
+
+        check("forgetting an unknown project is a no-op",
+              budget.forget_project("never-existed") == 0)
+    finally:
+        budget._ceilings.clear()
+        budget._file_ceilings.clear()
+
+
 def test_gzipped_upstream_stream() -> None:
     """A compressed SSE stream must still be parsed AND forwarded readably.
 
@@ -2022,6 +2134,8 @@ def _run() -> int:
         test_breaker_round_trip_count,
         test_key_cache,
         test_model_efficiency,
+        test_soft_breaches_is_one_round_trip,
+        test_runtime_ceilings_are_reclaimed,
         test_gzipped_upstream_stream,
         test_ledger_migration,
         test_meter_yaml,

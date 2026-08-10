@@ -747,6 +747,48 @@ def project_window_spend(project_id: str, window_s: float) -> float:
     return float(row["spend"])
 
 
+def spend_by_scope(
+    project_ids: list[str], window_s: float
+) -> tuple[dict[tuple[str, str | None], float], dict[str, float]]:
+    """Settled spend for many projects at once, split by feature. **One** round trip.
+
+    Returns ``({(project_id, feature): spend}, {project_id: project_total})``, where a
+    ``feature`` of ``None`` is untagged traffic only — the same meaning `window_spend`
+    gives it — and the project total is every tag plus untagged, matching
+    `project_window_spend`.
+
+    `budget.soft_breaches` used to call one of those two functions per configured ceiling,
+    inside a loop. With ceilings declared only in `meter.yaml` that was a handful of
+    queries a minute and nobody noticed. Judge sessions register their ceilings at runtime,
+    so on the deployed instance the count reached **228** — 228 sequential round trips
+    every poll, at an RTT measured at ~85 ms, which is more database work than the poll
+    interval allows and grows with every judge who ever visits.
+
+    One `GROUP BY` answers all of it. Empty input returns empty rather than scanning the
+    whole table, which is what an unfiltered `IN ()` would degrade to.
+    """
+    if not project_ids:
+        return {}, {}
+    conn = connect()
+    cutoff = iso_seconds_ago(window_s)
+    with _lock:
+        rows = conn.execute(
+            "SELECT project_id, feature, COALESCE(SUM(cost_usd), 0) AS spend "
+            "FROM requests WHERE project_id = ANY(?) AND ts >= ? "
+            "GROUP BY project_id, feature",
+            (list(project_ids), cutoff),
+        ).fetchall()
+
+    by_scope: dict[tuple[str, str | None], float] = {}
+    totals: dict[str, float] = {}
+    for row in rows:
+        r = dict(row)
+        spend = float(r["spend"])
+        by_scope[(r["project_id"], r["feature"])] = spend
+        totals[r["project_id"]] = totals.get(r["project_id"], 0.0) + spend
+    return by_scope, totals
+
+
 def ceiling_spend(project_id: str, feature: str | None, window_s: float) -> tuple[float, float]:
     """Feature spend and project spend over one window, in **one** round trip.
 
