@@ -488,6 +488,11 @@ def seed_keys(spec: str) -> int:
 # TTL. Storing only if the epoch is unchanged closes that window. It is a cheap guard
 # against a rare interleaving, and the thing it protects is a cut credential.
 _key_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+# Sweep expired entries on insert once the map passes this size. A plain number rather
+# than an LRU: entries expire on a timer anyway, so the only thing needed is that dead
+# ones leave, and the threshold keeps the sweep off the path of a small deployment.
+_KEY_CACHE_SWEEP_AT = 256
 _key_cache_epoch = 0
 _key_cache_lock = threading.Lock()
 
@@ -547,9 +552,18 @@ def resolve_key(raw_key: str) -> dict[str, Any] | None:
 
     resolved = dict(row)
     if ttl > 0:
+        now = time.monotonic()
         with _key_cache_lock:
             if _key_cache_epoch == epoch:
-                _key_cache[cache_key] = (time.monotonic() + ttl, dict(resolved))
+                # Expired entries are dropped rather than merely ignored on read. Judge
+                # sessions mint a key each, so on a long-lived process the map would
+                # otherwise keep every key ever presented — the same accumulation that
+                # left 228 stale ceilings registered. Sweeping on insert keeps it
+                # proportional to live keys and costs nothing until the map is large.
+                if len(_key_cache) >= _KEY_CACHE_SWEEP_AT:
+                    for k in [k for k, (exp, _) in _key_cache.items() if exp <= now]:
+                        del _key_cache[k]
+                _key_cache[cache_key] = (now + ttl, dict(resolved))
     return resolved
 
 

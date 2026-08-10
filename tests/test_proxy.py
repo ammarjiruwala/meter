@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 import tempfile
 import uuid
 from pathlib import Path
@@ -826,6 +827,21 @@ def test_key_cache() -> None:
         db.seed_keys("mk_not_yet:proj-cache:dev")
         check("and a key created after that miss resolves at once, not after the TTL",
               db.resolve_key("mk_not_yet") is not None)
+
+        # Expired entries must LEAVE, not merely be ignored on read. A judge session
+        # mints a key each, so a map that only ignores stale entries grows for the life
+        # of the process — the same accumulation that left 228 ceilings registered.
+        db.invalidate_key_cache()
+        config.KEY_CACHE_TTL_S = 0.01
+        for i in range(db._KEY_CACHE_SWEEP_AT + 4):
+            db.seed_keys(f"mk_sweep_{i}:proj-cache:dev")
+            db.resolve_key(f"mk_sweep_{i}")
+        time.sleep(0.05)
+        config.KEY_CACHE_TTL_S = 60.0
+        db.resolve_key("mk_cache_probe")   # one insert past the threshold sweeps
+        check("expired entries are evicted, not just ignored",
+              len(db._key_cache) < db._KEY_CACHE_SWEEP_AT,
+              f"{len(db._key_cache)} entries still cached")
 
         # Escape hatch: TTL 0 means pay the trip every time.
         config.KEY_CACHE_TTL_S = 0
