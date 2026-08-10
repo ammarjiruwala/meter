@@ -246,6 +246,17 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     `test_a_boot_does_not_wipe_judge_ceilings` covers it, including that a ceiling deleted
     from `meter.yaml` still stops being enforced.
 
+*   **`/healthz` now reports the Treasurer's posture (Shubh, 2026-08-09).** It reported
+    only whether the loop had already tripped. Whether it was *running*, and whether it was
+    allowed to move real money, were invisible on a deployment: `render.yaml` sets
+    `TREASURER_ENABLED` and `TREASURER_DRY_RUN`, the Render dashboard can override either,
+    and nothing anywhere told you which won. This section carried a standing warning that
+    `TREASURER_ENABLED` must be `false` before judges arrive with real cards — and the only
+    way to check was to open the Render console. `treasurer.enabled` and
+    `treasurer.dry_run` are on `/healthz` now, so the safe state is verifiable from outside
+    by anyone. **`render.yaml` sets both safely; confirm against the live service before a
+    demo, because the blueprint is not the running configuration.**
+
 *   **The deployed overhead number exists now: p50 255 ms (Shubh, 2026-08-09).** The
     measurement §6a has been withholding permission to quote since the Postgres port.
     `scripts/bench_deployed.py` provisions a **judge session** and drives that, so every row

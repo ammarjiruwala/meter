@@ -31,14 +31,14 @@ pip install -r requirements.txt -r requirements-dev.txt   # dev set = openai + p
 cp .env.example .env                            # provider + Prava keys, DATABASE_URL; .env is gitignored
 uvicorn proxy.app:app --port 8080 --reload      # the whole backend: proxy + treasury + mock provider
 
-python tests/test_proxy.py                      # 249 checks, no framework, ~3s
+python tests/test_proxy.py                      # 287 checks, no framework, ~3s
 python tests/test_predictor.py                  # 140 checks, same convention
-python tests/test_treasury.py                   # 205 checks (treasury/)
+python tests/test_treasury.py                   # 253 checks (treasury/)
 python tests/test_alerts.py                     # 52 checks (alerts/)
-python tests/test_judge.py                      # 206 checks (judge/) — session-scoped tenants
+python tests/test_judge.py                      # 228 checks (judge/) — session-scoped tenants
 ```
 
-852 checks total (verified 2026-08-03). **These counts live here and nowhere else** — AGENTS.md
+960 checks total (measured 2026-08-09 against a local postgres:16). **These counts live here and nowhere else** — AGENTS.md
 deliberately does not repeat them, because two copies drift apart and the stale one wins whichever
 file you read first. The counts drift as suites grow; if yours disagree, the suite is right and
 this line is stale — update it rather than assuming a regression.

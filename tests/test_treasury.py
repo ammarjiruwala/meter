@@ -619,6 +619,29 @@ def test_pending_mandates() -> None:
           any(m["status"] == "approved" for m in db.list_stored_mandates("zeta")))
 
 
+def test_healthz_reports_treasurer_posture() -> None:
+    """The two switches that decide whether a loop can spend must be observable.
+
+    `/healthz` reported only whether the Treasurer had already tripped. Whether it was
+    running at all, and whether it was allowed to move real money, were invisible on a
+    deployment — `render.yaml` sets them and the host's dashboard can override it, and
+    nothing could tell you which won. CONTEXT.md §6a carried a standing warning that
+    `TREASURER_ENABLED` had to be off before judges arrived with real cards, and the only
+    way to check was to open the Render console.
+    """
+    print("\n/healthz reports the Treasurer's posture")
+    body = CLIENT.get("/healthz").json()
+    tre = body.get("treasurer") or {}
+    check("healthz still reports the trip state", "tripped" in tre, str(tre))
+    check("and now whether the loop is running at all", "enabled" in tre, str(tre))
+    check("and whether it may move real money", "dry_run" in tre, str(tre))
+    check("they report the live configuration",
+          tre["enabled"] == config.TREASURER_ENABLED
+          and tre["dry_run"] == config.TREASURER_DRY_RUN, str(tre))
+    check("both are booleans, so a check can assert on them",
+          isinstance(tre["enabled"], bool) and isinstance(tre["dry_run"], bool), str(tre))
+
+
 def test_prava_live_mode_gate() -> None:
     """PROPOSALS.md M6 — `PRAVA_LIVE_MODE=false` must mean *no calls to Prava*.
 
@@ -1504,6 +1527,7 @@ def _run() -> int:
             test_alert_noise,
             test_credential_preflight,
             test_pending_mandates,
+            test_healthz_reports_treasurer_posture,
             test_prava_live_mode_gate,
             test_key_scopes,
             test_event_ledger,
