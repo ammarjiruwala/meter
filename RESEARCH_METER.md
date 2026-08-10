@@ -7,6 +7,14 @@ reconstructed from memory or from a commit log under time pressure.
 Owner: Shivam Kapadia. Meter's payments and agent lane — `treasury/`, the Prava card rail, the
 Treasurer agent loop, and the Postgres ledger everything else reads from.
 
+**Companion files**, same work through different lenses — use whichever matches the application:
+
+| file | asks | for |
+| --- | --- | --- |
+| this one | *what did you establish?* | research internships, MS/PhD applications |
+| [`SWE_METER.md`](SWE_METER.md) | *what can you build and operate?* | engineering internships |
+| [`CONSULTING_METER.md`](CONSULTING_METER.md) | *how do you approach a problem?* | consulting applications |
+
 Every number and quotation in this file is sourced to a file in this repository. Where a claim
 rests on a single observation, it says so. Where work is not mine, §7 says whose it is.
 
@@ -419,6 +427,19 @@ empty local database file receives the *worse* number — 65% median error again
 database means every participant inherits accumulated history. That is an argument about
 **evaluation infrastructure**: results that live on one laptop are not results anyone else can
 reproduce.
+
+**A related validity finding, from the day before.** The project's continuous integration had never
+passed. Its first step invoked a linter that was not installed, so it exited 127 on every push, and
+because it was first, all four test suites behind it were skipped — they had never executed in CI
+once. Four suites existed, were passing locally, and were verifying nothing on any shared machine.
+I found it, fixed it repo-wide, and confirmed by running the pipeline's exact sequence locally:
+**551 checks ran that had never run there before.**
+
+It belongs here because it is the same class of problem as the migration: a claim about
+verification that nobody had checked. Between the two, the project went from "results on one
+laptop, tests nobody runs" to a shared database and a pipeline that actually executes. That is
+unglamorous work, and it is the precondition for any result the project reports being worth
+anything.
 
 **Control 1 — hold the query text constant.** All SQL keeps `?` placeholders, rewritten to the
 driver's form in one helper. Every SQL string therefore stays byte-identical to the SQLite
