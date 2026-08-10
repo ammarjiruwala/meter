@@ -257,6 +257,16 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
     by anyone. **`render.yaml` sets both safely; confirm against the live service before a
     demo, because the blueprint is not the running configuration.**
 
+*   **CORS preview origins are opt-in now — `PROPOSALS.md` B22 (Shubh, 2026-08-09).** B19's
+    fix stopped the preview regex matching *unrelated* projects, but it still has to match
+    `<project>-<anything>.vercel.app`, and `vercel.app` subdomains are first-come-first-served
+    — `meter-three-beta-evil.vercel.app` is registrable by anyone. Survivable until B20 turned
+    on credentialed CORS: the money capability is a cookie, so a matching origin now receives
+    it **automatically**, and the second factor guarding a leaked session token would land on
+    an origin an attacker owns. `CORS_ALLOW_VERCEL_PREVIEWS` defaults to **off**.
+    ⚠ Testing the console from a branch preview now needs the flag, or that preview URL named
+    in `CORS_ALLOW_ORIGINS`.
+
 *   **Filed `PROPOSALS.md` B21: ARCHITECTURE.md's `<5ms p50` is unreachable as deployed.**
     The measured 255 ms is distance, not code — 3 round trips at a Singapore↔Mumbai RTT.
     Three readings lead different places (colocate; or the budget always meant the proxy's

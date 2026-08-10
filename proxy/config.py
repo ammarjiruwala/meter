@@ -210,6 +210,23 @@ BREAKER_COOLDOWN_S = _int("BREAKER_COOLDOWN_S", 120)
 # let any page on the internet drive somebody's live session. The default names the
 # deployed dashboard and local development, and DEPLOY.md says to update it when the
 # dashboard URL changes.
+# Whether to additionally allow Vercel PREVIEW deployments of the projects named above.
+#
+# Off by default, and that default is the security decision (PROPOSALS.md B22). The preview
+# pattern is built from the configured origins, so it cannot match an unrelated project —
+# but it necessarily allows `<project>-<anything>.vercel.app`, and `vercel.app` subdomains
+# are first-come-first-served. Anyone can register `meter-three-beta-evil.vercel.app` in
+# about a minute and be inside the allowlist.
+#
+# That was survivable when CORS carried no credentials. It is not now: the judge money
+# capability is a cookie, so a browser on a matching origin attaches it automatically, and
+# the second factor that exists to stop a leaked session token from spending would travel
+# to an origin an attacker owns.
+#
+# Turn it on only when testing the console from a branch preview, and prefer naming the
+# preview URL in CORS_ALLOW_ORIGINS instead.
+CORS_ALLOW_VERCEL_PREVIEWS = _bool("CORS_ALLOW_VERCEL_PREVIEWS", False)
+
 CORS_ALLOW_ORIGINS = _str(
     "CORS_ALLOW_ORIGINS",
     "https://meter-three-beta.vercel.app,http://localhost:3000,http://127.0.0.1:3000",

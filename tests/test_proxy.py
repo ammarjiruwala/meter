@@ -2079,6 +2079,42 @@ def test_ceiling_spend_one_round_trip() -> None:
         db.ceiling_spend = real
 
 
+def test_cors_previews_are_opt_in() -> None:
+    """Preview origins are off unless someone turns them on (PROPOSALS.md B22).
+
+    The preview pattern is built from the configured origins, so it cannot match an
+    unrelated project — but it necessarily matches `<project>-<anything>.vercel.app`,
+    because that is the shape of a preview URL and the suffix is not predictable. Since
+    `vercel.app` subdomains are first-come-first-served, someone can register
+    `meter-three-beta-evil.vercel.app` and be inside the allowlist.
+
+    That was survivable while CORS carried no credentials. With the judge money capability
+    riding a cookie, an allowed origin now gets it attached automatically — so the second
+    factor that exists to stop a leaked session token from spending would be delivered to
+    an origin an attacker owns. Hence: off by default.
+    """
+    print("\nCORS preview origins are opt-in")
+    from proxy.app import _preview_origin_regex
+
+    origins = ["https://meter-three-beta.vercel.app"]
+    rx = _preview_origin_regex(origins)
+    check("the pattern still exists for those who opt in", rx is not None)
+
+    import re as _re
+    pat = _re.compile(rx)
+    check("a genuine preview matches",
+          pat.fullmatch("https://meter-three-beta-abc123-team.vercel.app") is not None)
+    # The reason it is opt-in, asserted rather than argued.
+    check("but so does an attacker-registrable lookalike",
+          pat.fullmatch("https://meter-three-beta-evil.vercel.app") is not None)
+    check("an unrelated project is still refused",
+          pat.fullmatch("https://evil-meter-three-beta.vercel.app") is None)
+
+    check("and the flag that gates it defaults to off",
+          config.CORS_ALLOW_VERCEL_PREVIEWS is False,
+          str(config.CORS_ALLOW_VERCEL_PREVIEWS))
+
+
 def test_cors_preview_origins() -> None:
     """Vercel preview URLs are allowed; the rest of vercel.app is not.
 
@@ -2132,6 +2168,7 @@ def main() -> int:
 def _run() -> int:
     for suite in (
         test_cors_preview_origins,
+        test_cors_previews_are_opt_in,
         test_client_request_id,
         test_ceiling_spend_one_round_trip,
         test_soft_budget,

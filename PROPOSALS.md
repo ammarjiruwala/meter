@@ -843,6 +843,36 @@ engineering lever and the RTT is a hosting decision.
 
 Owner: Shubh (proxy), with whoever owns the hosting call.
 
+### B22 — The CORS preview regex still admits an attacker-registrable origin, and credentials made that matter · **FIXED 2026-08-09 (Shubh) — default changed**
+
+B19's fix replaced `https://.*\.vercel\.app` with a pattern built from the configured
+origins, so it can no longer match an unrelated project. It still matches
+`<project>-<anything>.vercel.app`, and **it has to**: that is the shape of a Vercel preview
+URL and the suffix is not predictable.
+
+`vercel.app` subdomains are first-come-first-served, so `meter-three-beta-evil.vercel.app`
+is registrable by anyone in about a minute. Verified against the actual pattern, with
+Starlette's `fullmatch` semantics:
+
+    MATCH   https://meter-three-beta-abc123-team.vercel.app   (a real preview)
+    MATCH   https://meter-three-beta-evil.vercel.app          (anyone can register this)
+    reject  https://evil-meter-three-beta.vercel.app
+    reject  https://meter-three-beta.vercel.app.evil.com
+
+That was survivable while CORS carried no credentials — a matching origin could send a
+session token it had somehow obtained, and nothing else. **B20 changed the stakes**: the
+judge money capability is a cookie, `allow_credentials` is now on, so a browser on any
+matching origin attaches it *automatically*. The second factor that exists specifically to
+stop a leaked session token from spending would be delivered to an origin an attacker owns.
+
+**Fix: `CORS_ALLOW_VERCEL_PREVIEWS`, default off.** Previews are a developer convenience;
+a credential-bearing wildcard is not a reasonable price for it. Naming a specific preview
+URL in `CORS_ALLOW_ORIGINS` still works and is the recommended route.
+
+⚠ **Behaviour change:** testing the judge console from a branch preview now requires either
+setting the flag or listing that preview URL explicitly. Worth knowing before someone spends
+an afternoon on a CORS error that is doing its job.
+
 ## C. Verification tasks
 Not design questions — things that are written down and might simply be wrong.
 
