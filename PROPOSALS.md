@@ -724,7 +724,7 @@ leak reaches is metered inference inside a capped session, not a charge against 
 card. 28 checks across `test_treasury.py` and `test_judge.py`, plus a migration probe
 confirming an existing `meter_keys` table gains the column at boot and keeps working.
 
-### B20 — The judge cookie is not `httpOnly`, and the comment justifying that understates what the token can do · OPEN
+### B20 — The judge cookie is not `httpOnly`, and the comment justifying that understates what the token can do · **FIXED 2026-08-09 (Shubh)**
 
 `dashboard/src/lib/session.ts` sets `meter_judge_session` deliberately script-readable, and
 says why: the console also calls `/judge/*` cross-origin where cookies are not sent, so the
@@ -757,6 +757,38 @@ was already outside the wipe for the same reason, recorded in `_ADDED_COLUMNS`. 
 wipe correct in the first place: a ceiling deleted from `meter.yaml` still stops being
 enforced. Recorded here 2026-08-09 because this section described it as open long after the
 fix landed.
+
+**RESOLUTION.** Built as this entry proposed — keep the readable cookie for reads, require
+a second `httpOnly` capability for the routes that touch money — because the cross-origin
+constraint that drove the original decision is real and does not go away.
+
+`meter_judge_session` stays script-readable and stays sufficient for every read. A second
+secret, `meter_judge_capability`, is minted independently at session creation, stored only
+as a SHA-256 in `judge_sessions.capability_hash`, and returned exactly once — straight into
+an `httpOnly; Secure; SameSite=None; Path=/judge` cookie set by the **proxy on the proxy's
+own origin**, which is what makes it reachable cross-site while never being visible to
+JavaScript. `/judge/mandate` and `/judge/topup` require it; comparison is
+`secrets.compare_digest`.
+
+Consequences worth knowing:
+
+* `allow_credentials` is now on for CORS, but **only when origins are not wildcarded**.
+  `Access-Control-Allow-Origin: *` with credentials is rejected by every browser, so a
+  wildcard deployment that turned it on would get no cookie and money routes that 403 while
+  reads work — a failure that reads as a backend bug. Refusing the combination keeps it
+  legible.
+* A session minted before this column existed has `capability_hash` NULL and **cannot
+  spend**. Failing closed costs a judge one click to start a new session; the alternative
+  is a grandfather clause on exactly the routes that move money.
+* `JUDGE_CAPABILITY_INSECURE` relaxes the cookie for plain-http local development, where
+  `Secure` makes the browser drop it. It must never be set in a deployment, and
+  `test_capability_cookie_attrs` asserts the shipping attributes with it off.
+
+15 checks in `test_judge.py`, including that reads still work on the token alone, that a
+missing *and* a wrong capability are both refused, that one judge's capability cannot spend
+another judge's session, and that the capability never appears in the session payload.
+`dashboard/src/lib/session.ts`'s comment — the one this entry said undersold the risk — now
+states what the token actually reaches and what carries the authority instead.
 
 ## C. Verification tasks
 Not design questions — things that are written down and might simply be wrong.

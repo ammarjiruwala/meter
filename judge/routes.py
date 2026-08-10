@@ -21,6 +21,9 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+
+from proxy import config
 
 from treasury import config as tconfig
 
@@ -33,6 +36,14 @@ router = APIRouter(prefix="/judge", tags=["judge"])
 #: Credentials the console may hand us. Anything else in the body is ignored rather than
 #: rejected, so a future console field cannot 400 an older backend.
 SECRET_FIELDS = ("openai_api_key", "prava_api_key", "poke_api_key", "poke_phone")
+
+
+#: The money capability (PROPOSALS.md B20). httpOnly, so no script on the console page can
+#: read it — unlike the session token, which must stay readable because it travels to this
+#: origin in a header rather than a cookie. Scoped to `/judge` so it is not attached to
+#: metered inference traffic that has no use for it.
+CAPABILITY_COOKIE = "meter_judge_capability"
+CAPABILITY_PATH = "/judge"
 
 
 def _require(token: str | None) -> sessions.Session:
@@ -83,6 +94,29 @@ def _public(session: sessions.Session) -> dict[str, Any]:
     return body
 
 
+def _require_capability(session: sessions.Session, request: Request) -> None:
+    """Refuse a money route unless the request carries this session's capability cookie.
+
+    B20's point: the session token alone already reaches the credential vault and the
+    judge's own Prava merchant key, so a script-readable token is a script-readable
+    licence to charge a card. Reads keep working on the token alone; spending needs the
+    second factor the browser holds and JavaScript cannot see.
+
+    403 rather than 401: the session is fine, it is this particular action that is not
+    permitted, and telling a judge to "start a new session" when their session is healthy
+    sends them in the wrong direction.
+    """
+    presented = request.cookies.get(CAPABILITY_COOKIE)
+    if not sessions.capability_matches(session.token, presented):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This action needs the session capability issued when the session was "
+                "created. Start a new session from this browser and try again."
+            ),
+        )
+
+
 @router.post("/session")
 async def create_session(
     request: Request,
@@ -112,7 +146,24 @@ async def create_session(
         sessions.put_secrets(session.token, secrets)
 
     log.info("judge session %s created for %s", session.project_id, email or "anonymous")
-    return _public(sessions.resolve(session.token))
+
+    payload = _public(sessions.resolve(session.token))
+    response = JSONResponse(payload)
+    # SameSite=None because the console is served from another origin entirely (Vercel
+    # dashboard -> Render proxy), and a cross-site cookie is not sent otherwise. That
+    # combination requires Secure, which requires HTTPS — so on a plain-HTTP local dev
+    # origin the browser drops it, and `JUDGE_CAPABILITY_INSECURE` exists for exactly that
+    # case. It must never be set in a deployment.
+    response.set_cookie(
+        CAPABILITY_COOKIE,
+        session.capability or "",
+        max_age=sessions.SESSION_TTL_S,
+        httponly=True,
+        secure=not config.JUDGE_CAPABILITY_INSECURE,
+        samesite="none" if not config.JUDGE_CAPABILITY_INSECURE else "lax",
+        path=CAPABILITY_PATH,
+    )
+    return response
 
 
 @router.get("/session")
@@ -436,6 +487,7 @@ async def judge_treasury(x_judge_session: str | None = Header(default=None)):
 
 @router.post("/mandate")
 async def judge_mandate(
+    request: Request,
     body: dict[str, Any] = Body(default_factory=dict),
     x_judge_session: str | None = Header(default=None),
 ):
@@ -446,6 +498,7 @@ async def judge_mandate(
     register a passkey.
     """
     session = _require(x_judge_session)
+    _require_capability(session, request)
     from treasury import prava
     from treasury.routes import create_mandate
 
@@ -476,6 +529,7 @@ async def judge_mandate(
 
 @router.post("/topup")
 async def judge_topup(
+    request: Request,
     body: dict[str, Any] = Body(default_factory=dict),
     x_judge_session: str | None = Header(default=None),
 ):
@@ -491,6 +545,7 @@ async def judge_topup(
     nobody agreed to expose.
     """
     session = _require(x_judge_session)
+    _require_capability(session, request)
     from treasury import prava, topup
     from treasury import treasurer
     from treasury.routes import sync_mandates

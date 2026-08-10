@@ -196,6 +196,21 @@ The estimator is **one design with three parts**, not competing options (ARCHITE
         set (contradicting its own `connect()` note), and the marketing page still explained
         itself by a `meter.db`-on-local-disk constraint that no longer exists. Both now say
         what is true *and* what stayed true for a different reason.
+*   **Judge money routes need a second, `httpOnly` capability (Shubh, 2026-08-09) —
+    `PROPOSALS.md` B20 closed.** The session token stays script-readable, which was always
+    the right call: the console calls `/judge/*` cross-origin in `X-Judge-Session`, where a
+    cookie is not sent. What B20 found is that the token reaches more than its comment
+    admitted — it keys the credential vault and `/judge/mandate` acts with the judge's own
+    Prava **merchant** key, so a readable token was a readable licence to charge a real
+    card. Now `/judge/mandate` and `/judge/topup` also require `meter_judge_capability`:
+    minted independently, stored only as a SHA-256, set by the **proxy on its own origin**
+    as `httpOnly; Secure; SameSite=None; Path=/judge`, compared with `compare_digest`.
+    Reads are untouched. CORS gained `allow_credentials`, **off whenever origins are
+    wildcarded** — `*` plus credentials is rejected by browsers, and silently getting no
+    cookie would present as a backend bug. Sessions predating the column fail closed.
+    `JUDGE_CAPABILITY_INSECURE` exists for plain-http local dev only and must never be set
+    in a deployment.
+
 *   **Per-key scopes shipped (Shubh, 2026-08-09) — `PROPOSALS.md` B19's wider question.**
     A Meter key was all-or-nothing, so "authenticated" meant "may do everything" — the same
     key that reads a balance could drive the autonomous charging loop, and `WALKTHROUGH.md`

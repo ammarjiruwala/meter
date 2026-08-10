@@ -11,9 +11,18 @@ import { query } from "@/lib/db";
  *
  * **Deliberately not `httpOnly`.** The console also calls the proxy directly from the
  * browser (`/judge/*` on another origin, where cookies are not sent), so the client needs
- * to read the same value. The token is a capability for a throwaway sandbox session with
- * a call cap and a four-hour life — the cost of it being script-readable is small, and
- * the alternative is storing it twice and keeping the copies in sync.
+ * to read the same value. The alternative is storing it twice and keeping the copies in
+ * sync, which is genuinely worse.
+ *
+ * The cost of that is no longer "small", and PROPOSALS.md B20 is the correction: this
+ * token keys the server's credential vault, and `/judge/mandate` uses it to act with the
+ * judge's own Prava *merchant* key. A readable token is a readable licence to charge a
+ * real card, which is not what "a throwaway sandbox session" implies.
+ *
+ * So the token no longer carries that authority alone. Spending needs a second secret —
+ * `meter_judge_capability`, httpOnly, set by the proxy on the proxy's own origin, checked
+ * by `judge/routes.py::_require_capability`. This cookie stays readable and stays
+ * sufficient for every read, which is all the server-rendered page needs it for.
  */
 export const SESSION_COOKIE = "meter_judge_session";
 

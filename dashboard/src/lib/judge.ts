@@ -131,6 +131,15 @@ async function call<T>(
     response = await fetch(`${PROXY_URL}${path}`, {
       method,
       headers,
+      // The money capability (PROPOSALS.md B20) is an httpOnly cookie the proxy sets on
+      // its own origin, so it only travels with credentialed requests. Without this the
+      // browser sends nothing and `/judge/topup` and `/judge/mandate` 403 — while every
+      // read keeps working, which is the confusing half of the failure.
+      //
+      // On every call rather than only the money ones: the cookie is `Path=/judge`, so
+      // this is the same set of requests either way, and a per-route opt-in is a thing to
+      // remember when the next money route is added.
+      credentials: "include",
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {

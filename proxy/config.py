@@ -130,6 +130,16 @@ RESERVATION_HEARTBEAT_S = _float("RESERVATION_HEARTBEAT_S", 30.0)
 # Set to 0 to disable caching entirely and pay the round trip on every request.
 KEY_CACHE_TTL_S = _float("KEY_CACHE_TTL_S", 5.0)
 
+# The judge money capability (PROPOSALS.md B20) is issued as a cookie with
+# `SameSite=None; Secure`, because the console is on a different origin from the proxy and
+# a cross-site cookie is not sent otherwise. `Secure` requires HTTPS, so on a plain-HTTP
+# local dev origin the browser silently drops it and every money route 403s.
+#
+# Set this to relax the cookie to `SameSite=Lax` without `Secure` for local development
+# ONLY. It must never be set in a deployment: it is what makes the capability a
+# same-site-only secret rather than a cross-site one, and on http:// it is sent in clear.
+JUDGE_CAPABILITY_INSECURE = _bool("JUDGE_CAPABILITY_INSECURE", False)
+
 # Soft budgets (PROPOSALS.md D2). The hard ceiling refuses with 429; this warns before it,
 # while there is still time to act. Deliberately a background poll rather than a check in
 # the request path: crossing a threshold is a *level*, not an edge, so testing it per

@@ -142,7 +142,12 @@ CREATE TABLE IF NOT EXISTS judge_sessions (
     breaker_floor_usd  double precision,
     ceiling_usd_day    double precision,
     call_cap           INTEGER NOT NULL DEFAULT 25,
-    calls_used         INTEGER NOT NULL DEFAULT 0
+    calls_used         INTEGER NOT NULL DEFAULT 0,
+    -- SHA-256 of the money capability (PROPOSALS.md B20). The session token itself is
+    -- deliberately script-readable, because the console sends it cross-origin in a header
+    -- where cookies do not go. This second secret never reaches JavaScript: it rides an
+    -- httpOnly cookie on the proxy's own origin and gates the routes that touch a card.
+    capability_hash    TEXT
 );
 
 -- Per-feature daily ceilings, the `features:` block of meter.yaml. Not in
@@ -345,6 +350,10 @@ _ADDED_COLUMNS = (
     # A default of "deny everything" would be the safer-looking choice and the wrong one:
     # it would take the treasury away from every deployment that upgrades, mid-demo.
     ("meter_keys", "scopes", "TEXT"),
+    # PROPOSALS.md B20. NULL on any session minted before this existed, which `require`
+    # treats as "no capability issued" -- those sessions can still read, and are asked to
+    # start a new one before they can spend.
+    ("judge_sessions", "capability_hash", "TEXT"),
 )
 
 

@@ -135,6 +135,10 @@ class Session:
     project_id: str
     key_id: str
     meter_key: str | None
+    # Returned exactly once, at creation, and never again — the row keeps only its
+    # SHA-256. The console never sees this: the route puts it straight into an httpOnly
+    # cookie (PROPOSALS.md B20).
+    capability: str | None
     display_name: str | None
     email: str | None
     created_at: str
@@ -160,13 +164,15 @@ def _parse(ts: str) -> datetime:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _row_to_session(row: Any, meter_key: str | None = None) -> Session:
+def _row_to_session(row: Any, meter_key: str | None = None,
+                    capability: str | None = None) -> Session:
     r = dict(row)
     return Session(
         token=r["token"],
         project_id=r["project_id"],
         key_id=r["key_id"],
         meter_key=meter_key,
+        capability=capability,
         display_name=r.get("display_name"),
         email=r.get("email"),
         created_at=r["created_at"],
@@ -250,6 +256,9 @@ def create(
     project_id = PROJECT_PREFIX + secrets.token_hex(8)
     token = "js_" + secrets.token_urlsafe(24)
     raw_key = "mk_judge_" + secrets.token_hex(16)
+    # A second, independent secret. Independent so that reading the session token — which
+    # any script on the console page can do, by design — reveals nothing about this one.
+    capability = "jc_" + secrets.token_urlsafe(32)
     key_id = f"mk_{db.hash_key(raw_key)[:16]}"
 
     now = datetime.now(timezone.utc)
@@ -287,10 +296,10 @@ def create(
         conn.execute(
             "INSERT INTO judge_sessions "
             "(token, project_id, key_id, display_name, email, created_at, expires_at,"
-            " breaker_floor_usd, ceiling_usd_day, call_cap, calls_used) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            " breaker_floor_usd, ceiling_usd_day, call_cap, calls_used, capability_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
             (token, project_id, key_id, display_name, email, created_at, expires_at,
-             breaker_floor_usd, ceiling_usd_day, call_cap),
+             breaker_floor_usd, ceiling_usd_day, call_cap, db.hash_key(capability)),
         )
         conn.commit()
 
@@ -322,6 +331,7 @@ def create(
              project_id, ttl_s, call_cap, ceiling_usd_day)
     return Session(
         token=token, project_id=project_id, key_id=key_id, meter_key=raw_key,
+        capability=capability,
         display_name=display_name, email=email, created_at=created_at,
         expires_at=expires_at, breaker_floor_usd=breaker_floor_usd,
         ceiling_usd_day=ceiling_usd_day, call_cap=call_cap, calls_used=0,
@@ -343,6 +353,36 @@ def resolve(token: str) -> Session | None:
             "SELECT * FROM judge_sessions WHERE token = ?", (token,)
         ).fetchone()
     return _row_to_session(row) if row else None
+
+
+def capability_matches(token: str, capability: str | None) -> bool:
+    """Whether ``capability`` is the money capability issued with session ``token``.
+
+    PROPOSALS.md B20. The session token is script-readable on purpose — the console sends
+    it to another origin in `X-Judge-Session`, where a cookie would not go — and B20's
+    finding was that the comment justifying that undersold what the token reaches: the
+    credential vault is keyed by it, and `/judge/mandate` uses it to act with the judge's
+    own Prava *merchant* key. It authorises charges against a real card.
+
+    So the money routes want a second factor that JavaScript never sees. This one rides an
+    httpOnly cookie on the proxy's own origin, and only its SHA-256 is stored.
+
+    A session minted before this column existed has ``capability_hash`` NULL and cannot
+    spend. Failing closed is right here and costs a judge one click to start a new
+    session — the alternative is a grandfather clause on the exact routes that move money.
+    """
+    if not token or not capability:
+        return False
+    conn = db.connect()
+    with _lock:
+        row = conn.execute(
+            "SELECT capability_hash FROM judge_sessions WHERE token = ?", (token,)
+        ).fetchone()
+    stored = dict(row).get("capability_hash") if row else None
+    if not stored:
+        return False
+    # Constant time: this is a bearer secret compared on every spend attempt.
+    return secrets.compare_digest(str(stored), db.hash_key(capability))
 
 
 def session_for_project(project_id: str) -> Session | None:
